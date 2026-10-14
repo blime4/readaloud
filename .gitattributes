@@ -1,0 +1,14 @@
+# 批处理必须是 CRLF，否则 cmd 解析中文与 goto 会出问题
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 其余统一 LF
+*.py   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.html text eol=lf
+
+# 二进制
+*.mp3 binary
+*.ico binary
+*.png binary

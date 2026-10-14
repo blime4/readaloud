@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReadAloud · 朗读工作台</title>
+<style>
+  :root{
+    --bg:#f5f6fa; --panel:#ffffff; --panel-2:#fbfbfd; --line:#e6e8f0;
+    --txt:#1c2030; --txt-2:#5b6178; --txt-3:#949bb3;
+    --accent:#5b5bd6; --accent-2:#7c7cf0; --accent-soft:#eeeefc;
+    --ok:#0f9d6a; --warn:#d98324; --danger:#d94a5a;
+    --shadow:0 1px 2px rgba(28,32,48,.05), 0 8px 24px rgba(28,32,48,.06);
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--txt);
+    font:14px/1.6 "Microsoft YaHei UI","Segoe UI",-apple-system,"PingFang SC",sans-serif;
+    display:flex; flex-direction:column;
+  }
+  header{
+    display:flex; align-items:center; gap:14px; padding:12px 20px;
+    background:var(--panel); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:20;
+  }
+  .logo{display:flex; align-items:center; gap:9px; font-weight:700; font-size:16px; letter-spacing:.2px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--txt-3);transition:.3s;flex:none}
+  .dot.on{background:var(--ok); box-shadow:0 0 0 4px rgba(15,157,106,.15)}
+  .dot.off{background:var(--danger); box-shadow:0 0 0 4px rgba(217,74,90,.15)}
+  .dot.wait{background:var(--warn); animation:pulse 1.2s ease-in-out infinite}
+  @keyframes pulse{50%{opacity:.35}}
+  .status{font-size:12px;color:var(--txt-3);display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  .status b{color:var(--txt-2);font-weight:600}
+  .grow{flex:1}
+  main{flex:1; display:grid; grid-template-columns:minmax(360px,1fr) minmax(320px,420px); gap:16px; padding:16px 20px 24px; min-height:0}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); display:flex; flex-direction:column; min-height:0; overflow:hidden}
+  .card h2{margin:0;padding:12px 16px;font-size:13px;font-weight:600;color:var(--txt-2);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
+  .card h2 .sub{font-weight:400;color:var(--txt-3);font-size:12px}
+  textarea{
+    flex:1; min-height:220px; border:0; outline:0; resize:none; padding:14px 16px;
+    font:14px/1.85 "Microsoft YaHei UI","Segoe UI",sans-serif; color:var(--txt); background:transparent;
+  }
+  .toolbar{display:flex; flex-wrap:wrap; gap:8px; padding:10px 14px; border-top:1px solid var(--line); background:var(--panel-2)}
+  button{
+    font:inherit; cursor:pointer; border:1px solid var(--line); background:#fff; color:var(--txt);
+    padding:7px 13px; border-radius:10px; transition:.15s; display:inline-flex; align-items:center; gap:6px;
+  }
+  button:hover{border-color:#c9ccdd; background:#fafaff}
+  button:active{transform:translateY(1px)}
+  button.primary{background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600}
+  button.primary:hover{background:var(--accent-2)}
+  button.ghost{background:transparent; border-color:transparent; color:var(--txt-2)}
+  button.ghost:hover{background:var(--accent-soft); color:var(--accent)}
+  button:disabled{opacity:.45; cursor:not-allowed}
+  a.btn{
+    display:inline-flex;align-items:center;gap:7px;text-decoration:none;font:inherit;cursor:pointer;
+    padding:9px 16px;border-radius:10px;border:1px solid var(--line);background:#fff;color:var(--txt);transition:.15s;
+  }
+  a.btn:hover{border-color:#c9ccdd;background:#fafaff}
+  a.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  a.btn.primary:hover{background:var(--accent-2)}
+  .chip{padding:5px 11px; border-radius:999px; font-size:12px; background:var(--accent-soft); color:var(--accent); border:1px solid #e0e0fa;white-space:nowrap}
+  .chip.gray{background:var(--panel-2);color:var(--txt-3);border-color:var(--line)}
+  .chip.ok{background:#e8f7f0;color:#0b7a53;border-color:#bfe8d5}
+  .row{display:flex; align-items:center; gap:9px; padding:9px 16px; border-bottom:1px solid var(--line)}
+  .row:last-child{border-bottom:0}
+  .row label{width:52px; color:var(--txt-2); font-size:12.5px; flex:none}
+  select,input[type=text]{font:inherit; padding:6px 9px; border:1px solid var(--line); border-radius:9px; background:#fff; color:var(--txt); outline:0; min-width:0}
+  select:focus,input:focus{border-color:var(--accent-2); box-shadow:0 0 0 3px var(--accent-soft)}
+  select{flex:1}
+  input[type=range]{flex:1; accent-color:var(--accent)}
+  .val{width:52px; text-align:right; font-size:12px; color:var(--txt-2); font-variant-numeric:tabular-nums}
+  .seglist{flex:1; overflow-y:auto; padding:10px 12px}
+  .seg{
+    padding:9px 12px; margin-bottom:7px; border-radius:10px; color:var(--txt-2);
+    border:1px solid transparent; cursor:pointer; transition:.15s; font-size:13.5px; line-height:1.7;
+  }
+  .seg:hover{background:var(--panel-2); border-color:var(--line)}
+  .seg.active{background:var(--accent-soft); border-color:#d5d5f7; color:var(--accent); font-weight:600}
+  .seg.done{opacity:.5}
+  .seg .no{display:inline-block; width:20px; color:var(--txt-3); font-size:11px; font-weight:400}
+  .empty{color:var(--txt-3); text-align:center; padding:36px 20px; font-size:13px}
+  .nowline{display:flex; align-items:center; gap:10px; padding:10px 14px; background:var(--panel-2); border-bottom:1px solid var(--line)}
+  .bar{flex:1; height:6px; border-radius:99px; background:#e9eaf3; overflow:hidden}
+  .bar i{display:block; height:100%; width:0; background:linear-gradient(90deg,var(--accent),var(--accent-2)); transition:width .3s}
+  .toast{
+    position:fixed; left:50%; bottom:26px; transform:translateX(-50%) translateY(20px);
+    background:#1c2030; color:#fff; padding:10px 18px; border-radius:11px; font-size:13px;
+    opacity:0; pointer-events:none; transition:.25s; z-index:60; max-width:70vw;
+  }
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
+
+  /* ---------- 连接向导 ---------- */
+  .connect{display:none; padding:18px 20px 0}
+  .connect.show{display:block}
+  .ccard{
+    background:var(--panel); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow);
+    padding:20px 22px; display:flex; gap:18px; align-items:flex-start;
+  }
+  .ccard.warn{border-color:#f0c9a0; background:#fffdf9}
+  .ccard.bad{border-color:#f09595; background:#fffafa}
+  .cicon{font-size:30px;line-height:1;flex:none}
+  .cbody{flex:1;min-width:0}
+  .cbody h3{margin:0 0 6px;font-size:15px}
+  .cbody p{margin:0 0 10px;color:var(--txt-2);font-size:13px;line-height:1.75}
+  .cbody ol{margin:6px 0 10px;padding-left:20px;color:var(--txt-2);font-size:13px;line-height:1.85}
+  .cbody code{background:var(--panel-2); border:1px solid var(--line); border-radius:6px; padding:1px 6px; font-size:12px}
+  .cactions{display:flex;flex-wrap:wrap;gap:9px;align-items:center}
+  .hint{font-size:12px;color:var(--txt-3);line-height:1.7}
+  .spin-sm{width:14px;height:14px;border-radius:50%;border:2px solid #ddddee;border-top-color:var(--accent);animation:sp .7s linear infinite;display:inline-block;vertical-align:-2px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  details.help{padding:0 16px 12px; font-size:12.5px; color:var(--txt-2)}
+  details.help summary{cursor:pointer; padding:11px 0; color:var(--txt-2); font-weight:600; outline:0}
+  details.help code{background:var(--panel-2); border:1px solid var(--line); border-radius:6px; padding:1px 6px; font-size:12px}
+  details.help li{margin:5px 0}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12.5px;color:var(--txt-2);padding:2px 0 8px}
+  .kv b{color:var(--txt-3);font-weight:400}
+  .mlist{display:flex;flex-direction:column;gap:6px;padding:0 0 10px}
+  .mitem{border:1px solid var(--line);border-radius:9px;padding:7px 10px;font-size:12.5px;display:flex;gap:8px;align-items:center;background:var(--panel-2)}
+  .mitem .nm{font-weight:600;color:var(--txt)}
+  .mitem .mt{color:var(--txt-3);font-size:11.5px}
+  .overlay{
+    position:fixed; inset:0; background:rgba(245,246,250,.72); backdrop-filter:blur(2px);
+    display:none; align-items:center; justify-content:center; z-index:50;
+  }
+  .overlay.show{display:flex}
+  .spin{width:34px;height:34px;border-radius:50%;border:3px solid #ddddee;border-top-color:var(--accent);animation:sp .8s linear infinite;margin:0 auto 12px}
+  .overlay .box{background:#fff;padding:22px 30px;border-radius:16px;box-shadow:var(--shadow);text-align:center;font-size:13.5px;color:var(--txt-2)}
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:#d7d9e6;border-radius:9px;border:2px solid transparent;background-clip:content-box}
+  @media(max-width:900px){main{grid-template-columns:1fr;grid-template-rows:1fr 1fr}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">🔊 ReadAloud <span class="dot" id="dot"></span></div>
+  <div class="status">
+    <span id="stServer">正在连接本机引擎…</span>
+    <span id="stModel"></span>
+    <span id="stClient"></span>
+  </div>
+  <div class="grow"></div>
+  <span class="chip gray" id="chipMode" title="当前页面从哪里来 / 引擎在哪里">—</span>
+</header>
+
+<!-- 连接向导：只有在连不上本机引擎时才出现 -->
+<div class="connect" id="connect">
+  <div class="ccard" id="ccard">
+    <div class="cicon" id="cxIcon">🔌</div>
+    <div class="cbody">
+      <h3 id="cxTitle">连接本机朗读引擎</h3>
+      <div id="cxDesc"></div>
+      <div class="cactions" id="cxActions"></div>
+    </div>
+  </div>
+</div>
+
+<main>
+  <!-- 左：文稿 -->
+  <section class="card">
+    <h2>文稿 <span class="sub" id="stCount">0 字</span>
+      <span class="grow"></span>
+      <button class="ghost" id="btnUndo" title="撤销上一步文本变更">↶ 撤销</button>
+    </h2>
+    <textarea id="txt" placeholder="把要朗读的内容粘进来（支持 Markdown，会自动清理标题/表格/代码/链接）…
+
+也可以直接按快捷键：复制任意位置的一段文字 → 按 Ctrl+Alt+R，这里会自动开始朗读。"></textarea>
+    <div class="toolbar">
+      <button class="primary" id="btnPlay">▶ 朗读</button>
+      <button id="btnPause">⏸ 暂停</button>
+      <button id="btnStop">⏹ 停止</button>
+      <button class="ghost" id="btnSum">✨ 总结</button>
+      <button class="ghost" id="btnPol">🎭 润色</button>
+      <button class="ghost" id="btnClear">清空</button>
+    </div>
+    <details class="help">
+      <summary>怎么在别处用？（Obsidian / 快捷键 / 接口）</summary>
+      <ul>
+        <li><b>Obsidian</b>：设置 → 第三方插件 → 启用 <code>ReadAloud Bridge</code>，选中文字后按 <code>Ctrl+Alt+P</code> 朗读，<code>Ctrl+Alt+S</code> 总结朗读。</li>
+        <li><b>任意软件</b>：复制文字 → <code>Ctrl+Alt+R</code>（朗读剪贴板）/ <code>Ctrl+Alt+S</code>（总结剪贴板再朗读）。页面开着时会直接在这里播出。</li>
+        <li><b>URL 直达</b>：<code>?text=要读的内容&auto=1</code>，任何能打开链接的程序都能用。</li>
+        <li><b>纯音频接口</b>：<code>/api/tts?text=你好</code> 直接返回 MP3，可塞进播放器或下载。</li>
+      </ul>
+    </details>
+  </section>
+
+  <!-- 右：控制 + 逐句 -->
+  <section class="card">
+    <h2>音色与节奏 <span class="grow"></span>
+      <span class="chip gray" id="chipHost" title="正在为你服务的这台电脑">—</span>
+    </h2>
+    <div class="row">
+      <label>音色</label>
+      <select id="voice"></select>
+    </div>
+    <div class="row">
+      <label>模式</label>
+      <select id="mode">
+        <option value="none">原文直读</option>
+        <option value="polish">AI 润色后朗读</option>
+        <option value="summarize">AI 总结后朗读</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>模型</label>
+      <select id="model" title="列出的是你当前电脑上 Ollama 已装的模型"></select>
+      <button class="ghost" id="btnQuality" title="切到这台电脑上更大的模型，更慢但更好">↑ 升配</button>
+    </div>
+    <div class="row"><label>语速</label><input type="range" id="rate" min="-40" max="50" step="2" value="8"><span class="val" id="rateV">+8%</span></div>
+    <div class="row"><label>音调</label><input type="range" id="pitch" min="-30" max="30" step="2" value="0"><span class="val" id="pitchV">+0Hz</span></div>
+    <div class="row"><label>音量</label><input type="range" id="vol" min="-30" max="30" step="2" value="0"><span class="val" id="volV">+0%</span></div>
+    <div class="nowline">
+      <span style="font-size:12px;color:var(--txt-3)" id="nowIdx">0 / 0</span>
+      <div class="bar"><i id="bar"></i></div>
+      <span style="font-size:12px;color:var(--txt-3)" id="nowNote"></span>
+    </div>
+    <div class="seglist" id="seglist">
+      <div class="empty">点「朗读」后，这里会显示逐句稿，并跟着声音高亮。</div>
+    </div>
+    <details class="help" style="border-top:1px solid var(--line)">
+      <summary>本机引擎信息</summary>
+      <div class="kv" id="hostKv"></div>
+      <div class="mlist" id="modelList"></div>
+      <div class="hint" id="engineHint"></div>
+    </details>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+<div class="overlay" id="overlay"><div class="box"><div class="spin"></div><span id="ovText">AI 正在处理…</span></div></div>
+
+<script>
+/* ============================================================================
+   ReadAloud 工作台
+   同一份页面既能被本地引擎托管（http://127.0.0.1:8756/），
+   也能放在 GitHub Pages 上（https://<user>.github.io/readaloud/），
+   后者会跨源去连本机引擎 —— 靠 Local Network Access 授权放行。
+   ========================================================================== */
+const $ = s => document.querySelector(s);
+const S = {
+  segments: [], idx: -1, playing: false, audio: null, style: null,
+  history: [], busy: false, preload: [], quality: false,
+};
+
+const GH = 'https://github.com/blime4/readaloud';   // 引擎包 / 说明文档
+const DEFAULT_PORT = '8756';
+let API = '';              // 空串 = 与页面同源；否则是 http://127.0.0.1:<port>
+let ONLINE = false;
+let HOST_INFO = null;
+
+const fmt = n => (n > 0 ? '+' : '') + n;
+const port = () => localStorage.getItem('ra.port') || DEFAULT_PORT;
+
+/* ---------- 提示 ---------- */
+let toastTimer;
+function toast(msg, ms = 2200) {
+  $('#toast').textContent = msg;
+  $('#toast').classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $('#toast').classList.remove('show'), ms);
+}
+function overlay(show, text) {
+  $('#ovText').textContent = text || 'AI 正在处理…';
+  $('#overlay').classList.toggle('show', show);
+}
+function setDot(cls) { $('#dot').className = 'dot ' + cls; }
+
+/* ---------- 同源 / 跨源判定 ---------- */
+const isLocalHost = () => location.hostname === '127.0.0.1' || location.hostname === 'localhost' || location.hostname === '[::1]';
+
+function candidateBases() {
+  if (isLocalHost()) return [''];                       // 引擎自己托管的页面，同源最省事
+  const p = port();
+  return [`http://127.0.0.1:${p}`, `http://localhost:${p}`];
+}
+
+/* ---------- Local Network Access 权限 ---------- */
+/* Chrome 142+ 起，公网页面（如 GitHub Pages）访问 127.0.0.1 需要用户授权。
+   不同版本权限名不一样（loopback-network / local-network-access），都试一遍。 */
+async function permissionState() {
+  if (isLocalHost()) return { name: null, state: 'same-origin' };
+  if (!navigator.permissions || !navigator.permissions.query) return { name: null, state: 'unknown' };
+  for (const name of ['loopback-network', 'local-network-access']) {
+    try {
+      const st = await navigator.permissions.query({ name });
+      return { name, state: st.state };
+    } catch (e) { /* 该浏览器不认识这个权限名，换下一个 */ }
+  }
+  return { name: null, state: 'unknown' };   // 老版本浏览器：没有 LNA，直接试即可
+}
+
+/* ---------- 探活 ---------- */
+async function ping(base, timeout = 3000) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), timeout);
+  try {
+    const r = await fetch(base + '/api/ping', { cache: 'no-store', signal: ac.signal });
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d && d.app === 'readaloud' ? d : null;
+  } catch (e) {
+    return null;
+  } finally { clearTimeout(t); }
+}
+
+/* ---------- 连接主流程 ---------- */
+let connecting = false;
+async function connect({ manual = false } = {}) {
+  if (connecting) return false;
+  connecting = true;
+  setDot('wait');
+  $('#stServer').textContent = '正在连接本机引擎…';
+  $('#cxActions').innerHTML = '<span class="hint"><span class="spin-sm"></span> 正在探测…</span>';
+
+  let info = null, used = null;
+  for (const base of candidateBases()) {
+    info = await ping(base);
+    if (info) { used = base; break; }
+  }
+
+  connecting = false;
+  if (!info) { ONLINE = false; await showOffline(); return false; }
+
+  API = used;
+  ONLINE = true;
+  $('#connect').classList.remove('show');
+  setDot('on');
+  $('#chipMode').textContent = isLocalHost() ? '本地引擎模式' : 'GitHub Pages · 已连本机';
+  $('#chipMode').className = 'chip ok';
+  await loadAll();
+  return true;
+}
+
+/* ---------- 连不上时的引导 ---------- */
+async function showOffline() {
+  const perm = await permissionState();
+  setDot('off');
+  $('#stServer').textContent = '未连接本机引擎';
+  $('#chipMode').textContent = isLocalHost() ? '本地引擎未启动' : 'GitHub Pages · 未连本机';
+  $('#chipMode').className = 'chip gray';
+  $('#connect').classList.add('show');
+  $('#cxActions').innerHTML = '';
+  $('#ccard').className = 'ccard';
+  $('#cxIcon').textContent = '🔌';
+
+  const addBtn = (label, cls, href, onclick) => {
+    const el = document.createElement(href ? 'a' : 'button');
+    el.className = cls;
+    el.textContent = label;
+    if (href) { el.href = href; el.target = '_blank'; el.rel = 'noopener'; }
+    if (onclick) el.onclick = onclick;
+    $('#cxActions').appendChild(el);
+    return el;
+  };
+
+  /* 情况一：浏览器把本地网络访问拦下了 */
+  if (perm.state === 'denied') {
+    $('#ccard').className = 'ccard bad';
+    $('#cxIcon').textContent = '🚫';
+    $('#cxTitle').textContent = '浏览器拦住了「本地网络访问」';
+    $('#cxDesc').innerHTML =
+      '这个页面在 GitHub Pages 上，要读你电脑里的引擎，属于「公网 → 本机」的请求，' +
+      'Chrome 默认会拦一次。你已经把它拒绝了，手动放行一次即可：<ol>' +
+      '<li>点地址栏左侧的 <b>⚙ / 🔒 图标</b> → <b>网站设置</b></li>' +
+      '<li>找到 <b>本地网络访问</b>（Local network access），改成 <b>允许</b></li>' +
+      '<li>回到本页 <b>刷新</b>，就会自动连上</li></ol>';
+    addBtn('我已放行，重试', 'btn primary', null, () => connect({ manual: true }));
+    addBtn('直接在本地打开引擎页面', 'btn', `http://127.0.0.1:${port()}/`);
+    return;
+  }
+
+  /* 情况二：权限还没授权过 —— 让用户点一下，触发授权弹窗 */
+  if (perm.state === 'prompt' || perm.state === 'unknown') {
+    $('#ccard').className = 'ccard warn';
+    $('#cxIcon').textContent = '🔐';
+    $('#cxTitle').textContent = '点一下，连上你这台电脑的朗读引擎';
+    $('#cxDesc').innerHTML =
+      '页面在云端（GitHub Pages），**朗读与 AI 全部在你本机运行**，文字不出你的电脑。' +
+      '首次连接浏览器会问一次是否允许访问本地网络，选「允许」即可。' +
+      '<div class="hint" style="margin-top:8px">如果你还没装过本机引擎，先看下面的第 2 步。</div>';
+    addBtn('🔐 连接本机引擎', 'btn primary', null, async () => {
+      const ok = await connect({ manual: true });
+      if (!ok) await showOffline();
+    });
+    $('#cxActions').appendChild(document.createTextNode(' '));
+    addBtn('我要先安装引擎', 'btn', null, () => installGuide());
+    return;
+  }
+
+  /* 情况三：权限没问题，就是引擎没在跑 */
+  $('#ccard').className = 'ccard warn';
+  $('#cxIcon').textContent = '💤';
+  $('#cxTitle').textContent = '本机朗读引擎没有运行';
+  $('#cxDesc').innerHTML =
+    '页面已经连得上权限，只是你电脑上的引擎进程没启动。' +
+    '<div class="hint" style="margin-top:8px">' +
+    '装过引擎的话点「一键启动」；没装过点「怎么安装」。</div>';
+  const btn = addBtn('▶ 一键启动本机引擎', 'btn primary', null, async () => {
+    btn.textContent = '正在唤起…';
+    location.href = 'readaloud://start';           // 自定义协议 → 唤起本地 launcher
+    let tries = 0;
+    const timer = setInterval(async () => {
+      tries++;
+      const ok = await connect({ manual: true });
+      if (ok) { clearInterval(timer); toast('引擎已启动 ✓'); return; }
+      if (tries >= 12) {
+        clearInterval(timer);
+        btn.textContent = '▶ 一键启动本机引擎';
+        toast('没能自动唤起，请手动运行 start-server.bat', 5000);
+      }
+    }, 2000);
+  });
+  addBtn('怎么安装', 'btn', null, () => installGuide());
+  addBtn('重试', 'btn', null, () => connect({ manual: true }));
+}
+
+function installGuide() {
+  $('#ccard').className = 'ccard warn';
+  $('#cxIcon').textContent = '📦';
+  $('#cxTitle').textContent = '安装本机引擎（只需一次）';
+  $('#cxDesc').innerHTML =
+    '<ol>' +
+    '<li>下载引擎包：<a href="' + GH + '/archive/refs/heads/main.zip" target="_blank" rel="noopener">main.zip</a>，解压到任意目录</li>' +
+    '<li>双击 <code>install.bat</code>（自动建 Python 环境、装依赖、注册 <code>readaloud://</code> 协议）</li>' +
+    '<li>之后回到本页，点「一键启动」即可 —— 以后全程在浏览器里操作</li>' +
+    '</ol>' +
+    '<div class="hint">依赖只有三个：Python 3.10+、<code>edge-tts</code>、<code>flask</code>。' +
+    'AI 功能需要本机装了 <a href="https://ollama.com" target="_blank" rel="noopener">Ollama</a>（没有也能朗读，只是总结/润色不可用）。</div>';
+  $('#cxActions').innerHTML = '';
+  const a = document.createElement('a');
+  a.className = 'btn primary'; a.target = '_blank'; a.rel = 'noopener';
+  a.href = GH + '/archive/refs/heads/main.zip';
+  a.textContent = '⬇ 下载引擎包';
+  $('#cxActions').appendChild(a);
+  const b = document.createElement('button');
+  b.className = 'btn'; b.textContent = '← 返回';
+  b.onclick = () => showOffline();
+  $('#cxActions').appendChild(b);
+}
+
+/* ---------- 连接成功后加载数据 ---------- */
+async function loadAll() {
+  await Promise.all([loadHealth(), loadVoices(), loadModels(), loadHost()]);
+  subscribeEvents();
+  applyUrlParams();
+}
+
+async function loadHealth() {
+  try {
+    const h = await (await fetch(API + '/api/health')).json();
+    $('#stServer').textContent = `引擎 v${h.version} 已连接 · ${h.voices} 个音色`;
+    $('#stModel').textContent = h.ollama ? `Ollama 就绪` : 'Ollama 未启动（无法总结/润色）';
+    $('#stClient').textContent = `${h.clients} 个播放端`;
+    if (h.config) {
+      if (h.config.rate) { $('#rate').value = parseInt(h.config.rate) || 0; $('#rateV').textContent = h.config.rate; }
+      if (h.config.pitch) { $('#pitch').value = parseInt(h.config.pitch) || 0; $('#pitchV').textContent = h.config.pitch; }
+      if (h.config.volume) { $('#vol').value = parseInt(h.config.volume) || 0; $('#volV').textContent = h.config.volume; }
+    }
+  } catch (e) { /* 交给下一轮轮询 */ }
+}
+
+async function loadVoices() {
+  try {
+    const vs = await (await fetch(API + '/api/voices')).json();
+    const g = { 'zh-CN': '中文（大陆）', 'zh-HK': '粤语', 'zh-TW': '中文（台湾）', 'en-US': '英语（美）', 'ja-JP': '日语' };
+    const groups = {};
+    vs.forEach(v => { (groups[v.locale] = groups[v.locale] || []).push(v); });
+    const sel = $('#voice'); sel.innerHTML = '';
+    Object.keys(g).forEach(loc => {
+      if (!groups[loc]) return;
+      const og = document.createElement('optgroup'); og.label = g[loc];
+      groups[loc].forEach(v => {
+        const o = document.createElement('option');
+        o.value = v.name;
+        o.textContent = `${v.friendly} · ${v.gender === 'Female' ? '女声' : '男声'}${v.tags && v.tags.length ? ' · ' + v.tags.join('/') : ''}`;
+        og.appendChild(o);
+      });
+      sel.appendChild(og);
+    });
+    const pref = sel.querySelector('option[value="zh-CN-XiaoxiaoNeural"]') || sel.querySelector('option[value="zh-CN-YunxiNeural"]');
+    if (pref) pref.selected = true;
+  } catch (e) { /* 忽略 */ }
+}
+
+/* 模型下拉 = 当前这台电脑上 Ollama 里实际装了什么 */
+async function loadModels() {
+  try {
+    const d = await (await fetch(API + '/api/models')).json();
+    const ms = $('#model'); ms.innerHTML = '';
+    (d.models || []).forEach(m => {
+      const o = document.createElement('option');
+      o.value = m.name;
+      o.textContent = `${m.name}（${m.size_gb}GB${m.params ? ' · ' + m.params : ''}）`;
+      o.dataset.size = m.size_gb;
+      ms.appendChild(o);
+    });
+    if (d.quality_model && !(d.models || []).some(m => m.name === d.quality_model)) {
+      S.qualityModel = (d.models || []).length ? (d.models || [])[(d.models || []).length - 1].name : null;
+    } else {
+      S.qualityModel = d.quality_model;
+    }
+    const pick = (d.models || []).find(m => m.name === d.small_model) || (d.models || [])[0];
+    if (pick) ms.value = pick.name;
+  } catch (e) { /* 忽略 */ }
+}
+
+/* 当前电脑信息 —— 就是"检测我当前电脑"那部分 */
+async function loadHost() {
+  try {
+    const d = await (await fetch(API + '/api/engine')).json();
+    HOST_INFO = d;
+    const h = d.host || {};
+    $('#chipHost').textContent = (h.hostname || '?') + (h.gpus && h.gpus[0] ? ' · ' + shortGpu(h.gpus[0].name) : '');
+    const kv = [
+      ['主机', h.hostname || '未知'],
+      ['系统', h.os || ''],
+      ['CPU', (h.cores ? h.cores + ' 核 · ' : '') + (h.cpu || '未知')],
+      ['内存', h.ram_gb ? h.ram_gb + ' GB' : '未知'],
+      ['显卡', (h.gpus || []).length ? h.gpus.map(g => `${g.name}（${g.vram}${g.driver ? ' · 驱动 ' + g.driver : ''}）`).join('；') : '未检测到 NVIDIA 显卡'],
+      ['Ollama', (d.ollama.version || '未启动') + (d.ollama.url ? ' @ ' + d.ollama.url : '')],
+      ['引擎', `v${d.engine.version} · 端口 ${d.engine.port}`],
+    ];
+    $('#hostKv').innerHTML = kv.map(([k, v]) => `<b>${k}</b><span>${esc(String(v))}</span>`).join('');
+    const ms = d.ollama.models || [];
+    $('#modelList').innerHTML = ms.length
+      ? ms.map(m => `<div class="mitem"><span class="nm">${esc(m.name)}</span>
+           <span class="mt">${m.size_gb}GB${m.params ? ' · ' + m.params : ''}${m.quant ? ' · ' + m.quant : ''}</span>
+           ${m.caps && m.caps.includes('thinking') ? '<span class="mt">· 会思考</span>' : ''}</div>`).join('')
+      : '<div class="hint">这台电脑的 Ollama 里还没有模型。装一个即可用于总结/润色，例如：<code>ollama pull qwen3:4b</code></div>';
+    $('#engineHint').innerHTML = ms.length
+      ? '这些模型都来自你当前这台电脑，选哪个就用哪个。'
+      : '没有模型时朗读照常可用，只有「总结 / 润色」需要模型。';
+  } catch (e) { /* 忽略 */ }
+}
+
+const shortGpu = n => String(n || '').replace(/NVIDIA\s*/i, '').replace(/GeForce\s*/i, '').trim();
+const esc = s => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+/* ---------- 剪贴板 / 热键广播 ---------- */
+let es = null;
+function subscribeEvents() {
+  if (es) { try { es.close(); } catch (e) {} }
+  try {
+    es = new EventSource(API + '/api/events');
+    es.addEventListener('speak', ev => {
+      const d = JSON.parse(ev.data);
+      if (d.stop) { stopPlayback(); toast('已停止（来自快捷键）'); return; }
+      if (!d.text) return;
+      pushHistory($('#txt').value);
+      $('#txt').value = d.text;
+      if (d.ai) $('#mode').value = d.ai;
+      if (d.voice) $('#voice').value = d.voice;
+      if (d.rate) { $('#rate').value = parseInt(d.rate) || 0; $('#rateV').textContent = d.rate; }
+      if (d.pitch) { $('#pitch').value = parseInt(d.pitch) || 0; $('#pitchV').textContent = d.pitch; }
+      count();
+      toast('收到外部朗读请求');
+      if (d.auto !== false) play();
+    });
+    es.onerror = () => { $('#stClient').textContent = '连接中断，重连中…'; };
+  } catch (e) { /* 忽略 */ }
+}
+
+/* ---------- URL 参数 ---------- */
+function applyUrlParams() {
+  const p = new URLSearchParams(location.search);
+  if (p.get('text')) {
+    $('#txt').value = p.get('text');
+    if (p.get('ai')) $('#mode').value = p.get('ai');
+    if (p.get('voice')) $('#voice').value = p.get('voice');
+    count();
+    if (p.get('auto') !== '0') setTimeout(play, 300);
+  }
+}
+
+/* ---------- 文本 ---------- */
+function pushHistory(v) { S.history.push(v); if (S.history.length > 30) S.history.shift(); }
+function count() {
+  const n = $('#txt').value.replace(/\s/g, '').length;
+  $('#stCount').textContent = `${n} 字`;
+  const sec = Math.round(n / (4.6 * (1 + (parseInt($('#rate').value) || 0) / 100)));
+  $('#chipTime') && ($('#chipTime').textContent = n ? `约 ${Math.floor(sec / 60)}分${sec % 60}秒` : '—');
+  updateBtns();
+}
+function updateBtns() {
+  const has = $('#txt').value.trim().length > 0;
+  ['#btnSum', '#btnPol'].forEach(s => $(s).disabled = !has);
+  $('#btnPlay').disabled = !has;
+}
+
+/* ---------- 渲染逐句 ---------- */
+function renderSegs() {
+  const box = $('#seglist');
+  if (!S.segments.length) { box.innerHTML = '<div class="empty">没有可分句的内容。</div>'; return; }
+  box.innerHTML = S.segments.map((s, i) =>
+    `<div class="seg" data-i="${i}"><span class="no">${i + 1}</span>${esc(s)}</div>`).join('');
+  box.querySelectorAll('.seg').forEach(el => el.onclick = () => {
+    S.idx = +el.dataset.i - 1; next();
+  });
+  highlight();
+}
+function highlight() {
+  const box = $('#seglist');
+  box.querySelectorAll('.seg').forEach(el => {
+    const i = +el.dataset.i;
+    el.classList.toggle('active', i === S.idx);
+    el.classList.toggle('done', i < S.idx);
+  });
+  const act = box.querySelector('.seg.active');
+  if (act) act.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  $('#nowIdx').textContent = `${Math.max(S.idx + 1, 0)} / ${S.segments.length}`;
+  $('#bar').style.width = S.segments.length ? ((S.idx + 1) / S.segments.length * 100) + '%' : '0';
+}
+
+/* ---------- 播放 ---------- */
+function ttsURL(text) {
+  const q = new URLSearchParams({
+    text, voice: $('#voice').value,
+    rate: S.style.rate, pitch: S.style.pitch, volume: S.style.volume,
+  });
+  return API + '/api/tts?' + q.toString();
+}
+function preload(i) {
+  if (i >= S.segments.length) return;
+  const slot = i % 2;
+  const a = S.preload[slot] || (S.preload[slot] = new Audio());
+  a.preload = 'auto';
+  a.src = ttsURL(S.segments[i]);
+}
+function next() {
+  S.idx++;
+  if (S.idx >= S.segments.length) { finish(); return; }
+  highlight();
+  const a = S.audio || (S.audio = new Audio());
+  a.src = ttsURL(S.segments[S.idx]);
+  a.onended = () => { if (S.playing) next(); };
+  a.onerror = () => { toast('这段合成失败，跳过'); if (S.playing) next(); };
+  a.play().then(() => { S.playing = true; }).catch(() => { toast('播放被浏览器拦截，请再点一次「朗读」'); S.playing = false; });
+  preload(S.idx + 1); preload(S.idx + 2);
+}
+function finish() {
+  S.playing = false; S.idx = S.segments.length - 1; highlight();
+  toast('朗读完成 ✓');
+}
+function stopPlayback() {
+  S.playing = false;
+  if (S.audio) { S.audio.pause(); S.audio.removeAttribute('src'); }
+  S.idx = -1; highlight();
+}
+async function play() {
+  if (S.busy) return;
+  const text = $('#txt').value.trim();
+  if (!text) return;
+  if (!ONLINE) { toast('还没连上本机引擎'); await connect({ manual: true }); return; }
+  // 正在播 → 暂停
+  if (S.playing && S.audio) { S.audio.pause(); S.playing = false; toast('已暂停'); return; }
+  // 暂停中 → 就地继续
+  if (S.segments.length && S.idx >= 0 && S.idx < S.segments.length && S.audio && S.audio.paused) {
+    S.playing = true;
+    S.audio.play().catch(() => { S.playing = false; toast('继续失败，请重新点朗读'); });
+    return;
+  }
+  S.busy = true;
+  const mode = $('#mode').value;
+  if (mode !== 'none') overlay(true, mode === 'summarize' ? '小模型正在压缩成朗读稿…' : '小模型正在打磨润色…');
+  try {
+    const r = await fetch(API + '/api/prepare', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text, ai: mode, model: $('#model').value, quality: S.quality || false,
+        voice: $('#voice').value, rate: $('#rateV').textContent,
+        pitch: $('#pitchV').textContent, volume: $('#volV').textContent,
+      }),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || '处理失败');
+    S.segments = d.segments; S.idx = -1;
+    S.style = d.style;
+    if (d.ai_note) toast(d.ai_note, 8000);
+    if (d.ai !== 'none') {
+      // AI 给的语速/音调建议同步到滑块，直观看到"打磨后的音色"
+      $('#rate').value = parseInt(S.style.rate) || 0; $('#rateV').textContent = S.style.rate;
+      $('#pitch').value = parseInt(S.style.pitch) || 0; $('#pitchV').textContent = S.style.pitch;
+      $('#nowNote').textContent = S.style.note || '';
+      pushHistory(text); $('#txt').value = d.text; count();
+      toast(`已由 ${d.model} ${d.ai === 'summarize' ? '总结' : '润色'}：${d.count} 句`);
+    }
+    renderSegs();
+    S.playing = true; next();
+  } catch (e) {
+    toast('出错了：' + e.message, 3200);
+  } finally { S.busy = false; overlay(false); }
+}
+
+/* ---------- AI 直接改写文稿 ---------- */
+async function aiInto(mode) {
+  const text = $('#txt').value.trim();
+  if (!text || S.busy) return;
+  if (!ONLINE) { toast('还没连上本机引擎'); return; }
+  S.busy = true;
+  overlay(true, mode === 'summarize' ? '小模型正在总结…' : '小模型正在润色…');
+  try {
+    if (mode === 'summarize') {
+      const r = await fetch(API + '/api/ai', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, mode, model: $('#model').value, quality: S.quality || false, stream: true }),
+      });
+      if (!r.ok) throw new Error('服务返回 ' + r.status);
+      pushHistory($('#txt').value);
+      $('#txt').value = '';
+      const rd = r.body.getReader(), dec = new TextDecoder();
+      overlay(false);
+      let acc = '';
+      while (true) {
+        const { value, done } = await rd.read();
+        if (done) break;
+        acc += dec.decode(value, { stream: true });
+        $('#txt').value = acc; count();
+      }
+      toast('总结完成，可直接点朗读');
+    } else {
+      const r = await fetch(API + '/api/ai', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, mode, model: $('#model').value, quality: S.quality || false }),
+      });
+      const d = await r.json();
+      if (!d.ok) throw new Error(d.error || '润色失败');
+      pushHistory($('#txt').value);
+      $('#txt').value = d.text; count();
+      if (d.rate) { $('#rate').value = parseInt(d.rate) || 0; $('#rateV').textContent = d.rate; }
+      if (d.pitch) { $('#pitch').value = parseInt(d.pitch) || 0; $('#pitchV').textContent = d.pitch; }
+      $('#nowNote').textContent = d.note || '';
+      toast(`润色完成 · ${d.note || d.model}`);
+    }
+  } catch (e) { toast('出错了：' + e.message, 3200); }
+  finally { S.busy = false; overlay(false); }
+}
+
+/* ---------- 事件绑定 ---------- */
+$('#txt').addEventListener('input', () => { S.segments = []; S.idx = -1; count(); });
+$('#btnPlay').onclick = play;
+$('#btnPause').onclick = () => {
+  if (!S.audio) return;
+  if (S.playing) { S.audio.pause(); S.playing = false; toast('已暂停'); }
+  else { S.audio.play(); S.playing = true; toast('继续'); }
+};
+$('#btnStop').onclick = () => { stopPlayback(); toast('已停止'); };
+$('#btnSum').onclick = () => aiInto('summarize');
+$('#btnPol').onclick = () => aiInto('polish');
+$('#btnClear').onclick = () => { pushHistory($('#txt').value); $('#txt').value = ''; S.segments = []; S.idx = -1; renderSegs(); count(); };
+$('#btnUndo').onclick = () => {
+  if (!S.history.length) return toast('没有可撤销的变更');
+  $('#txt').value = S.history.pop(); S.segments = []; S.idx = -1; count(); toast('已撤销');
+};
+$('#btnQuality').onclick = () => {
+  S.quality = !S.quality;
+  $('#btnQuality').textContent = S.quality ? '↓ 标准' : '↑ 升配';
+  if (S.quality && S.qualityModel) $('#model').value = S.qualityModel;
+  toast(S.quality ? `已切到升配模型${S.qualityModel ? '：' + S.qualityModel : ''}` : '已切回小模型（更快）');
+};
+$('#rate').oninput = e => { $('#rateV').textContent = fmt(+e.target.value) + '%'; S.segments = []; count(); };
+$('#pitch').oninput = e => { $('#pitchV').textContent = fmt(+e.target.value) + 'Hz'; S.segments = []; };
+$('#vol').oninput = e => { $('#volV').textContent = fmt(+e.target.value) + '%'; S.segments = []; };
+$('#voice').onchange = () => { S.segments = []; toast('已切换音色'); };
+$('#txt').addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); play(); }
+});
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' && (e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'INPUT')) {
+    e.preventDefault(); play();
+  }
+});
+
+/* ---------- 启动 ---------- */
+async function boot() {
+  count();
+  const perm = await permissionState();
+  // 本地页面 / 已授权过 → 直接连；否则等用户点一下再连（这样才会弹授权框）
+  if (isLocalHost() || perm.state === 'granted') {
+    const ok = await connect();
+    if (!ok) await showOffline();
+  } else {
+    await showOffline();
+  }
+}
+boot();
+
+/* 定期探活：掉线自动提示，恢复自动重连 */
+setInterval(async () => {
+  if (connecting) return;
+  const info = await ping(API || candidateBases()[0]);
+  if (!info) {
+    if (ONLINE) { ONLINE = false; setDot('off'); $('#stServer').textContent = '引擎已断开'; await showOffline(); }
+  } else if (!ONLINE) {
+    await connect();
+  } else {
+    setDot('on');
+  }
+}, 15000);
+</script>
+</body>
+</html>

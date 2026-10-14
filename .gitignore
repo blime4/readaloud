@@ -1,0 +1,11 @@
+# 运行时产物（不进仓库）
+cache/
+.venv/
+__pycache__/
+*.pyc
+
+# 日志
+*.log
+
+# 页面构建产物
+node_modules/
