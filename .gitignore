@@ -4,6 +4,9 @@ cache/
 __pycache__/
 *.pyc
 
+# 本机记录：上次验证可用的 Python 解释器路径
+python.path
+
 # 日志
 *.log
 

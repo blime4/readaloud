@@ -63,19 +63,59 @@ def running(p: int) -> bool:
         return s.connect_ex(("127.0.0.1", p)) == 0
 
 
+def _usable(exe: str) -> bool:
+    """这个解释器真能跑我们的服务吗（依赖齐全）？
+
+    必须实测。一台机器上常有多个 Python，随手挑一个很可能缺 flask / edge-tts，
+    那样启动出来的进程会立刻死掉，用户只看到"点了没反应"。
+    """
+    try:
+        r = subprocess.run([exe, "-c", "import flask, edge_tts, requests"],
+                           capture_output=True, timeout=25)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _candidates() -> list:
+    out = []
+
+    def add(p):
+        if p and Path(p).exists() and str(p) not in out:
+            out.append(str(p))
+
+    env = os.environ.get("READALOUD_PYTHON")           # 1) 显式指定
+    if env:
+        add(env)
+    memo = BASE / "python.path"                        # 2) 上次验证可用的
+    if memo.exists():
+        try:
+            add(memo.read_text(encoding="utf-8").strip())
+        except Exception:
+            pass
+    for name in ("pythonw.exe", "python.exe"):         # 3) install.bat 建的工程内环境
+        add(BASE / ".venv" / "Scripts" / name)
+    exe = Path(sys.executable)                         # 4) 当前解释器
+    add(exe.with_name("pythonw.exe"))                  #    无窗口版本优先，避免留个黑框
+    add(exe)
+    add(exe.with_name("python.exe"))
+    for name in ("pythonw.exe", "python.exe"):         # 5) PATH 里能找到的
+        add(shutil.which(name))
+    return out
+
+
 def python_for_gui() -> str:
-    """挑一个能跑服务的解释器：优先工程内 .venv，其次当前解释器本身。"""
-    venv = BASE / ".venv" / "Scripts"
-    for name in ("pythonw.exe", "python.exe"):
-        if (venv / name).exists():
-            return str(venv / name)
-    exe = Path(sys.executable)                      # 我们就是被它跑起来的，依赖必然齐全
-    sibling = exe.with_name("pythonw.exe")          # 无窗口版本优先，避免留个黑框
-    if sibling.exists():
-        return str(sibling)
-    if exe.exists():
-        return str(exe)
-    return shutil.which("pythonw") or shutil.which("python") or "python"
+    """挑一个依赖齐全的解释器，并记下来供下次直接用。"""
+    cands = _candidates()
+    for c in cands:
+        if _usable(c):
+            try:
+                (BASE / "python.path").write_text(c, encoding="utf-8")
+            except Exception:
+                pass
+            return c
+    log("✗ 没找到装好依赖的 Python —— 请先双击 install.bat 完成一次安装")
+    return cands[0] if cands else "python"
 
 
 def port_pids(p: int) -> list:

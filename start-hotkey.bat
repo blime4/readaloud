@@ -1,23 +1,20 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul
 setlocal
-set "PYW=C:\Users\bo\.workbuddy\binaries\python\envs\default\Scripts\pythonw.exe"
 cd /d "%~dp0"
 
-if not exist "%PYW%" (
-  echo [x] 找不到 Python 环境: %PYW%
-  pause
-  exit /b 1
-)
+set "VPY=%~dp0.venv\Scripts\pythonw.exe"
+if not exist "%VPY%" set "VPY=%~dp0.venv\Scripts\python.exe"
+if not exist "%VPY%" set "VPY=pythonw"
 
 if exist "%~dp0.hotkey.pid" (
-  echo [i] 热键守护似乎已在运行，先停止旧的...
+  echo [i] 热键守护已在运行，先停掉旧的...
   call "%~dp0stop-hotkey.bat" >nul 2>&1
   timeout /t 1 /nobreak >nul
 )
 
 echo [.] 启动全局热键守护...
-start "" "%PYW%" "%~dp0hotkey.py"
+start "" "%VPY%" "%~dp0hotkey.py"
 timeout /t 2 /nobreak >nul
 echo.
 echo    Ctrl + Alt + R   朗读剪贴板
