@@ -219,10 +219,15 @@
       <div class="empty">点「朗读」后，这里会显示逐句稿，并跟着声音高亮。</div>
     </div>
     <details class="help" style="border-top:1px solid var(--line)">
-      <summary>本机引擎信息</summary>
+      <summary>本机引擎信息与开关</summary>
       <div class="kv" id="hostKv"></div>
       <div class="mlist" id="modelList"></div>
       <div class="hint" id="engineHint"></div>
+      <div class="cactions" style="padding-top:10px">
+        <button id="btnLocalPage" title="用引擎自己的地址打开，不需要浏览器授权">在本地打开</button>
+        <button id="btnRestart">重启引擎</button>
+        <button id="btnStopEngine">停止引擎</button>
+      </div>
     </details>
   </section>
 </main>
@@ -577,9 +582,8 @@ function applyUrlParams() {
 function pushHistory(v) { S.history.push(v); if (S.history.length > 30) S.history.shift(); }
 function count() {
   const n = $('#txt').value.replace(/\s/g, '').length;
-  $('#stCount').textContent = `${n} 字`;
   const sec = Math.round(n / (4.6 * (1 + (parseInt($('#rate').value) || 0) / 100)));
-  $('#chipTime') && ($('#chipTime').textContent = n ? `约 ${Math.floor(sec / 60)}分${sec % 60}秒` : '—');
+  $('#stCount').textContent = n ? `${n} 字 · 约 ${Math.floor(sec / 60)}分${sec % 60}秒` : '0 字';
   updateBtns();
 }
 function updateBtns() {
@@ -770,6 +774,20 @@ document.addEventListener('keydown', e => {
     e.preventDefault(); play();
   }
 });
+
+/* ---------- 引擎开关（同样通过 readaloud:// 协议，不用碰命令行） ---------- */
+$('#btnLocalPage').onclick = () => window.open(`http://127.0.0.1:${port()}/`, '_blank');
+$('#btnRestart').onclick = () => {
+  location.href = 'readaloud://restart';
+  toast('正在重启本机引擎…', 4000);
+  setTimeout(() => connect({ manual: true }), 5000);
+};
+$('#btnStopEngine').onclick = () => {
+  location.href = 'readaloud://stop';
+  ONLINE = false;
+  toast('已发送停止指令，引擎将退出', 4000);
+  setTimeout(() => showOffline(), 3500);
+};
 
 /* ---------- 启动 ---------- */
 async function boot() {
