@@ -11,7 +11,17 @@
     --accent:#5b5bd6; --accent-2:#7c7cf0; --accent-soft:#eeeefc;
     --ok:#0f9d6a; --warn:#d98324; --danger:#d94a5a;
     --shadow:0 1px 2px rgba(28,32,48,.05), 0 8px 24px rgba(28,32,48,.06);
-    --radius:14px;
+    --radius:14px; --btn:#fff; --btn-hover:#fafaff; --btn-bd:#c9ccdd;
+    --track:#e9eaf3; --code:#f2f3f9;
+  }
+  html[data-theme="dark"]{
+    --bg:#14161d; --panel:#1b1e27; --panel-2:#20242e; --line:#2c313d;
+    --txt:#e7e9f0; --txt-2:#a6adc0; --txt-3:#737b90;
+    --accent:#8b8bf5; --accent-2:#a3a3ff; --accent-soft:#262a3d;
+    --ok:#3ecf8e; --warn:#e0a458; --danger:#ef6b7a;
+    --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.32);
+    --btn:#232734; --btn-hover:#2a2f3d; --btn-bd:#3a4052;
+    --track:#2a2f3d; --code:#232734;
   }
   *{box-sizing:border-box}
   html,body{height:100%}
@@ -33,63 +43,79 @@
   .status{font-size:12px;color:var(--txt-3);display:flex;gap:14px;align-items:center;flex-wrap:wrap}
   .status b{color:var(--txt-2);font-weight:600}
   .grow{flex:1}
-  main{flex:1; display:grid; grid-template-columns:minmax(360px,1fr) minmax(320px,420px); gap:16px; padding:16px 20px 24px; min-height:0}
+  main{flex:1; display:grid; grid-template-columns:minmax(360px,1fr) minmax(340px,430px); gap:16px; padding:16px 20px 96px; min-height:0}
   .card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); display:flex; flex-direction:column; min-height:0; overflow:hidden}
   .card h2{margin:0;padding:12px 16px;font-size:13px;font-weight:600;color:var(--txt-2);border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
   .card h2 .sub{font-weight:400;color:var(--txt-3);font-size:12px}
   textarea{
-    flex:1; min-height:220px; border:0; outline:0; resize:none; padding:14px 16px;
+    flex:1; min-height:200px; border:0; outline:0; resize:none; padding:14px 16px;
     font:14px/1.85 "Microsoft YaHei UI","Segoe UI",sans-serif; color:var(--txt); background:transparent;
   }
+  textarea::placeholder{color:var(--txt-3)}
   .toolbar{display:flex; flex-wrap:wrap; gap:8px; padding:10px 14px; border-top:1px solid var(--line); background:var(--panel-2)}
   button{
-    font:inherit; cursor:pointer; border:1px solid var(--line); background:#fff; color:var(--txt);
+    font:inherit; cursor:pointer; border:1px solid var(--line); background:var(--btn); color:var(--txt);
     padding:7px 13px; border-radius:10px; transition:.15s; display:inline-flex; align-items:center; gap:6px;
   }
-  button:hover{border-color:#c9ccdd; background:#fafaff}
+  button:hover{border-color:var(--btn-bd); background:var(--btn-hover)}
   button:active{transform:translateY(1px)}
   button.primary{background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600}
   button.primary:hover{background:var(--accent-2)}
   button.ghost{background:transparent; border-color:transparent; color:var(--txt-2)}
   button.ghost:hover{background:var(--accent-soft); color:var(--accent)}
   button:disabled{opacity:.45; cursor:not-allowed}
+  button.tiny{padding:4px 9px;font-size:12px;border-radius:8px}
   a.btn{
     display:inline-flex;align-items:center;gap:7px;text-decoration:none;font:inherit;cursor:pointer;
-    padding:9px 16px;border-radius:10px;border:1px solid var(--line);background:#fff;color:var(--txt);transition:.15s;
+    padding:9px 16px;border-radius:10px;border:1px solid var(--line);background:var(--btn);color:var(--txt);transition:.15s;
   }
-  a.btn:hover{border-color:#c9ccdd;background:#fafaff}
+  a.btn:hover{border-color:var(--btn-bd);background:var(--btn-hover)}
   a.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
-  a.btn.primary:hover{background:var(--accent-2)}
-  .chip{padding:5px 11px; border-radius:999px; font-size:12px; background:var(--accent-soft); color:var(--accent); border:1px solid #e0e0fa;white-space:nowrap}
+  .chip{padding:5px 11px; border-radius:999px; font-size:12px; background:var(--accent-soft); color:var(--accent); border:1px solid var(--accent-soft);white-space:nowrap}
   .chip.gray{background:var(--panel-2);color:var(--txt-3);border-color:var(--line)}
-  .chip.ok{background:#e8f7f0;color:#0b7a53;border-color:#bfe8d5}
+  .chip.ok{background:var(--accent-soft);color:var(--ok);border-color:var(--line)}
+  .chip.btnish{cursor:pointer}
   .row{display:flex; align-items:center; gap:9px; padding:9px 16px; border-bottom:1px solid var(--line)}
   .row:last-child{border-bottom:0}
   .row label{width:52px; color:var(--txt-2); font-size:12.5px; flex:none}
-  select,input[type=text]{font:inherit; padding:6px 9px; border:1px solid var(--line); border-radius:9px; background:#fff; color:var(--txt); outline:0; min-width:0}
+  select,input[type=text],input[type=number]{font:inherit; padding:6px 9px; border:1px solid var(--line); border-radius:9px; background:var(--panel); color:var(--txt); outline:0; min-width:0}
   select:focus,input:focus{border-color:var(--accent-2); box-shadow:0 0 0 3px var(--accent-soft)}
   select{flex:1}
   input[type=range]{flex:1; accent-color:var(--accent)}
   .val{width:52px; text-align:right; font-size:12px; color:var(--txt-2); font-variant-numeric:tabular-nums}
   .seglist{flex:1; overflow-y:auto; padding:10px 12px}
   .seg{
-    padding:9px 12px; margin-bottom:7px; border-radius:10px; color:var(--txt-2);
+    padding:8px 12px; margin-bottom:6px; border-radius:10px; color:var(--txt-2);
     border:1px solid transparent; cursor:pointer; transition:.15s; font-size:13.5px; line-height:1.7;
+    display:flex; gap:8px;
   }
   .seg:hover{background:var(--panel-2); border-color:var(--line)}
-  .seg.active{background:var(--accent-soft); border-color:#d5d5f7; color:var(--accent); font-weight:600}
-  .seg.done{opacity:.5}
-  .seg .no{display:inline-block; width:20px; color:var(--txt-3); font-size:11px; font-weight:400}
+  .seg.active{background:var(--accent-soft); border-color:var(--accent-soft); color:var(--accent); font-weight:600}
+  .seg.done{opacity:.45}
+  .seg.fail{border-color:var(--danger)}
+  .seg .no{flex:none; width:20px; color:var(--txt-3); font-size:11px; font-weight:400}
+  .seg .k{flex:none;font-size:10px;color:var(--txt-3);border:1px solid var(--line);border-radius:5px;padding:0 4px;height:16px;line-height:15px;align-self:center}
   .empty{color:var(--txt-3); text-align:center; padding:36px 20px; font-size:13px}
-  .nowline{display:flex; align-items:center; gap:10px; padding:10px 14px; background:var(--panel-2); border-bottom:1px solid var(--line)}
-  .bar{flex:1; height:6px; border-radius:99px; background:#e9eaf3; overflow:hidden}
-  .bar i{display:block; height:100%; width:0; background:linear-gradient(90deg,var(--accent),var(--accent-2)); transition:width .3s}
+  .bar{flex:1; height:6px; border-radius:99px; background:var(--track); overflow:hidden; cursor:pointer; position:relative}
+  .bar i{display:block; height:100%; width:0; background:linear-gradient(90deg,var(--accent),var(--accent-2)); transition:width .25s}
   .toast{
-    position:fixed; left:50%; bottom:26px; transform:translateX(-50%) translateY(20px);
-    background:#1c2030; color:#fff; padding:10px 18px; border-radius:11px; font-size:13px;
-    opacity:0; pointer-events:none; transition:.25s; z-index:60; max-width:70vw;
+    position:fixed; left:50%; bottom:104px; transform:translateX(-50%) translateY(20px);
+    background:var(--txt); color:var(--panel); padding:10px 18px; border-radius:11px; font-size:13px;
+    opacity:0; pointer-events:none; transition:.25s; z-index:60; max-width:76vw; text-align:center;
   }
   .toast.show{opacity:1; transform:translateX(-50%) translateY(0)}
+
+  /* ---------- 底部播放条 ---------- */
+  .player{
+    position:fixed; left:0; right:0; bottom:0; z-index:30;
+    background:var(--panel); border-top:1px solid var(--line);
+    box-shadow:0 -6px 22px rgba(28,32,48,.07);
+    padding:9px 20px; display:flex; align-items:center; gap:12px;
+  }
+  .pb{width:36px;height:36px;padding:0;justify-content:center;border-radius:50%;font-size:15px;flex:none}
+  .pb.play{background:var(--accent);border-color:var(--accent);color:#fff;width:42px;height:42px;font-size:17px}
+  .pinfo{font-size:12px;color:var(--txt-3);white-space:nowrap;font-variant-numeric:tabular-nums}
+  .pinfo b{color:var(--txt-2)}
 
   /* ---------- 连接向导 ---------- */
   .connect{display:none; padding:18px 20px 0}
@@ -98,38 +124,46 @@
     background:var(--panel); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow);
     padding:20px 22px; display:flex; gap:18px; align-items:flex-start;
   }
-  .ccard.warn{border-color:#f0c9a0; background:#fffdf9}
-  .ccard.bad{border-color:#f09595; background:#fffafa}
+  .ccard.warn{border-color:var(--warn)}
+  .ccard.bad{border-color:var(--danger)}
   .cicon{font-size:30px;line-height:1;flex:none}
   .cbody{flex:1;min-width:0}
   .cbody h3{margin:0 0 6px;font-size:15px}
   .cbody p{margin:0 0 10px;color:var(--txt-2);font-size:13px;line-height:1.75}
   .cbody ol{margin:6px 0 10px;padding-left:20px;color:var(--txt-2);font-size:13px;line-height:1.85}
-  .cbody code{background:var(--panel-2); border:1px solid var(--line); border-radius:6px; padding:1px 6px; font-size:12px}
+  .cbody code{background:var(--code); border:1px solid var(--line); border-radius:6px; padding:1px 6px; font-size:12px}
   .cactions{display:flex;flex-wrap:wrap;gap:9px;align-items:center}
   .hint{font-size:12px;color:var(--txt-3);line-height:1.7}
-  .spin-sm{width:14px;height:14px;border-radius:50%;border:2px solid #ddddee;border-top-color:var(--accent);animation:sp .7s linear infinite;display:inline-block;vertical-align:-2px}
+  .spin-sm{width:14px;height:14px;border-radius:50%;border:2px solid var(--line);border-top-color:var(--accent);animation:sp .7s linear infinite;display:inline-block;vertical-align:-2px}
   @keyframes sp{to{transform:rotate(360deg)}}
   details.help{padding:0 16px 12px; font-size:12.5px; color:var(--txt-2)}
   details.help summary{cursor:pointer; padding:11px 0; color:var(--txt-2); font-weight:600; outline:0}
-  details.help code{background:var(--panel-2); border:1px solid var(--line); border-radius:6px; padding:1px 6px; font-size:12px}
+  details.help code{background:var(--code); border:1px solid var(--line); border-radius:6px; padding:1px 6px; font-size:12px}
   details.help li{margin:5px 0}
   .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:12.5px;color:var(--txt-2);padding:2px 0 8px}
   .kv b{color:var(--txt-3);font-weight:400}
   .mlist{display:flex;flex-direction:column;gap:6px;padding:0 0 10px}
-  .mitem{border:1px solid var(--line);border-radius:9px;padding:7px 10px;font-size:12.5px;display:flex;gap:8px;align-items:center;background:var(--panel-2)}
+  .mitem{border:1px solid var(--line);border-radius:9px;padding:7px 10px;font-size:12.5px;display:flex;gap:8px;align-items:center;background:var(--panel-2);cursor:pointer}
+  .mitem.on{border-color:var(--accent);background:var(--accent-soft)}
   .mitem .nm{font-weight:600;color:var(--txt)}
   .mitem .mt{color:var(--txt-3);font-size:11.5px}
+  .hist{display:flex;flex-direction:column;gap:5px;padding:0 0 10px}
+  .hitem{border:1px solid var(--line);border-radius:9px;padding:6px 10px;font-size:12.5px;cursor:pointer;background:var(--panel-2);display:flex;gap:8px;align-items:center}
+  .hitem:hover{border-color:var(--accent)}
+  .hitem .hl{color:var(--txt-3);flex:none;font-size:11px}
+  .hitem .ht{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--txt-2)}
   .overlay{
-    position:fixed; inset:0; background:rgba(245,246,250,.72); backdrop-filter:blur(2px);
+    position:fixed; inset:0; background:var(--bg); opacity:.82;
     display:none; align-items:center; justify-content:center; z-index:50;
   }
   .overlay.show{display:flex}
-  .spin{width:34px;height:34px;border-radius:50%;border:3px solid #ddddee;border-top-color:var(--accent);animation:sp .8s linear infinite;margin:0 auto 12px}
-  .overlay .box{background:#fff;padding:22px 30px;border-radius:16px;box-shadow:var(--shadow);text-align:center;font-size:13.5px;color:var(--txt-2)}
+  .spin{width:34px;height:34px;border-radius:50%;border:3px solid var(--line);border-top-color:var(--accent);animation:sp .8s linear infinite;margin:0 auto 12px}
+  .overlay .box{background:var(--panel);border:1px solid var(--line);padding:22px 30px;border-radius:16px;box-shadow:var(--shadow);text-align:center;font-size:13.5px;color:var(--txt-2);min-width:260px}
+  .sbar{height:5px;border-radius:9px;background:var(--track);overflow:hidden;margin-top:12px}
+  .sbar i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s}
   ::-webkit-scrollbar{width:9px;height:9px}
-  ::-webkit-scrollbar-thumb{background:#d7d9e6;border-radius:9px;border:2px solid transparent;background-clip:content-box}
-  @media(max-width:900px){main{grid-template-columns:1fr;grid-template-rows:1fr 1fr}}
+  ::-webkit-scrollbar-thumb{background:var(--btn-bd);border-radius:9px;border:2px solid transparent;background-clip:content-box}
+  @media(max-width:900px){main{grid-template-columns:1fr;grid-template-rows:1fr auto;padding-bottom:100px}}
 </style>
 </head>
 <body>
@@ -141,10 +175,10 @@
     <span id="stClient"></span>
   </div>
   <div class="grow"></div>
+  <span class="chip gray btnish" id="chipTheme" title="切换深色/浅色（朗读常在夜里用）">🌙 夜间</span>
   <span class="chip gray" id="chipMode" title="当前页面从哪里来 / 引擎在哪里">—</span>
 </header>
 
-<!-- 连接向导：只有在连不上本机引擎时才出现 -->
 <div class="connect" id="connect">
   <div class="ccard" id="ccard">
     <div class="cicon" id="cxIcon">🔌</div>
@@ -161,26 +195,26 @@
   <section class="card">
     <h2>文稿 <span class="sub" id="stCount">0 字</span>
       <span class="grow"></span>
-      <button class="ghost" id="btnUndo" title="撤销上一步文本变更">↶ 撤销</button>
+      <button class="ghost tiny" id="btnFetch" title="粘贴网页链接，抓正文来读">🔗 读网页</button>
+      <button class="ghost tiny" id="btnUndo" title="撤销上一步文本变更">↶ 撤销</button>
     </h2>
-    <textarea id="txt" placeholder="把要朗读的内容粘进来（支持 Markdown，会自动清理标题/表格/代码/链接）…
+    <textarea id="txt" placeholder="把要朗读的内容粘进来（支持 Markdown，会自动清理标题/表格/代码/链接，并规整数字与符号）…
 
 也可以直接按快捷键：复制任意位置的一段文字 → 按 Ctrl+Alt+R，这里会自动开始朗读。"></textarea>
     <div class="toolbar">
       <button class="primary" id="btnPlay">▶ 朗读</button>
-      <button id="btnPause">⏸ 暂停</button>
-      <button id="btnStop">⏹ 停止</button>
-      <button class="ghost" id="btnSum">✨ 总结</button>
-      <button class="ghost" id="btnPol">🎭 润色</button>
+      <button class="ghost" id="btnSum" title="先压缩成朗读稿再读">✨ 总结</button>
+      <button class="ghost" id="btnPol" title="改写得更适合朗读（顺口、数字读法正确）">🎭 润色</button>
       <button class="ghost" id="btnClear">清空</button>
     </div>
     <details class="help">
       <summary>怎么在别处用？（Obsidian / 快捷键 / 接口）</summary>
       <ul>
-        <li><b>Obsidian</b>：设置 → 第三方插件 → 启用 <code>ReadAloud Bridge</code>，选中文字后按 <code>Ctrl+Alt+P</code> 朗读，<code>Ctrl+Alt+S</code> 总结朗读。</li>
-        <li><b>任意软件</b>：复制文字 → <code>Ctrl+Alt+R</code>（朗读剪贴板）/ <code>Ctrl+Alt+S</code>（总结剪贴板再朗读）。页面开着时会直接在这里播出。</li>
-        <li><b>URL 直达</b>：<code>?text=要读的内容&auto=1</code>，任何能打开链接的程序都能用。</li>
-        <li><b>纯音频接口</b>：<code>/api/tts?text=你好</code> 直接返回 MP3，可塞进播放器或下载。</li>
+        <li><b>Obsidian</b>：选中文字后按 <code>Ctrl+Alt+P</code> 朗读，<code>Ctrl+Alt+O</code> 读整篇，<code>Ctrl+Alt+S</code> 总结后读。</li>
+        <li><b>任意软件</b>：复制文字 → <code>Ctrl+Alt+R</code>（读剪贴板）/ <code>+E</code>（读当前选中的字）/ <code>+S</code>（总结后读）。页面开着时直接在这里播出。</li>
+        <li><b>键盘</b>：<code>空格</code> 播放/暂停，<code>←/→</code> 上一句/下一句，<code>Esc</code> 停止。</li>
+        <li><b>URL 直达</b>：<code>?text=要读的内容&auto=1</code>；<code>?url=https://…</code> 可直接朗读网页正文。</li>
+        <li><b>纯音频接口</b>：<code>/api/tts?text=你好</code> 直接返回 MP3。</li>
       </ul>
     </details>
   </section>
@@ -193,10 +227,17 @@
     <div class="row">
       <label>音色</label>
       <select id="voice"></select>
+      <button class="ghost tiny" id="btnTry" title="试听这个音色">🔈 试听</button>
+    </div>
+    <div class="row" id="recRow" style="display:none">
+      <label></label>
+      <span class="hint" style="flex:1" id="recText"></span>
+      <button class="tiny" id="btnRec">采纳</button>
     </div>
     <div class="row">
       <label>模式</label>
-      <select id="mode">
+      <select id="mode" title="智能：短文直读，长文自动先总结">
+        <option value="auto">智能（长文自动总结）</option>
         <option value="none">原文直读</option>
         <option value="polish">AI 润色后朗读</option>
         <option value="summarize">AI 总结后朗读</option>
@@ -205,18 +246,25 @@
     <div class="row">
       <label>模型</label>
       <select id="model" title="列出的是你当前电脑上 Ollama 已装的模型"></select>
-      <button class="ghost" id="btnQuality" title="切到这台电脑上更大的模型，更慢但更好">↑ 升配</button>
+      <button class="ghost tiny" id="btnQuality" title="切到这台电脑上更大的模型，更慢但更好">↑ 升配</button>
     </div>
     <div class="row"><label>语速</label><input type="range" id="rate" min="-40" max="50" step="2" value="8"><span class="val" id="rateV">+8%</span></div>
     <div class="row"><label>音调</label><input type="range" id="pitch" min="-30" max="30" step="2" value="0"><span class="val" id="pitchV">+0Hz</span></div>
     <div class="row"><label>音量</label><input type="range" id="vol" min="-30" max="30" step="2" value="0"><span class="val" id="volV">+0%</span></div>
-    <div class="nowline">
-      <span style="font-size:12px;color:var(--txt-3)" id="nowIdx">0 / 0</span>
-      <div class="bar"><i id="bar"></i></div>
-      <span style="font-size:12px;color:var(--txt-3)" id="nowNote"></span>
+    <div class="row">
+      <label>定时</label>
+      <select id="timer" title="到点自动停，睡前听用">
+        <option value="0">不定时</option>
+        <option value="5">5 分钟后停</option>
+        <option value="15">15 分钟后停</option>
+        <option value="30">30 分钟后停</option>
+        <option value="60">60 分钟后停</option>
+        <option value="end">读完当前这段就停</option>
+      </select>
+      <span class="val" id="timerV" style="width:62px">—</span>
     </div>
     <div class="seglist" id="seglist">
-      <div class="empty">点「朗读」后，这里会显示逐句稿，并跟着声音高亮。</div>
+      <div class="empty">点「朗读」后，这里会显示逐句稿，跟着声音逐句高亮。<br>点任意一句可跳读，也可用 ←/→ 切换。</div>
     </div>
     <details class="help" style="border-top:1px solid var(--line)">
       <summary>本机引擎信息与开关</summary>
@@ -229,11 +277,42 @@
         <button id="btnStopEngine">停止引擎</button>
       </div>
     </details>
+    <details class="help" style="border-top:1px solid var(--line)">
+      <summary>AI 偏好与自动总结阈值</summary>
+      <div class="hint" style="margin-bottom:8px">写一句你希望的读法，会加进 AI 的提示词里 —— 越用越合口味。例：<i>读得像播客，语速稍快，多用短句，专业名词保留英文</i></div>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <input type="text" id="prefStyle" placeholder="例如：读得像播客，多用短句" style="flex:1">
+        <button class="tiny" id="btnSavePref">保存</button>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <span class="hint">智能模式阈值</span>
+        <input type="number" id="autoLen" min="0" max="20000" step="100" style="width:88px">
+        <span class="hint">字（超过就自动先总结）</span>
+      </div>
+    </details>
+    <details class="help" style="border-top:1px solid var(--line)">
+      <summary>最近朗读</summary>
+      <div class="hist" id="hist"><div class="hint">还没有记录。</div></div>
+    </details>
   </section>
 </main>
 
+<!-- 底部播放条 -->
+<div class="player">
+  <button class="pb" id="btnPrev" title="上一句（←）">⏮</button>
+  <button class="pb play" id="btnToggle" title="播放 / 暂停（空格）">▶</button>
+  <button class="pb" id="btnNext" title="下一句（→）">⏭</button>
+  <button class="pb" id="btnStopB" title="停止（Esc）">⏹</button>
+  <div class="pinfo" id="pIdx">0 / 0</div>
+  <div class="bar" id="bar" title="点这里跳到任意位置"><i id="barI"></i></div>
+  <div class="pinfo" id="pRemain">—</div>
+  <button class="pb ghost" id="btnRepeat" title="重读当前句">↻</button>
+</div>
+
 <div class="toast" id="toast"></div>
-<div class="overlay" id="overlay"><div class="box"><div class="spin"></div><span id="ovText">AI 正在处理…</span></div></div>
+<div class="overlay" id="overlay"><div class="box"><div class="spin"></div><span id="ovText">AI 正在处理…</span>
+  <div class="sbar"><i id="ovBar"></i></div>
+  <div style="margin-top:12px"><button class="tiny" id="btnCancel">取消</button></div></div></div>
 
 <script>
 /* ============================================================================
@@ -243,33 +322,60 @@
    后者会跨源去连本机引擎 —— 靠 Local Network Access 授权放行。
    ========================================================================== */
 const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+
+/* 播放状态机：items 是逐句条目（含停顿时长与语速偏移），base 是全局音色参数 */
 const S = {
-  segments: [], idx: -1, playing: false, audio: null, style: null,
-  history: [], busy: false, preload: [], quality: false,
+  items: [], idx: -1, playing: false, audio: null, base: null, style: null,
+  history: [], busy: false, preload: [], quality: false, qualityModel: null,
+  pauseTimer: 0, tickTimer: 0, stopAt: 0, stopMode: '0', cancelFn: null,
+  fail: new Set(), tried: 0, lastPlayChars: 0,
 };
 
-const GH = 'https://github.com/blime4/readaloud';   // 引擎包 / 说明文档
+const GH = 'https://github.com/blime4/readaloud';
 const DEFAULT_PORT = '8756';
+const LONG_AI_CHARS_DEFAULT = 1200;
 let API = '';              // 空串 = 与页面同源；否则是 http://127.0.0.1:<port>
 let ONLINE = false;
 let HOST_INFO = null;
+let VOICES = [];
+let MODELS = [];
 
 const fmt = n => (n > 0 ? '+' : '') + n;
 const port = () => localStorage.getItem('ra.port') || DEFAULT_PORT;
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('ra.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem('ra.' + k, JSON.stringify(v)); } catch (e) {} },
+};
+const parsePct = s => parseInt(String(s || '0').replace('%', ''), 10) || 0;
+const parseHz = s => parseInt(String(s || '0').replace('Hz', ''), 10) || 0;
 
-/* ---------- 提示 ---------- */
+/* ---------- 提示 / 遮罩 ---------- */
 let toastTimer;
-function toast(msg, ms = 2200) {
-  $('#toast').textContent = msg;
+function toast(msg, ms = 2400) {
+  $('#toast').innerHTML = msg;
   $('#toast').classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => $('#toast').classList.remove('show'), ms);
 }
 function overlay(show, text) {
-  $('#ovText').textContent = text || 'AI 正在处理…';
+  if (text) $('#ovText').textContent = text;
   $('#overlay').classList.toggle('show', show);
+  if (!show) { $('#ovBar').style.width = '0'; }
 }
+function progress(p) { $('#ovBar').style.width = Math.max(0, Math.min(100, p)) + '%'; }
 function setDot(cls) { $('#dot').className = 'dot ' + cls; }
+
+/* ---------- 主题 ---------- */
+function applyTheme(t) {
+  const dark = t === 'dark' || (t === 'auto' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  $('#chipTheme').textContent = dark ? '☀️ 日间' : '🌙 夜间';
+}
+$('#chipTheme').onclick = () => {
+  const now = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  store.set('theme', now); applyTheme(now);
+};
 
 /* ---------- 同源 / 跨源判定 ---------- */
 const isLocalHost = () => location.hostname === '127.0.0.1' || location.hostname === 'localhost' || location.hostname === '[::1]';
@@ -292,7 +398,7 @@ async function permissionState() {
       return { name, state: st.state };
     } catch (e) { /* 该浏览器不认识这个权限名，换下一个 */ }
   }
-  return { name: null, state: 'unknown' };   // 老版本浏览器：没有 LNA，直接试即可
+  return { name: null, state: 'unknown' };
 }
 
 /* ---------- 探活 ---------- */
@@ -381,7 +487,7 @@ async function showOffline() {
     $('#cxIcon').textContent = '🔐';
     $('#cxTitle').textContent = '点一下，连上你这台电脑的朗读引擎';
     $('#cxDesc').innerHTML =
-      '页面在云端（GitHub Pages），**朗读与 AI 全部在你本机运行**，文字不出你的电脑。' +
+      '页面在云端（GitHub Pages），<b>朗读与 AI 全部在你本机运行</b>，文字不出你的电脑。' +
       '首次连接浏览器会问一次是否允许访问本地网络，选「允许」即可。' +
       '<div class="hint" style="margin-top:8px">如果你还没装过本机引擎，先看下面的第 2 步。</div>';
     addBtn('🔐 连接本机引擎', 'btn primary', null, async () => {
@@ -398,9 +504,8 @@ async function showOffline() {
   $('#cxIcon').textContent = '💤';
   $('#cxTitle').textContent = '本机朗读引擎没有运行';
   $('#cxDesc').innerHTML =
-    '页面已经连得上权限，只是你电脑上的引擎进程没启动。' +
-    '<div class="hint" style="margin-top:8px">' +
-    '装过引擎的话点「一键启动」；没装过点「怎么安装」。</div>';
+    '权限没问题，只是你电脑上的引擎进程没启动。' +
+    '<div class="hint" style="margin-top:8px">装过引擎的话点「一键启动」；没装过点「怎么安装」。</div>';
   const btn = addBtn('▶ 一键启动本机引擎', 'btn primary', null, async () => {
     btn.textContent = '正在唤起…';
     location.href = 'readaloud://start';           // 自定义协议 → 唤起本地 launcher
@@ -446,7 +551,7 @@ function installGuide() {
 
 /* ---------- 连接成功后加载数据 ---------- */
 async function loadAll() {
-  await Promise.all([loadHealth(), loadVoices(), loadModels(), loadHost()]);
+  await Promise.all([loadHealth(), loadVoices(), loadModels(), loadHost(), loadSettings()]);
   subscribeEvents();
   applyUrlParams();
 }
@@ -457,20 +562,16 @@ async function loadHealth() {
     $('#stServer').textContent = `引擎 v${h.version} 已连接 · ${h.voices} 个音色`;
     $('#stModel').textContent = h.ollama ? `Ollama 就绪` : 'Ollama 未启动（无法总结/润色）';
     $('#stClient').textContent = `${h.clients} 个播放端`;
-    if (h.config) {
-      if (h.config.rate) { $('#rate').value = parseInt(h.config.rate) || 0; $('#rateV').textContent = h.config.rate; }
-      if (h.config.pitch) { $('#pitch').value = parseInt(h.config.pitch) || 0; $('#pitchV').textContent = h.config.pitch; }
-      if (h.config.volume) { $('#vol').value = parseInt(h.config.volume) || 0; $('#volV').textContent = h.config.volume; }
-    }
-  } catch (e) { /* 交给下一轮轮询 */ }
+    setDot('on');
+  } catch (e) { /* 交给轮询 */ }
 }
 
 async function loadVoices() {
   try {
-    const vs = await (await fetch(API + '/api/voices')).json();
+    VOICES = await (await fetch(API + '/api/voices')).json();
     const g = { 'zh-CN': '中文（大陆）', 'zh-HK': '粤语', 'zh-TW': '中文（台湾）', 'en-US': '英语（美）', 'ja-JP': '日语' };
     const groups = {};
-    vs.forEach(v => { (groups[v.locale] = groups[v.locale] || []).push(v); });
+    VOICES.forEach(v => { (groups[v.locale] = groups[v.locale] || []).push(v); });
     const sel = $('#voice'); sel.innerHTML = '';
     Object.keys(g).forEach(loc => {
       if (!groups[loc]) return;
@@ -483,7 +584,10 @@ async function loadVoices() {
       });
       sel.appendChild(og);
     });
-    const pref = sel.querySelector('option[value="zh-CN-XiaoxiaoNeural"]') || sel.querySelector('option[value="zh-CN-YunxiNeural"]');
+    const saved = store.get('voice', null);
+    const pref = (saved && sel.querySelector(`option[value="${saved}"]`)) ||
+      sel.querySelector('option[value="zh-CN-XiaoxiaoNeural"]') ||
+      sel.querySelector('option[value="zh-CN-YunxiNeural"]') || sel.querySelector('option');
     if (pref) pref.selected = true;
   } catch (e) { /* 忽略 */ }
 }
@@ -492,20 +596,21 @@ async function loadVoices() {
 async function loadModels() {
   try {
     const d = await (await fetch(API + '/api/models')).json();
+    MODELS = d.models || [];
     const ms = $('#model'); ms.innerHTML = '';
-    (d.models || []).forEach(m => {
+    MODELS.forEach(m => {
       const o = document.createElement('option');
       o.value = m.name;
       o.textContent = `${m.name}（${m.size_gb}GB${m.params ? ' · ' + m.params : ''}）`;
       o.dataset.size = m.size_gb;
       ms.appendChild(o);
     });
-    if (d.quality_model && !(d.models || []).some(m => m.name === d.quality_model)) {
-      S.qualityModel = (d.models || []).length ? (d.models || [])[(d.models || []).length - 1].name : null;
-    } else {
-      S.qualityModel = d.quality_model;
-    }
-    const pick = (d.models || []).find(m => m.name === d.small_model) || (d.models || [])[0];
+    S.qualityModel = MODELS.some(m => m.name === d.quality_model)
+      ? d.quality_model
+      : (MODELS.length ? MODELS[MODELS.length - 1].name : null);
+    const saved = store.get('model', null);
+    const pick = (saved && MODELS.find(m => m.name === saved)) ||
+      MODELS.find(m => m.name === d.small_model) || MODELS[0];
     if (pick) ms.value = pick.name;
   } catch (e) { /* 忽略 */ }
 }
@@ -529,14 +634,32 @@ async function loadHost() {
     $('#hostKv').innerHTML = kv.map(([k, v]) => `<b>${k}</b><span>${esc(String(v))}</span>`).join('');
     const ms = d.ollama.models || [];
     $('#modelList').innerHTML = ms.length
-      ? ms.map(m => `<div class="mitem"><span class="nm">${esc(m.name)}</span>
+      ? ms.map(m => `<div class="mitem${m.name === $('#model').value ? ' on' : ''}" data-m="${esc(m.name)}"><span class="nm">${esc(m.name)}</span>
            <span class="mt">${m.size_gb}GB${m.params ? ' · ' + m.params : ''}${m.quant ? ' · ' + m.quant : ''}</span>
            ${m.caps && m.caps.includes('thinking') ? '<span class="mt">· 会思考</span>' : ''}</div>`).join('')
       : '<div class="hint">这台电脑的 Ollama 里还没有模型。装一个即可用于总结/润色，例如：<code>ollama pull qwen3:4b</code></div>';
     $('#engineHint').innerHTML = ms.length
-      ? '这些模型都来自你当前这台电脑，选哪个就用哪个。'
+      ? '这些模型都来自你当前这台电脑，点一下即可切换。'
       : '没有模型时朗读照常可用，只有「总结 / 润色」需要模型。';
+    $$('#modelList .mitem').forEach(el => el.onclick = () => {
+      $('#model').value = el.dataset.m; store.set('model', el.dataset.m);
+      $$('#modelList .mitem').forEach(x => x.classList.toggle('on', x === el));
+      toast('已切到 ' + el.dataset.m);
+    });
   } catch (e) { /* 忽略 */ }
+}
+
+async function loadSettings() {
+  try {
+    const d = await (await fetch(API + '/api/settings')).json();
+    const p = d.settings || {};
+    if (p.style) $('#prefStyle').value = p.style;
+    $('#autoLen').value = store.get('autoLen', LONG_AI_CHARS_DEFAULT);
+    if (p.mode) $('#mode').value = p.mode;
+    if (p.quality) { S.quality = true; $('#btnQuality').textContent = '↓ 标准'; }
+  } catch (e) {
+    $('#autoLen').value = store.get('autoLen', LONG_AI_CHARS_DEFAULT);
+  }
 }
 
 const shortGpu = n => String(n || '').replace(/NVIDIA\s*/i, '').replace(/GeForce\s*/i, '').trim();
@@ -554,12 +677,11 @@ function subscribeEvents() {
       if (!d.text) return;
       pushHistory($('#txt').value);
       $('#txt').value = d.text;
-      if (d.ai) $('#mode').value = d.ai;
+      if (d.ai && d.ai !== 'none') $('#mode').value = d.ai;
       if (d.voice) $('#voice').value = d.voice;
-      if (d.rate) { $('#rate').value = parseInt(d.rate) || 0; $('#rateV').textContent = d.rate; }
-      if (d.pitch) { $('#pitch').value = parseInt(d.pitch) || 0; $('#pitchV').textContent = d.pitch; }
+      if (d.rate) { $('#rate').value = parsePct(d.rate); $('#rateV').textContent = fmt($('#rate').value | 0) + '%'; }
       count();
-      toast('收到外部朗读请求');
+      if (d.hint) toast(d.hint, 6000); else toast('收到外部朗读请求');
       if (d.auto !== false) play();
     });
     es.onerror = () => { $('#stClient').textContent = '连接中断，重连中…'; };
@@ -567,8 +689,12 @@ function subscribeEvents() {
 }
 
 /* ---------- URL 参数 ---------- */
-function applyUrlParams() {
+async function applyUrlParams() {
   const p = new URLSearchParams(location.search);
+  if (p.get('url')) {
+    await fetchUrl(p.get('url'), p.get('auto') !== '0');
+    return;
+  }
   if (p.get('text')) {
     $('#txt').value = p.get('text');
     if (p.get('ai')) $('#mode').value = p.get('ai');
@@ -579,27 +705,53 @@ function applyUrlParams() {
 }
 
 /* ---------- 文本 ---------- */
-function pushHistory(v) { S.history.push(v); if (S.history.length > 30) S.history.shift(); }
+function pushHistory(v) {
+  v = (v || '').trim();
+  if (!v) return;
+  S.history.push(v);
+  if (S.history.length > 30) S.history.shift();
+}
 function count() {
   const n = $('#txt').value.replace(/\s/g, '').length;
-  const sec = Math.round(n / (4.6 * (1 + (parseInt($('#rate').value) || 0) / 100)));
+  const spd = 4.6 * (1 + (parseInt($('#rate').value, 10) || 0) / 100);
+  const sec = Math.round(n / spd);
   $('#stCount').textContent = n ? `${n} 字 · 约 ${Math.floor(sec / 60)}分${sec % 60}秒` : '0 字';
   updateBtns();
 }
 function updateBtns() {
   const has = $('#txt').value.trim().length > 0;
-  ['#btnSum', '#btnPol'].forEach(s => $(s).disabled = !has);
+  $('#btnSum').disabled = !has;
+  $('#btnPol').disabled = !has;
   $('#btnPlay').disabled = !has;
+}
+/* 智能模式：超过阈值就自动先总结，让用户少做一个决定 */
+function autoLen() { return parseInt($('#autoLen').value, 10) || LONG_AI_CHARS_DEFAULT; }
+function effectiveMode() {
+  const m = $('#mode').value;
+  const n = $('#txt').value.replace(/\s/g, '').length;
+  if (m === 'auto') return n > autoLen() ? 'summarize' : 'none';
+  return m;
 }
 
 /* ---------- 渲染逐句 ---------- */
-function renderSegs() {
+const KIND_LABEL = { heading: '标题', list: '条目', quote: '引文', para: '' };
+function renderItems() {
   const box = $('#seglist');
-  if (!S.segments.length) { box.innerHTML = '<div class="empty">没有可分句的内容。</div>'; return; }
-  box.innerHTML = S.segments.map((s, i) =>
-    `<div class="seg" data-i="${i}"><span class="no">${i + 1}</span>${esc(s)}</div>`).join('');
+  if (!S.items.length) {
+    box.innerHTML = '<div class="empty">没有可分句的内容。</div>';
+    updateBar();
+    return;
+  }
+  box.innerHTML = S.items.map((it, i) => {
+    const k = KIND_LABEL[it.kind] || '';
+    return `<div class="seg" data-i="${i}" title="${it.pause}ms 停顿">` +
+      `<span class="no">${i + 1}</span>${k ? `<span class="k">${k}</span>` : ''}` +
+      `<span>${esc(it.text)}</span></div>`;
+  }).join('');
   box.querySelectorAll('.seg').forEach(el => el.onclick = () => {
-    S.idx = +el.dataset.i - 1; next();
+    const i = +el.dataset.i;
+    S.fail.delete(i);
+    playAt(i, true);
   });
   highlight();
 }
@@ -609,91 +761,262 @@ function highlight() {
     const i = +el.dataset.i;
     el.classList.toggle('active', i === S.idx);
     el.classList.toggle('done', i < S.idx);
+    el.classList.toggle('fail', S.fail.has(i));
   });
   const act = box.querySelector('.seg.active');
   if (act) act.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-  $('#nowIdx').textContent = `${Math.max(S.idx + 1, 0)} / ${S.segments.length}`;
-  $('#bar').style.width = S.segments.length ? ((S.idx + 1) / S.segments.length * 100) + '%' : '0';
+  updateBar();
+}
+function updateBar() {
+  const n = S.items.length;
+  const pos = S.idx < 0 ? 0 : S.idx + (S.playing ? 1 : 1);
+  $('#pIdx').textContent = `${Math.max(S.idx + 1, 0)} / ${n}`;
+  $('#barI').style.width = n ? (pos / n * 100) + '%' : '0';
+  const left = S.items.slice(Math.max(S.idx, 0)).reduce((a, b) => a + b.text.length, 0);
+  if (!n) { $('#pRemain').textContent = '—'; return; }
+  const spd = 4.6 * (1 + ((S.base ? S.base.rate : 8)) / 100);
+  const sec = Math.round(left / spd);
+  $('#pRemain').textContent = S.idx < 0 ? '—' : `剩 ${Math.floor(sec / 60)}分${sec % 60}秒`;
+  $('#btnToggle').textContent = S.playing ? '⏸' : '▶';
 }
 
 /* ---------- 播放 ---------- */
-function ttsURL(text) {
+/* 每句的语速 = 全局语速 + 该句偏移（标题更慢、条目稍快），让念稿有语气层次 */
+function segRate(i) {
+  const base = S.base ? S.base.rate : 8;
+  const d = S.items[i] && S.items[i].rate ? S.items[i].rate : 0;
+  const v = Math.max(-40, Math.min(50, base + d));
+  return (v > 0 ? '+' : '') + v + '%';
+}
+function ttsURL(i) {
+  const b = S.base;
   const q = new URLSearchParams({
-    text, voice: $('#voice').value,
-    rate: S.style.rate, pitch: S.style.pitch, volume: S.style.volume,
+    text: S.items[i].text, voice: b.voice,
+    rate: segRate(i), pitch: (b.pitch > 0 ? '+' : '') + b.pitch + 'Hz',
+    volume: (b.volume > 0 ? '+' : '') + b.volume + '%',
   });
   return API + '/api/tts?' + q.toString();
 }
 function preload(i) {
-  if (i >= S.segments.length) return;
-  const slot = i % 2;
+  if (i >= S.items.length) return;
+  const slot = i % 3;
   const a = S.preload[slot] || (S.preload[slot] = new Audio());
   a.preload = 'auto';
-  a.src = ttsURL(S.segments[i]);
+  try { a.src = ttsURL(i); } catch (e) {}
 }
-function next() {
-  S.idx++;
-  if (S.idx >= S.segments.length) { finish(); return; }
+function warmup(from, n) { for (let k = 0; k < n; k++) preload(from + k); }
+
+function playAt(i, force) {
+  clearTimeout(S.pauseTimer);
+  if (i >= S.items.length) { finish(); return; }
+  if (i < 0) i = 0;
+  S.idx = i;
   highlight();
   const a = S.audio || (S.audio = new Audio());
-  a.src = ttsURL(S.segments[S.idx]);
-  a.onended = () => { if (S.playing) next(); };
-  a.onerror = () => { toast('这段合成失败，跳过'); if (S.playing) next(); };
-  a.play().then(() => { S.playing = true; }).catch(() => { toast('播放被浏览器拦截，请再点一次「朗读」'); S.playing = false; });
-  preload(S.idx + 1); preload(S.idx + 2);
+  a.onended = null;
+  a.onerror = null;
+  a.src = ttsURL(i);
+  a.onended = () => { if (S.playing) gapThenNext(); };
+  a.onerror = () => {
+    // 以前这里静默"跳过"，用户只听到缺了一句。现在标红可点重试。
+    if (!S.fail.has(i) && S.tried < 3) {
+      S.tried++;
+      S.fail.add(i); highlight();
+      if (S.tried <= 1) toast('这句合成失败了，正在重试…');
+      setTimeout(() => { if (S.playing || force) { a.src = ttsURL(i) + '&r=' + S.tried; a.play().catch(() => {}); } }, 700);
+      return;
+    }
+    S.fail.add(i); highlight();
+    toast('这句反复失败（已标红），点它可重试。', 3200);
+    if (S.playing) gapThenNext();
+  };
+  S.tried = 0;
+  a.play().then(() => {
+    S.playing = true; updateBar();
+  }).catch(e => {
+    S.playing = false; updateBar();
+    toast('播放被浏览器拦住了，请再点一次「▶」', 3000);
+  });
+  warmup(i + 1, 3);
+}
+/* 句间/段间停顿：以前是 MP3 一个接一个无缝连读，听感像机器；
+   现在按 text_nlp 给的 pause（标题 760ms、段末 660ms、句间 330ms）留呼吸。 */
+function gapThenNext() {
+  const gap = (S.items[S.idx] && S.items[S.idx].pause) || 300;
+  S.pauseTimer = setTimeout(() => dieOrNext(), gap);
+}
+function dieOrNext() {
+  if (!S.playing) return;
+  if (S.stopMode === 'end' && S.idx >= S.segEndAt()) { stopPlayback(); toast('读完当前这段，已按定时停止'); return; }
+  if (S.stopAt && Date.now() >= S.stopAt) { stopPlayback(); toast('定时时间到，已停止'); resetTimer(); return; }
+  playAt(S.idx + 1);
+}
+/* 「读完当前这段就停」= 停在原文的下一个空行处；这里用段落级停顿近似 */
+function segEndAt() {
+  for (let i = S.idx + 1; i < S.items.length; i++) {
+    if (S.items[i].pause >= 600) return i;
+  }
+  return S.items.length - 1;
 }
 function finish() {
-  S.playing = false; S.idx = S.segments.length - 1; highlight();
+  S.playing = false; S.idx = S.items.length - 1;
+  highlight(); updateBar();
   toast('朗读完成 ✓');
 }
 function stopPlayback() {
   S.playing = false;
+  clearTimeout(S.pauseTimer);
   if (S.audio) { S.audio.pause(); S.audio.removeAttribute('src'); }
-  S.idx = -1; highlight();
+  S.preload.forEach(a => { try { a.removeAttribute('src'); } catch (e) {} });
+  S.preload = [];
+  S.idx = -1;
+  highlight();
 }
+function nextSeg() {
+  if (!S.items.length) return;
+  playAt(Math.min((S.idx < 0 ? 0 : S.idx + 1), S.items.length - 1), true);
+}
+function prevSeg() {
+  if (!S.items.length) return;
+  playAt(Math.max((S.idx <= 0 ? 0 : S.idx - 1), 0), true);
+}
+function togglePlay() {
+  if (!S.items.length || S.idx < 0) { play(); return; }
+  if (S.playing) { S.audio.pause(); S.playing = false; clearTimeout(S.pauseTimer); toast('已暂停'); }
+  else { S.playing = true; S.audio.play().catch(() => { S.playing = false; }); toast('继续'); }
+  updateBar();
+}
+
+/* 热切换：改语速/音色不该清空稿子、更不该退回第一句。
+   旧版这里 S.segments = [] 会让正在播的朗读直接中断。 */
+function liveChange() {
+  if (!S.items.length || S.idx < 0) return;
+  const wasPlaying = S.playing;
+  const at = S.idx;
+  if (wasPlaying) { S.audio.pause(); S.playing = true; playAt(at, true); }
+  updateBar();
+}
+
+/* ---------- 主流程 ---------- */
 async function play() {
   if (S.busy) return;
   const text = $('#txt').value.trim();
   if (!text) return;
   if (!ONLINE) { toast('还没连上本机引擎'); await connect({ manual: true }); return; }
-  // 正在播 → 暂停
-  if (S.playing && S.audio) { S.audio.pause(); S.playing = false; toast('已暂停'); return; }
-  // 暂停中 → 就地继续
-  if (S.segments.length && S.idx >= 0 && S.idx < S.segments.length && S.audio && S.audio.paused) {
-    S.playing = true;
-    S.audio.play().catch(() => { S.playing = false; toast('继续失败，请重新点朗读'); });
-    return;
-  }
+  if (S.playing && S.audio) { togglePlay(); return; }
   S.busy = true;
-  const mode = $('#mode').value;
-  if (mode !== 'none') overlay(true, mode === 'summarize' ? '小模型正在压缩成朗读稿…' : '小模型正在打磨润色…');
+  const mode = effectiveMode();
+  try {
+    S.base = baseStyle();
+    const d = await prepare(text, mode);
+    if (!d) return;
+    adoptPrepared(d);
+    renderItems();
+    warmup(0, 3);
+    S.playing = true;
+    playAt(0, true);
+  } catch (e) {
+    toast('出错了：' + e.message, 3600);
+  } finally { S.busy = false; overlay(false); }
+}
+
+function baseStyle() {
+  return {
+    voice: $('#voice').value,
+    rate: parseInt($('#rate').value, 10) || 0,
+    pitch: parseInt($('#pitch').value, 10) || 0,
+    volume: parseInt($('#vol').value, 10) || 0,
+  };
+}
+
+/* 调 /api/prepare，带"取消"和进度，且长文会先分块（服务端 map-reduce），
+   返回后 AI 结果已落盘缓存 —— 同样的文字第二次是 0 秒。 */
+async function prepare(text, mode, opts = {}) {
+  const long = text.replace(/\s/g, '').length > (mode === 'summarize' ? 0 : 0);
+  if (mode !== 'none') {
+    overlay(true, mode === 'summarize' ? '小模型正在压缩成朗读稿…' : '小模型正在打磨润色…');
+    progress(8);
+    const iv = setInterval(() => {
+      const w = parseFloat($('#ovBar').style.width) || 8;
+      progress(Math.min(92, w + Math.max(0.6, (92 - w) * 0.04)));
+    }, 400);
+    S.cancelFn = () => { clearInterval(iv); };
+    var _iv = iv;
+  }
+  const ac = new AbortController();
+  const prevCancel = S.cancelFn;
+  S.cancelFn = () => { prevCancel && prevCancel(); ac.abort(); };
   try {
     const r = await fetch(API + '/api/prepare', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
+      signal: ac.signal,
       body: JSON.stringify({
         text, ai: mode, model: $('#model').value, quality: S.quality || false,
-        voice: $('#voice').value, rate: $('#rateV').textContent,
-        pitch: $('#pitchV').textContent, volume: $('#volV').textContent,
+        voice: $('#voice').value, rate: (baseStyle().rate > 0 ? '+' : '') + baseStyle().rate + '%',
+        pitch: (baseStyle().pitch > 0 ? '+' : '') + baseStyle().pitch + 'Hz',
+        volume: (baseStyle().volume > 0 ? '+' : '') + baseStyle().volume + '%',
       }),
     });
     const d = await r.json();
     if (!d.ok) throw new Error(d.error || '处理失败');
-    S.segments = d.segments; S.idx = -1;
-    S.style = d.style;
-    if (d.ai_note) toast(d.ai_note, 8000);
-    if (d.ai !== 'none') {
-      // AI 给的语速/音调建议同步到滑块，直观看到"打磨后的音色"
-      $('#rate').value = parseInt(S.style.rate) || 0; $('#rateV').textContent = S.style.rate;
-      $('#pitch').value = parseInt(S.style.pitch) || 0; $('#pitchV').textContent = S.style.pitch;
-      $('#nowNote').textContent = S.style.note || '';
-      pushHistory(text); $('#txt').value = d.text; count();
-      toast(`已由 ${d.model} ${d.ai === 'summarize' ? '总结' : '润色'}：${d.count} 句`);
-    }
-    renderSegs();
-    S.playing = true; next();
+    progress(100);
+    return d;
   } catch (e) {
-    toast('出错了：' + e.message, 3200);
-  } finally { S.busy = false; overlay(false); }
+    if (e.name === 'AbortError') { toast('已取消'); return null; }
+    throw e;
+  } finally {
+    clearInterval(_iv);
+    overlay(false);
+    S.cancelFn = null;
+  }
+}
+
+/* 把 prepare 的结果接到播放态：稿子、音色建议、时长提示都在这里落地 */
+function adoptPrepared(d) {
+  S.items = d.items || (d.segments || []).map(t => ({ text: t, kind: 'para', pause: 330, rate: 0 }));
+  S.idx = -1;
+  S.fail.clear();
+  S.style = d.style;
+  S.lastPlayChars = d.source_chars || 0;
+
+  // AI 给的建议语速/音调同步到滑块，直观看到"打磨后的音色"
+  if (d.ai !== 'none' && d.style) {
+    const r = parsePct(d.style.rate), pi = parseHz(d.style.pitch);
+    if (r) { $('#rate').value = r; $('#rateV').textContent = fmt(r) + '%'; }
+    if (pi) { $('#pitch').value = pi; $('#pitchV').textContent = fmt(pi) + 'Hz'; }
+    if (d.style.note) toast(`已由 ${d.model} 处理：${d.style.note}`, 4000);
+  }
+  if (d.ai_note) toast(d.ai_note, 7000);
+  if (d.long_doc) toast('原文较长，已分块提炼后合并（避免长文被截断）', 4200);
+  if (d.ai_cached) toast('命中缓存，秒出（这段之前处理过）', 2600);
+
+  // 换稿：把 AI 结果写回文本框，并把原文存进历史，方便一键回退
+  if (d.ai !== 'none') {
+    pushHistory($('#txt').value);
+    $('#txt').value = d.text;
+    count();
+  }
+  renderHistory();
+
+  // 音色推荐：只在用户没手动选过时提示，避免打扰
+  if (d.voice_suggestion && !store.get('voiceTouched', false)) {
+    const cur = $('#voice').value;
+    if (d.voice_suggestion !== cur) {
+      $('#recRow').style.display = 'flex';
+      $('#recText').textContent = `按内容推荐：${friendly(d.voice_suggestion)}（${d.voice_reason}）`;
+      $('#btnRec').onclick = () => {
+        $('#voice').value = d.voice_suggestion;
+        store.set('voiceTouched', true);
+        $('#recRow').style.display = 'none';
+        toast('已采纳推荐音色');
+      };
+    } else { $('#recRow').style.display = 'none'; }
+  }
+  S.base = baseStyle();
+}
+function friendly(name) {
+  const v = VOICES.find(x => x.name === name);
+  return v ? `${v.friendly}（${v.gender === 'Female' ? '女' : '男'}）` : name;
 }
 
 /* ---------- AI 直接改写文稿 ---------- */
@@ -702,18 +1025,26 @@ async function aiInto(mode) {
   if (!text || S.busy) return;
   if (!ONLINE) { toast('还没连上本机引擎'); return; }
   S.busy = true;
-  overlay(true, mode === 'summarize' ? '小模型正在总结…' : '小模型正在润色…');
+  const label = mode === 'summarize' ? '小模型正在总结…' : '小模型正在润色…';
+  overlay(true, label);
+  progress(6);
+  const ac = new AbortController();
+  S.cancelFn = () => ac.abort();
+  const iv = setInterval(() => {
+    const w = parseFloat($('#ovBar').style.width) || 6;
+    progress(Math.min(93, w + Math.max(0.6, (93 - w) * 0.05)));
+  }, 400);
   try {
     if (mode === 'summarize') {
       const r = await fetch(API + '/api/ai', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ac.signal,
         body: JSON.stringify({ text, mode, model: $('#model').value, quality: S.quality || false, stream: true }),
       });
       if (!r.ok) throw new Error('服务返回 ' + r.status);
-      pushHistory($('#txt').value);
+      pushHistory(text);
       $('#txt').value = '';
-      const rd = r.body.getReader(), dec = new TextDecoder();
       overlay(false);
+      const rd = r.body.getReader(), dec = new TextDecoder();
       let acc = '';
       while (true) {
         const { value, done } = await rd.read();
@@ -724,55 +1055,176 @@ async function aiInto(mode) {
       toast('总结完成，可直接点朗读');
     } else {
       const r = await fetch(API + '/api/ai', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: ac.signal,
         body: JSON.stringify({ text, mode, model: $('#model').value, quality: S.quality || false }),
       });
       const d = await r.json();
       if (!d.ok) throw new Error(d.error || '润色失败');
-      pushHistory($('#txt').value);
+      pushHistory(text);
       $('#txt').value = d.text; count();
-      if (d.rate) { $('#rate').value = parseInt(d.rate) || 0; $('#rateV').textContent = d.rate; }
-      if (d.pitch) { $('#pitch').value = parseInt(d.pitch) || 0; $('#pitchV').textContent = d.pitch; }
-      $('#nowNote').textContent = d.note || '';
-      toast(`润色完成 · ${d.note || d.model}`);
+      if (d.rate) { const v = parsePct(d.rate); $('#rate').value = v; $('#rateV').textContent = fmt(v) + '%'; }
+      if (d.pitch) { const v = parseHz(d.pitch); $('#pitch').value = v; $('#pitchV').textContent = fmt(v) + 'Hz'; }
+      toast(`润色完成${d.ai_cached ? '（缓存）' : ''} · ${d.note || d.model}`, 3600);
     }
-  } catch (e) { toast('出错了：' + e.message, 3200); }
-  finally { S.busy = false; overlay(false); }
+    renderHistory();
+  } catch (e) {
+    if (e.name === 'AbortError') toast('已取消');
+    else toast('出错了：' + e.message, 3600);
+  } finally {
+    clearInterval(iv);
+    S.busy = false; overlay(false); S.cancelFn = null;
+  }
+}
+
+/* ---------- 网页链接 -> 正文 ---------- */
+async function fetchUrl(url, auto) {
+  if (!url) {
+    const input = prompt('粘贴网页链接（会自动抓出正文）：', 'https://');
+    if (!input) return;
+    url = input.trim();
+  }
+  if (!/^https?:\/\//i.test(url)) { toast('请填 http/https 开头的链接'); return; }
+  if (!ONLINE) { toast('还没连上本机引擎'); return; }
+  overlay(true, '正在抓取网页正文…');
+  progress(30);
+  try {
+    const r = await fetch(API + '/api/fetch?url=' + encodeURIComponent(url));
+    progress(80);
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || '抓取失败');
+    pushHistory($('#txt').value);
+    $('#txt').value = (d.title ? d.title + '\n\n' : '') + d.text;
+    count(); renderHistory();
+    toast(`已抓取「${(d.title || '').slice(0, 18) || '网页'}」共 ${d.chars} 字`, 3600);
+    if (auto) play();
+  } catch (e) {
+    toast(e.message, 4200);
+  } finally { overlay(false); }
+}
+
+/* ---------- 定时 ---------- */
+function setupTimer(v) {
+  clearInterval(S.tickTimer);
+  S.stopMode = v;
+  if (v === '0') { S.stopAt = 0; $('#timerV').textContent = '—'; return; }
+  if (v === 'end') { S.stopAt = 0; $('#timerV').textContent = '读完停'; return; }
+  const mins = parseInt(v, 10);
+  S.stopAt = Date.now() + mins * 60000;
+  const tick = () => {
+    const left = Math.max(0, S.stopAt - Date.now());
+    const m = Math.floor(left / 60000), s = Math.floor(left % 60000 / 1000);
+    $('#timerV').textContent = `${m}:${String(s).padStart(2, '0')}`;
+    if (left <= 0) { resetTimer(); if (S.playing) { stopPlayback(); toast('定时时间到，已停止'); } }
+  };
+  tick();
+  S.tickTimer = setInterval(tick, 1000);
+}
+function resetTimer() {
+  clearInterval(S.tickTimer);
+  S.stopAt = 0; S.stopMode = '0';
+  $('#timer').value = '0';
+  $('#timerV').textContent = '—';
+}
+
+/* ---------- 历史 ---------- */
+function renderHistory() {
+  const h = store.get('hist', []);
+  $('#hist').innerHTML = h.length
+    ? h.map((x, i) => `<div class="hitem" data-i="${i}"><span class="hl">${x.time}</span>
+        <span class="ht">${esc(x.text.slice(0, 60))}</span></div>`).join('')
+    : '<div class="hint">还没有记录。每次朗读都会记在这里。</div>';
+  $$('#hist .hitem').forEach(el => el.onclick = () => {
+    const x = h[+el.dataset.i];
+    pushHistory($('#txt').value);
+    $('#txt').value = x.text; count();
+    toast('已载入历史记录');
+  });
+}
+function addHistory(text) {
+  text = (text || '').trim();
+  if (!text) return;
+  const h = store.get('hist', []);
+  if (h.length && h[0].text === text) return;
+  h.unshift({ text, time: new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) });
+  store.set('hist', h.slice(0, 20));
+  renderHistory();
 }
 
 /* ---------- 事件绑定 ---------- */
-$('#txt').addEventListener('input', () => { S.segments = []; S.idx = -1; count(); });
-$('#btnPlay').onclick = play;
-$('#btnPause').onclick = () => {
-  if (!S.audio) return;
-  if (S.playing) { S.audio.pause(); S.playing = false; toast('已暂停'); }
-  else { S.audio.play(); S.playing = true; toast('继续'); }
-};
-$('#btnStop').onclick = () => { stopPlayback(); toast('已停止'); };
+$('#txt').addEventListener('input', () => { S.items = []; S.idx = -1; count(); });
+$('#btnPlay').onclick = () => { addHistory($('#txt').value); play(); };
 $('#btnSum').onclick = () => aiInto('summarize');
 $('#btnPol').onclick = () => aiInto('polish');
-$('#btnClear').onclick = () => { pushHistory($('#txt').value); $('#txt').value = ''; S.segments = []; S.idx = -1; renderSegs(); count(); };
+$('#btnClear').onclick = () => { pushHistory($('#txt').value); $('#txt').value = ''; S.items = []; S.idx = -1; renderItems(); count(); };
 $('#btnUndo').onclick = () => {
   if (!S.history.length) return toast('没有可撤销的变更');
-  $('#txt').value = S.history.pop(); S.segments = []; S.idx = -1; count(); toast('已撤销');
+  $('#txt').value = S.history.pop(); S.items = []; S.idx = -1; count(); toast('已撤销');
 };
+$('#btnFetch').onclick = () => fetchUrl(null, true);
 $('#btnQuality').onclick = () => {
   S.quality = !S.quality;
   $('#btnQuality').textContent = S.quality ? '↓ 标准' : '↑ 升配';
-  if (S.quality && S.qualityModel) $('#model').value = S.qualityModel;
+  if (S.quality && S.qualityModel) { $('#model').value = S.qualityModel; store.set('model', S.qualityModel); }
   toast(S.quality ? `已切到升配模型${S.qualityModel ? '：' + S.qualityModel : ''}` : '已切回小模型（更快）');
 };
-$('#rate').oninput = e => { $('#rateV').textContent = fmt(+e.target.value) + '%'; S.segments = []; count(); };
-$('#pitch').oninput = e => { $('#pitchV').textContent = fmt(+e.target.value) + 'Hz'; S.segments = []; };
-$('#vol').oninput = e => { $('#volV').textContent = fmt(+e.target.value) + '%'; S.segments = []; };
-$('#voice').onchange = () => { S.segments = []; toast('已切换音色'); };
+$('#rate').oninput = e => {
+  $('#rateV').textContent = fmt(+e.target.value) + '%';
+  S.base = baseStyle(); count(); liveChange();
+  store.set('rate', +e.target.value);
+};
+$('#pitch').oninput = e => { $('#pitchV').textContent = fmt(+e.target.value) + 'Hz'; S.base = baseStyle(); liveChange(); };
+$('#vol').oninput = e => { $('#volV').textContent = fmt(+e.target.value) + '%'; S.base = baseStyle(); liveChange(); };
+$('#voice').onchange = () => {
+  store.set('voice', $('#voice').value);
+  store.set('voiceTouched', true);
+  S.base = baseStyle(); liveChange();
+  toast('已切换音色');
+};
+$('#model').onchange = () => store.set('model', $('#model').value);
+$('#mode').onchange = () => {
+  const m = $('#mode').value;
+  if (m === 'auto') toast(`智能模式：超过 ${autoLen()} 字自动先总结`);
+  savePrefs({ mode: m });
+};
+$('#timer').onchange = e => setupTimer(e.target.value);
+$('#btnTry').onclick = async () => {
+  if (!ONLINE) { toast('还没连上本机引擎'); return; }
+  const b = baseStyle();
+  const demo = '这是朗读试听，音色和语速听起来合适吗？';
+  const url = API + '/api/tts?' + new URLSearchParams({
+    text: demo, voice: b.voice, rate: (b.rate > 0 ? '+' : '') + b.rate + '%',
+    pitch: (b.pitch > 0 ? '+' : '') + b.pitch + 'Hz',
+  }).toString();
+  const a = new Audio(url);
+  a.play().then(() => toast('正在试听…')).catch(() => toast('试听失败，请再点一次'));
+};
+$('#btnSavePref').onclick = async () => {
+  const ok = await savePrefs({ style: $('#prefStyle').value.trim() });
+  toast(ok ? '已记住你的偏好，下次 AI 会照这个来' : '保存失败（引擎没连上？）');
+};
+$('#autoLen').onchange = () => { store.set('autoLen', autoLen()); toast(`超过 ${autoLen()} 字自动先总结`); };
+$('#btnCancel').onclick = () => { if (S.cancelFn) S.cancelFn(); };
+$('#btnToggle').onclick = togglePlay;
+$('#btnPrev').onclick = prevSeg;
+$('#btnNext').onclick = nextSeg;
+$('#btnStopB').onclick = () => { stopPlayback(); toast('已停止'); };
+$('#btnRepeat').onclick = () => { if (S.idx >= 0) playAt(S.idx, true); };
+$('#bar').onclick = e => {
+  if (!S.items.length) return;
+  const r = e.currentTarget.getBoundingClientRect();
+  const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  playAt(Math.min(S.items.length - 1, Math.floor(ratio * S.items.length)), true);
+};
 $('#txt').addEventListener('keydown', e => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); play(); }
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); $('#btnPlay').click(); }
 });
 document.addEventListener('keydown', e => {
-  if (e.code === 'Space' && (e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'INPUT')) {
-    e.preventDefault(); play();
-  }
+  const tag = (e.target.tagName || '').toUpperCase();
+  if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') return;
+  if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); nextSeg(); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); prevSeg(); }
+  else if (e.key === 'Escape') { stopPlayback(); }
 });
 
 /* ---------- 引擎开关（同样通过 readaloud:// 协议，不用碰命令行） ---------- */
@@ -789,11 +1241,22 @@ $('#btnStopEngine').onclick = () => {
   setTimeout(() => showOffline(), 3500);
 };
 
+async function savePrefs(p) {
+  try {
+    await fetch(API + '/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p),
+    });
+    return true;
+  } catch (e) { return false; }
+}
+
 /* ---------- 启动 ---------- */
 async function boot() {
-  count();
+  applyTheme(store.get('theme', 'auto'));
+  const r = (n, d) => { if (n) { $('#rate').value = n; $('#rateV').textContent = fmt(n) + '%'; } };
+  r(store.get('rate', 8));
+  count(); renderHistory();
   const perm = await permissionState();
-  // 本地页面 / 已授权过 → 直接连；否则等用户点一下再连（这样才会弹授权框）
   if (isLocalHost() || perm.state === 'granted') {
     const ok = await connect();
     if (!ok) await showOffline();

@@ -18,6 +18,7 @@ ReadAloud · 本地朗读中枢
 import asyncio
 import ctypes
 import hashlib
+import html as _html
 import json
 import logging
 import os
@@ -33,12 +34,15 @@ import requests
 import edge_tts
 from flask import Flask, Response, jsonify, request, send_from_directory
 
+import text_nlp as NLP
+
 # ---------------------------------------------------------------- 基础配置
 
 BASE = Path(__file__).resolve().parent
 CACHE_DIR = BASE / "cache"
 TTS_CACHE = CACHE_DIR / "tts"
-for d in (CACHE_DIR, TTS_CACHE):
+AI_CACHE = CACHE_DIR / "ai"
+for d in (CACHE_DIR, TTS_CACHE, AI_CACHE):
     d.mkdir(parents=True, exist_ok=True)
 
 CONFIG_PATH = BASE / "config.json"
@@ -52,12 +56,17 @@ DEFAULT_CONFIG = {
     "rate": "+8%",
     "pitch": "+0Hz",
     "volume": "+0%",
-    "max_len": 160,                 # 每段最大字数
+    "max_len": 62,                  # 单句上限（注意：是"一句的上限"，不是"攒够才切"）
     "auto_polish": False,           # 朗读前是否自动润色
+    "normalize": True,              # 读音规整（符号/日期/金额读顺）
+    "auto_voice": True,             # 按内容自动推荐音色
+    "long_doc_chars": 6000,         # 超过这个字数就分块总结，避免静默截断
     "cache_limit": 400,             # 最多缓存多少个音频片段
+    # 用户偏好：会注入 AI 提示词，让总结/润色越用越像你要的样子
+    "prefs": {"style": "", "mode": "none", "model": "", "quality": False},
 }
 
-ENGINE_VERSION = "1.1.0"
+ENGINE_VERSION = "1.2.0"
 
 # 页面文件：优先用 docs/（= GitHub Pages 站点目录），本地与线上共用同一份，
 # 避免出现"本地能跑、线上是旧版"的分叉。
@@ -118,87 +127,22 @@ def api_preflight(_any):
 
 
 # ---------------------------------------------------------------- 文本预处理
-
-_MD_RULES = [
-    (re.compile(r"```.*?```", re.S), " "),           # 代码块
-    (re.compile(r"`([^`]*)`"), r"\1"),               # 行内代码
-    (re.compile(r"!\[[^\]]*\]\([^)]*\)"), " "),      # 图片
-    (re.compile(r"\[([^\]]*)\]\([^)]*\)"), r"\1"),   # 链接
-    (re.compile(r"\[\[([^\]|]*)\|([^\]]*)\]\]"), r"\2"),  # Obsidian 双链带别名
-    (re.compile(r"\[\[([^\]]*)\]\]"), r"\1"),
-    (re.compile(r"<!--.*?-->", re.S), " "),
-]
-
-SENT_END = "。！？!?…；;"
-
+# 真正的实现搬到了 text_nlp.py（结构解析 / 读音规整 / 逐句切分 / 音色推荐）。
+# 这里只留薄封装，兼容旧调用方（Obsidian 插件、剪贴板脚本仍在用 clean_text）。
 
 def clean_text(raw: str) -> str:
-    """把 Markdown / 富文本洗成朗读友好的纯文本。"""
-    s = (raw or "").replace("\r\n", "\n").replace("\r", "\n")
-    for pat, rep in _MD_RULES:
-        s = pat.sub(rep, s)
-    out = []
-    for line in s.split("\n"):
-        t = line.strip()
-        if not t:
-            out.append("")
-            continue
-        if re.match(r"^\|.*\|$", t):           # 表格行
-            continue
-        if re.match(r"^[\-=*_~]{3,}$", t):     # 分隔线
-            continue
-        if t.startswith("[!") or t.startswith("```"):
-            continue
-        t = re.sub(r"^#{1,6}\s*", "", t)
-        t = re.sub(r"^>+\s*", "", t)
-        t = re.sub(r"^\s*[-*+]\s+", "", t)
-        t = re.sub(r"^\s*\d+[.)]\s+", "", t)
-        t = t.replace("**", "").replace("__", "").replace("~~", "")
-        out.append(t)
-    s = "\n".join(out)
-    s = re.sub(r"\n{3,}", "\n\n", s)
-    return s.strip()
+    return NLP.clean(raw)
 
 
-def split_segments(text: str, max_len: int = 160, min_len: int = 12) -> list:
-    """按段落 -> 句子 -> 硬切 三级切分，产出一串适合逐段合成/逐段高亮的片段。"""
-    segs = []
-    for para in re.split(r"\n\s*\n", text):
-        para = para.strip()
-        if not para:
-            continue
-        parts = []
-        buf = ""
-        for piece in re.split(r"(?<=[%s])(?![%s])" % (SENT_END, SENT_END), para):
-            piece = piece.strip()
-            if not piece:
-                continue
-            if len(buf) + len(piece) <= max_len:
-                buf += piece
-            else:
-                if buf:
-                    parts.append(buf)
-                while len(piece) > max_len:      # 超长句硬切
-                    cut = piece[:max_len]
-                    for mark in ("，", ",", "、", " "):
-                        idx = cut.rfind(mark)
-                        if idx > max_len * 0.5:
-                            cut = cut[: idx + 1]
-                            break
-                    parts.append(cut.strip())
-                    piece = piece[len(cut):].strip()
-                buf = piece
-        if buf:
-            parts.append(buf)
-        # 段内合并过短的碎片（不跨段，保证标题/列表项各自独立成句）
-        merged = []
-        for s in parts:
-            if merged and len(merged[-1]) < min_len and not merged[-1].endswith(tuple(SENT_END)):
-                merged[-1] += s
-            else:
-                merged.append(s)
-        segs.extend(merged)
-    return [s for s in segs if s.strip()]
+def split_segments(text: str, max_len: int = 62) -> list:
+    items = NLP.split_items("", max_len=max_len,
+                            blocks=[{"kind": "para", "text": text}]) if text.strip() else []
+    return [it["text"] for it in items] or ([text] if text.strip() else [])
+
+
+def plan_text(raw: str, max_len: int = 62, do_normalize: bool = True) -> dict:
+    """一站式：解析结构 -> 清洗 -> 读音规整 -> 逐句。返回 text/items/segments。"""
+    return NLP.prepare(raw, max_len=max_len, do_normalize=do_normalize)
 
 
 # ---------------------------------------------------------------- 语音合成
@@ -347,6 +291,66 @@ SYS_POLISH = (
     '"note": "一句话说明语气体感", "title": "不超过12字的短标题"}'
 )
 
+# 长文用：先分块提炼要点（map），再把要点合成一份连贯朗读稿（reduce）。
+# 不这么做的话，超过约 1.5 万字的原文会撞上 num_ctx=8192 被静默截断，
+# 模型只看到前半段，给出"看起来正常其实漏了一半"的总结 —— 这是最危险的失败。
+SYS_MAP = (
+    "你是朗读者撰稿人。下面是长文的其中一部分，请只提炼这一部分的要点，"
+    "写成 2 到 5 句口语短句，保留关键数字与结论，不要 Markdown，不要开场白，"
+    "不要复述要求，不要输出思考过程。"
+)
+
+SYS_MERGE = (
+    "你是朗读者撰稿人。下面是一篇文章各部分的要点，请把它们合并成一段连贯的朗读稿：\n"
+    "1. 按原文脉络串起来，用连接词自然过渡，不要出现「第一部分」「要点一」这类字样；\n"
+    "2. 完全口语化，句子短，适合听；不要 Markdown，不要括号注释；\n"
+    "3. 数字、百分比、缩写写成便于朗读的中文（30% -> 百分之三十）；\n"
+    "4. 只输出朗读稿正文，不要任何解释、复述或思考过程。"
+)
+
+
+def pref_suffix() -> str:
+    """把用户偏好拼成提示词尾巴，让 AI 越用越贴合口味。"""
+    p = CFG.get("prefs") or {}
+    style = (p.get("style") or "").strip()
+    if not style:
+        return ""
+    return f"\n\n【用户偏好，请遵守】{style[:200]}"
+
+
+# ---------------------------------------------------------------- AI 结果缓存
+# 同一段文字 + 同一组参数，第二次直接命中磁盘缓存。
+# 这件事看着小，体验差别巨大：润色一次要 20~50 秒，缓存后是 0 秒。
+# 也是「停止 -> 再点朗读」不再重跑模型的前提。
+
+def _ai_key(text: str, mode: str, model: str, limit: int) -> str:
+    pref = json.dumps(CFG.get("prefs") or {}, ensure_ascii=False, sort_keys=True)
+    raw = f"{mode}|{model}|{limit}|{len(text)}|{pref}|{text}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def ai_cache_get(key: str):
+    f = AI_CACHE / f"{key}.json"
+    if not f.exists():
+        return None
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+        os.utime(f, None)                    # 命中就续命，常用的不会被清理掉
+        return d
+    except Exception:
+        return None
+
+
+def ai_cache_put(key: str, payload: dict) -> None:
+    try:
+        (AI_CACHE / f"{key}.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        files = sorted(AI_CACHE.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for f in files[max(60, int(CFG.get("cache_limit", 400)) // 4):]:
+            f.unlink(missing_ok=True)
+    except Exception as e:
+        log.warning("AI 缓存写入失败: %s", e)
+
 
 # ---------------------------------------------------------------- AI 质量把关
 
@@ -382,28 +386,90 @@ def pick_models(body: dict) -> list:
     return chain
 
 
-def ai_refine(text: str, mode: str, body: dict):
+def _chunk_text(text: str, size: int) -> list:
+    """按段落聚成若干块，每块不超过 size 字（不切断段落）。"""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    chunks, buf = [], ""
+    for p in paras:
+        if buf and len(buf) + len(p) > size:
+            chunks.append(buf)
+            buf = p
+        else:
+            buf = (buf + "\n\n" + p).strip() if buf else p
+        while len(buf) > size * 1.6:               # 单个超长段落再按句切
+            cut = buf[:size]
+            idx = max(cut.rfind(m) for m in "。！？\n")
+            if idx < size * 0.5:
+                idx = size - 1
+            chunks.append(buf[: idx + 1].strip())
+            buf = buf[idx + 1:].strip()
+    if buf:
+        chunks.append(buf)
+    return chunks or [text]
+
+
+def summarize_long(text: str, model: str, limit: int) -> str:
+    """长文分块总结：先逐块提要点，再合并成一份连贯朗读稿。"""
+    chunks = _chunk_text(text, 2600)
+    per = max(100, limit // max(1, len(chunks)))
+    notes = []
+    for i, c in enumerate(chunks, 1):
+        out = clean_text(ollama_chat(
+            SYS_MAP + pref_suffix(),
+            f"这是长文的第 {i}/{len(chunks)} 部分，请提炼要点（{per} 字以内）：\n\n{c}",
+            model, temperature=0.3))
+        if looks_like_cot(out):
+            raise AIBad(f"第 {i} 段提炼时把思考过程写进了正文")
+        if out:
+            notes.append(out)
+    if not notes:
+        raise AIBad("分块提炼结果为空")
+    merged = ollama_chat(
+        SYS_MERGE + pref_suffix(),
+        f"请把下面这些要点合并成一段朗读稿（目标 {limit} 字以内）：\n\n" + "\n\n".join(notes),
+        model, temperature=0.35)
+    merged = clean_text(merged)
+    if not merged or looks_like_cot(merged):
+        raise AIBad("合并阶段输出不合格")
+    return merged
+
+
+def ai_refine(text: str, mode: str, body: dict, use_cache: bool = True):
     """跑 AI + 质量把关；不合格会自动换更强的模型重试，全不合格则抛 AIBad。
 
-    返回 (处理后的文本, 音色建议, 实际使用的模型)。
+    返回 (处理后的文本, 音色建议, 实际使用的模型, 是否命中缓存)。
     """
     limit = int(body.get("limit") or 300)
+    requested = body.get("model") or (CFG["quality_model"] if body.get("quality") else CFG["small_model"])
+    key = _ai_key(text, mode, requested, limit)
+    if use_cache:
+        hit = ai_cache_get(key)
+        if hit and hit.get("text"):
+            log.info("AI 缓存命中（%s / %s）", mode, hit.get("model"))
+            return hit["text"], hit.get("style") or {}, hit.get("model") or requested, True
+
     problems = []
     for model in pick_models(body):
         try:
             if mode == "summarize":
-                out = clean_text(ollama_chat(
-                    SYS_SUMMARY,
-                    f"请把下面内容压缩成朗读稿（目标 {limit} 字以内）：\n\n{text}", model))
+                if len(text) >= int(CFG.get("long_doc_chars", 6000)):
+                    out = summarize_long(text, model, limit)
+                else:
+                    out = clean_text(ollama_chat(
+                        SYS_SUMMARY + pref_suffix(),
+                        f"请把下面内容压缩成朗读稿（目标 {limit} 字以内）：\n\n{text}", model))
                 if not out:
                     raise AIBad("输出为空")
                 if looks_like_cot(out):
                     raise AIBad("把思考过程写进了正文")
                 if len(text) > 200 and len(out) < max(20, len(text) * 0.05):
                     raise AIBad("输出过短，疑似被截断")
-                return out, {}, model
+                ai_cache_put(key, {"text": out, "style": {}, "model": model, "mode": mode,
+                                   "ts": time.time(), "src_len": len(text)})
+                return out, {}, model, False
 
-            out = ollama_chat(SYS_POLISH, f"请打磨下面这段文字的朗读稿：\n\n{text}",
+            out = ollama_chat(SYS_POLISH + pref_suffix(),
+                              f"请打磨下面这段文字的朗读稿：\n\n{text}",
                               model, json_mode=True, temperature=0.3)
             try:
                 obj = json.loads(out)
@@ -416,12 +482,15 @@ def ai_refine(text: str, mode: str, body: dict):
                 raise AIBad("把思考过程写进了正文")
             if len(text) > 150 and len(polished) < len(text) * 0.25:
                 raise AIBad(f"只输出了 {len(polished)} 字，疑似截断")
-            return polished, {
+            style = {
                 "rate": obj.get("rate") or CFG["rate"],
                 "pitch": obj.get("pitch") or CFG["pitch"],
                 "note": obj.get("note") or "",
                 "title": obj.get("title") or "",
-            }, model
+            }
+            ai_cache_put(key, {"text": polished, "style": style, "model": model, "mode": mode,
+                               "ts": time.time(), "src_len": len(text)})
+            return polished, style, model, False
         except Exception as e:
             log.warning("模型 %s 处理 %s 未通过：%s", model, mode, e)
             problems.append(f"{model}（{e}）")
@@ -610,27 +679,155 @@ def api_config():
 
 @app.post("/api/plan")
 def api_plan():
-    """只做清洗 + 切句，不调用 AI。"""
+    """只做清洗 + 读音规整 + 逐句，不调用 AI。给"先看稿子再决定"的场景用。"""
+    body = request.get_json(silent=True) or {}
+    if not (body.get("text") or "").strip():
+        return jsonify({"ok": False, "error": "没有可处理的文本"}), 400
+    r = plan_text(body.get("text", ""),
+                  max_len=int(body.get("max_len") or CFG["max_len"]),
+                  do_normalize=bool(body.get("normalize", CFG["normalize"])))
+    return jsonify({"ok": True, "text": r["text"], "segments": r["segments"],
+                    "items": r["items"], "count": len(r["segments"])})
+
+
+RE_NOISE_TAG = re.compile(
+    r"<(script|style|noscript|svg|iframe|template|nav|header|footer|aside|form|select|button)"
+    r"[^>]*>.*?</\1\s*>", re.S | re.I)
+RE_NOISE_ATTR = re.compile(
+    r"<(div|section|ul|ol|span|p|dl)[^>]*(?:id|class)\s*=\s*[\"'][^\"']*"
+    r"(?:nav|menu|sidebar|breadcrumb|comment|copyright|footer|header|toolbar|share|related|"
+    r"recommend|advert|\bads?\b|pagination|tag-list|meta|catalog|toc)[^\"']*[\"'][^>]*>"
+    r".*?</\1\s*>", re.S | re.I)
+
+
+def _looks_like_nav(line: str) -> bool:
+    """判断一行是不是导航/菜单/标签云这类"不是正文"的东西。"""
+    t = line.strip()
+    if len(t) < 12:
+        return True
+    if re.search(r"[。！？；，、：.!?;,]", t):
+        return False                       # 有标点，像正常句子
+    if len(t.split()) >= 4:
+        return True                        # 无标点的长行 + 空格分词多 = 菜单条
+    if re.fullmatch(r"[\w\u4e00-\u9fff]{1,4}([\s·|/›»]+\S{1,6}){3,}", t):
+        return True
+    return False
+
+
+def extract_main_text(raw: str) -> str:
+    """从网页 HTML 里抠出正文（不用额外依赖的轻量做法）。"""
+    s = re.sub(r"<!--.*?-->", " ", raw, flags=re.S)
+    # 先盯住常见正文容器，命中就只取它，能显著减少噪声
+    for pat in (r"<article[^>]*>(.*?)</article\s*>",
+                r'<[^>]+(?:id|class)\s*=\s*["\'][^"\']*(?:js_content|rich_media_content|'
+                r"article-content|post-content|entry-content|markdown-body)[^\"']*[\"'][^>]*>(.*?)</div\s*>",
+                r"<main[^>]*>(.*?)</main\s*>"):
+        m = re.search(pat, s, re.S | re.I)
+        if m and len(re.sub(r"<[^>]+>", "", m.group(1))) > 200:
+            s = m.group(1)
+            break
+    s = RE_NOISE_TAG.sub(" ", s)
+    s = RE_NOISE_ATTR.sub(" ", s)
+    s = re.sub(r"</(p|div|li|h[1-6]|tr|section|article|blockquote|dd|dt)>", "\n", s, flags=re.I)
+    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.I)
+    s = re.sub(r"<[^>]+>", " ", s)
+    s = _html.unescape(s)
+    s = re.sub(r"[ \t\u3000]+", " ", s)
+    lines = []
+    for line in s.split("\n"):
+        line = re.sub(r"\s+", " ", line).strip()
+        if not line or _looks_like_nav(line):
+            continue
+        lines.append(line)
+    return "\n\n".join(lines).strip()
+
+
+@app.get("/api/fetch")
+@app.post("/api/fetch")
+def api_fetch():
+    """把一个网页正文抓成可朗读的文本。剪贴板里是链接时直接用它。"""
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+    else:
+        body = request.args
+    url = (body.get("url") or "").strip()
+    if not re.match(r"^https?://", url, re.I):
+        return jsonify({"ok": False, "error": "不是有效的 http/https 链接"}), 400
+    try:
+        r = requests.get(url, timeout=20, headers={
+            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                           "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        })
+        r.raise_for_status()
+        raw = r.text
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"抓取失败：{e}"}), 502
+
+    title = ""
+    m = re.search(r"<title[^>]*>(.*?)</title>", raw, re.S | re.I)
+    if m:
+        title = _html.unescape(re.sub(r"\s+", " ", m.group(1))).strip()
+    text = extract_main_text(raw)
+    cleaned = clean_text(text)
+    if len(cleaned) < 120:
+        return jsonify({"ok": False, "chars": len(cleaned),
+                        "error": "没能从这个页面提取到正文（可能需要登录，或内容由脚本动态加载）。"
+                                 "请手动复制正文后再朗读。"}), 422
+    return jsonify({"ok": True, "title": title, "text": cleaned,
+                    "chars": len(cleaned), "url": r.url})
+
+
+@app.get("/api/settings")
+def api_settings_get():
+    return jsonify({"ok": True, "settings": CFG.get("prefs") or {},
+                    "config": {k: CFG[k] for k in ("normalize", "auto_voice", "max_len",
+                                                   "long_doc_chars", "default_voice",
+                                                   "rate", "pitch", "volume",
+                                                   "small_model", "quality_model")}})
+
+
+@app.post("/api/settings")
+def api_settings_post():
+    """记住用户偏好（会注入 AI 提示词），以及引擎侧的朗读选项。"""
+    body = request.get_json(silent=True) or {}
+    prefs = CFG.setdefault("prefs", {})
+    for k in ("style", "mode", "model", "quality"):
+        if k in body:
+            prefs[k] = body[k]
+    for k in ("normalize", "auto_voice", "max_len", "long_doc_chars",
+              "default_voice", "rate", "pitch", "volume"):
+        if k in body:
+            CFG[k] = body[k]
+    save_config(CFG)
+    return jsonify({"ok": True, "settings": prefs})
+
+
+@app.post("/api/recommend")
+def api_recommend():
+    """按内容推荐音色（前端也可以直接用 /api/prepare 里带回来的推荐）。"""
     body = request.get_json(silent=True) or {}
     text = clean_text(body.get("text", ""))
-    max_len = int(body.get("max_len") or CFG["max_len"])
-    segs = split_segments(text, max_len)
-    if not segs and text:
-        segs = [text]
-    return jsonify({"text": text, "segments": segs, "count": len(segs)})
+    if not text:
+        return jsonify({"ok": False, "error": "没有文本"}), 400
+    names = [v.get("ShortName") for v in list_voices() if v.get("ShortName")]
+    rec = NLP.recommend_voice(text, names)
+    return jsonify({"ok": True, **rec})
 
 
 def _guarded_stream(text: str, limit: int, model: str):
     """流式总结：先攒前 160 字做一次质检，发现推理泄漏立刻中止，不把垃圾吐给用户。"""
-    gen = ollama_chat(SYS_SUMMARY,
+    gen = ollama_chat(SYS_SUMMARY + pref_suffix(),
                       f"请把下面内容压缩成朗读稿（目标 {limit} 字以内）：\n\n{text}",
                       model, stream=True)
     buf, early = "", True
+    total = ""
     for piece in gen:
+        total += piece
         if early:
             buf += piece
             if looks_like_cot(buf):
-                yield "（小模型把思考过程写进了正文，已中止。建议切到升配模型，或改用「润色」。）"
+                yield "\n（小模型把思考过程写进了正文，已中止。建议切到升配模型，或改用「润色」。）"
                 return
             if len(buf) >= 160:
                 early = False
@@ -651,29 +848,41 @@ def api_ai():
     if not text:
         return jsonify({"ok": False, "error": "没有可处理的文本"}), 400
     limit = int(body.get("limit") or 300)
-    if body.get("stream") and mode == "summarize":
+    if body.get("stream") and mode == "summarize" and len(text) < int(CFG.get("long_doc_chars", 6000)):
         try:
             model = pick_models(body)[0]
         except AIBad as e:
             return jsonify({"ok": False, "error": str(e)}), 502
         return Response(_guarded_stream(text, limit, model), mimetype="text/plain; charset=utf-8")
     try:
-        out_text, style, model = ai_refine(text, mode, body)
+        out_text, style, model, cached = ai_refine(text, mode, body)
     except AIBad as e:
         return jsonify({"ok": False, "error": f"AI 输出未通过质量检查：{e}"}), 502
     if mode == "summarize":
-        return jsonify({"ok": True, "mode": mode, "model": model, "text": out_text})
-    return jsonify({"ok": True, "mode": mode, "model": model, "text": out_text, **style})
+        return jsonify({"ok": True, "mode": mode, "model": model, "text": out_text,
+                        "ai_cached": cached,
+                        "long_doc": len(text) >= int(CFG.get("long_doc_chars", 6000))})
+    return jsonify({"ok": True, "mode": mode, "model": model, "text": out_text,
+                    "ai_cached": cached, **style})
 
 
 @app.post("/api/prepare")
 def api_prepare():
-    """一步到位：清洗 -> （可选）AI -> 切句。供 Obsidian 与快捷朗读调用。"""
+    """一步到位：清洗 -> （可选）AI -> 读音规整 -> 逐句。
+
+    返回里除了兼容用的 segments（字符串数组），还多了 items：
+       [{text, kind, pause, rate}]  —— pause 是这句之后该停多久（毫秒），
+       kind 是 heading/list/quote/para，前端据此做停顿、语速层次和高亮。
+    另外带上按内容推荐的音色与语言判定，前端可以直接采纳。
+    """
     body = request.get_json(silent=True) or {}
     ai = body.get("ai") or "none"
-    text = clean_text(body.get("text", ""))
-    if not text:
+    raw = body.get("text", "")
+    do_norm = bool(body.get("normalize", CFG["normalize"]))
+    max_len = int(body.get("max_len") or CFG["max_len"])
+    if not (raw or "").strip():
         return jsonify({"ok": False, "error": "没有可朗读的文本"}), 400
+
     style = {
         "voice": body.get("voice") or CFG["default_voice"],
         "rate": body.get("rate") or CFG["rate"],
@@ -683,9 +892,14 @@ def api_prepare():
     }
     model = None
     ai_note = ""
+    cached = False
+    long_doc = False
+    source = clean_text(raw)
+    final_text = source
+
     if ai in ("summarize", "polish"):
         try:
-            text, style2, model = ai_refine(text, ai, body)
+            final_text, style2, model, cached = ai_refine(source, ai, body)
             style.update(style2)
         except Exception as e:
             # AI 不靠谱时绝不阻断朗读：退回原文，并把原因告诉调用方
@@ -693,9 +907,35 @@ def api_prepare():
             ai_note = f"AI 输出未通过质量检查，已改为朗读原文。原因：{e}"
             ai = "none"
             model = None
-    segs = split_segments(text, int(body.get("max_len") or CFG["max_len"])) or [text]
-    return jsonify({"ok": True, "text": text, "segments": segs, "style": style,
-                    "ai": ai, "ai_note": ai_note, "model": model, "count": len(segs)})
+            final_text = source
+        long_doc = len(source) >= int(CFG.get("long_doc_chars", 6000))
+
+    r = plan_text(final_text, max_len=max_len, do_normalize=do_norm)
+    segs = r["segments"]
+    if not segs and r["text"]:
+        segs = [r["text"]]
+        r["items"] = [{"text": r["text"], "kind": "para", "pause": 660, "rate": 0}]
+
+    names = [v.get("ShortName") for v in list_voices() if v.get("ShortName")]
+    rec = NLP.recommend_voice(r["text"], names) if r["text"] else {}
+    return jsonify({
+        "ok": True,
+        "text": r["text"],
+        "segments": segs,
+        "items": r["items"],
+        "count": len(segs),
+        "style": style,
+        "ai": ai,
+        "ai_note": ai_note,
+        "ai_cached": cached,
+        "model": model,
+        "long_doc": long_doc,
+        "source_chars": len(source),
+        "lang": rec.get("lang"),
+        "voice_suggestion": rec.get("voice"),
+        "voice_reason": rec.get("reason"),
+        "normalized": do_norm,
+    })
 
 
 @app.route("/api/tts", methods=["GET", "POST"])
@@ -734,6 +974,7 @@ def api_broadcast():
         "rate": body.get("rate") or "",
         "pitch": body.get("pitch") or "",
         "auto": body.get("auto", True),
+        "hint": body.get("hint") or "",
         "ts": time.time(),
     })
     return jsonify({"ok": True, "delivered": n})

@@ -2,7 +2,8 @@
 """
 ReadAloud 全局热键守护（纯 ctypes，无第三方依赖，无需管理员权限）
 
-    Ctrl + Alt + R   朗读剪贴板
+    Ctrl + Alt + R   朗读剪贴板（内容是链接就自动抓正文）
+    Ctrl + Alt + E   朗读当前选中的文字（自动取选区）
     Ctrl + Alt + S   总结剪贴板并朗读
     Ctrl + Alt + W   润色剪贴板并朗读
     Ctrl + Alt + X   打开朗读工作台
@@ -16,7 +17,7 @@ import ctypes.wintypes as wt
 import sys
 from pathlib import Path
 
-from ra_common import health, log, open_player, post, read_clipboard, speak
+from ra_common import copy_selection, health, log, open_player, post, read_clipboard, speak
 
 PID_FILE = Path(__file__).resolve().parent / ".hotkey.pid"
 
@@ -29,20 +30,22 @@ WM_HOTKEY = 0x0312
 
 HOTKEYS = {
     1: (ord("R"), "朗读剪贴板"),
+    6: (ord("E"), "朗读选中的文字"),
     2: (ord("S"), "总结剪贴板并朗读"),
     3: (ord("W"), "润色剪贴板并朗读"),
     4: (ord("X"), "打开朗读工作台"),
     5: (ord("Q"), "停止朗读"),
 }
 
-_ai = {1: "none", 2: "summarize", 3: "polish"}
+_ai = {1: "none", 6: "none", 2: "summarize", 3: "polish"}
 
 
 def handle(hotkey_id: int) -> None:
     if hotkey_id in _ai:
-        text = read_clipboard().strip()
+        # E 键先尝试"把当前选中的文字复制出来"，取不到就退回剪贴板
+        text = copy_selection().strip() if hotkey_id == 6 else read_clipboard().strip()
         if not text:
-            log("剪贴板为空，忽略")
+            log("没有可用文字，忽略")
             return
         log(f"[{HOTKEYS[hotkey_id][1]}] {len(text)} 字 -> {_ai[hotkey_id]}")
         try:
