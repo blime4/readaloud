@@ -12,3 +12,6 @@ python.path
 
 # 页面构建产物
 node_modules/
+
+# 临时探针产物（手工 curl 验证时留下的中间 JSON）
+_t_*.json

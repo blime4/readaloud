@@ -1204,10 +1204,11 @@ function renderUrlStat(d, mode, auto) {
          ` · 抓取质量 <span class="${cls}">${qtxt}</span></div>`);
 
   const byModel = (d.trace || []).some(t => t.tool === 'fetch_page' || t.kind === 'clean' || t.tool === 'finish');
+  const skipped = (d.trace || []).find(t => t.kind === 'skip_model');
   p.push(`<div>方式：<b>${mode === 'agent' ? '模型主导' : '规则直取'}</b>` +
          (d.model ? ` · 模型 <code>${esc(d.model)}</code>` : '') +
          (d.elapsed ? ` · 用时 ${d.elapsed}s` : '') +
-         (byModel ? '' : ' · 未动用模型（抓得已经够干净）') + `</div>`);
+         (byModel ? '' : ` · 未动用模型（${skipped ? esc(skipped.reason || '') : '抓得已经够干净'}）`) + `</div>`);
   p.push(`<div>朗读：<b>按原文</b>` +
          (auto ? '，不会自动缩成摘要' : '') +
          ` · 想听摘要点「✨ 总结」，想更顺口点「🎭 润色」</div>`);
@@ -1220,7 +1221,11 @@ function renderUrlStat(d, mode, auto) {
     if (t.kind === 'clean')
       return t.ok ? `模型清理头尾：删掉 ${t.removed} 行网页垃圾` : `模型清理：跳过（${esc(t.error || '')}）`;
     if (t.kind === 'finish') return `模型定稿${t.note ? '：' + esc(t.note) : ''}`;
+    if (t.kind === 'clean_start') return '稿子已到手，直接进深度清理（省掉一轮模型决策）';
+    if (t.kind === 'retry') return `模型第 ${t.round} 轮空回复，已重发（第 ${t.attempt} 次）`;
     if (t.kind === 'fallback') return '模型没给结论，按质量分自动选稿';
+    if (t.kind === 'skip_model') return `没喊模型：${esc(t.reason || '')}`;
+    if (t.kind === 'stop') return `提前收手：${esc(t.reason || '')}`;
     if (t.kind === 'error') return `出错：${esc(t.message || '')}`;
     return null;
   }).filter(Boolean);
@@ -1228,7 +1233,7 @@ function renderUrlStat(d, mode, auto) {
   el.innerHTML = p.join('');
 }
 
-async function fetchUrl(url, auto, clean) {
+async function fetchUrl(url, auto, clean, retry) {
   if (url === undefined || url === null) url = ($('#urlIn').value || '').trim();
   if (!url) { toast('先粘贴一个网页链接'); $('#urlIn').focus(); return; }
   if (!/^https?:\/\//i.test(url)) { toast('请填 http/https 开头的链接'); return; }
@@ -1244,12 +1249,12 @@ async function fetchUrl(url, auto, clean) {
     try {
       const r = await fetch(API + '/api/agent', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, text: url, clean: !!clean }),
+        body: JSON.stringify({ url, text: url, clean: !!clean, retry: !!retry }),
       });
       d = await r.json();
       mode = d.path === 'agent' ? 'agent' : 'rules';
-      // Ollama 没起来 / Agent 不可用 → 退回纯规则抓取，别让用户读不成
-      if (!d.ok && (r.status === 503 || /Ollama/.test(d.error || ''))) d = null;
+      // 引擎太旧（没有 /api/agent）→ 退回纯规则抓取，别让用户读不成
+      if (!d.ok && r.status === 503) d = null;
     } catch (e) { d = null; }
 
     if (!d) {
@@ -1258,7 +1263,11 @@ async function fetchUrl(url, auto, clean) {
       mode = 'rules';
     }
     progress(85);
-    if (!d.ok) throw new Error(d.error || '抓取失败');
+    if (!d.ok) {
+      const err = new Error(d.error || '抓取失败');
+      err.blockedHint = d.blocked ? String(d.blocked) : '';
+      throw err;
+    }
 
     pushHistory($('#txt').value);
     $('#txt').value = (d.title ? d.title + '\n\n' : '') + d.text;
@@ -1275,8 +1284,14 @@ async function fetchUrl(url, auto, clean) {
   } catch (e) {
     const el = $('#urlStat');
     el.style.display = 'block';
-    el.innerHTML = `<div class="bad">抓取失败：${esc(e.message)}</div>
-      <div class="hint">如果是需要登录的页面（知乎、付费内容），把浏览器里看到的正文复制过来一样能读。</div>`;
+    el.innerHTML = `<div class="bad">抓取失败：${esc(e.message)}</div>` +
+      (e.blockedHint ? `<div class="hint">站点原因：${esc(e.blockedHint)}</div>` : '') +
+      `<div class="hint">需要登录的页面（知乎、付费内容、会员文章）抓不到是正常的，
+        把浏览器里看到的正文复制进来一样能读。</div>` +
+      `<div style="margin-top:8px"><button class="ghost tiny" id="btnUrlRetry"
+        title="交给模型换策略再抓一次，通常要十几秒">🧠 让模型硬试一次</button></div>`;
+    const rb = $('#btnUrlRetry');
+    if (rb) rb.onclick = () => fetchUrl(url, auto, clean, true);
     toast(e.message, 4200);
   } finally { overlay(false); }
 }

@@ -118,7 +118,10 @@ SYS_AGENT = (
     "- 你绝不能改写、概括、翻译、删减正文内容，也不要输出正文本身。\n"
     "- 不要反复重抓。只要有一份稿子 ok 为 true 且 quality 不低于 60，就直接 finish。\n"
     "- 工具总共最多调用 4 次。\n"
-    "- 只输出工具调用，不要输出解释性文字。"
+    "- 每一轮都调用一个工具，工具调用就是你这一轮的全部回答。"
+    # 这里原本写的是「只输出工具调用，不要输出解释性文字」—— 结果 qwen2.5:7b
+    # 直接吐一个空回复（连 tool_calls 都没有），4 次里 0 次成功。实测换成上面
+    # 这句肯定式说法后 4/4 成功。小模型对否定式指令的处理非常不可靠，别再写回去。
 )
 
 
@@ -173,6 +176,7 @@ def extract_url(text: str) -> str:
 def run(url: str, model: str, ollama_url: str, num_ctx: int = 32768,
         keep_alive: str = "30m", auto: bool = True, do_clean: bool = False,
         fetch_timeout: float = 25.0, proxy: str = "auto",
+        retry_on_fail: bool = False, ollama_ok: bool = True,
         on_event: Optional[Callable[[dict], None]] = None,
         max_tool_calls: int = 4) -> dict:
     """把链接抓成朗读稿。auto=True 时先走零模型开销的快路。"""
@@ -217,6 +221,29 @@ def run(url: str, model: str, ollama_url: str, num_ctx: int = 32768,
     if auto and good and not do_clean:
         return _result(first, trace, t0, "direct", note="", model=None)
 
+    # 第一级**彻底**失败（一个字节正文都没拿到）时，别叫模型 —— 它帮不上忙。
+    # auto 模式已经把 desktop / mobile 两种身份都试过一遍了，模型能做的
+    # 也只是"再抓一次"，撞的是同一堵墙。实测：白烧 39 秒、产出 0 字。
+    # 想让它硬试，调用方传 retry_on_fail=True。
+    if not first.get("ok") and not retry_on_fail:
+        emit("skip_model", reason="网络层没拿到内容，重抓是同一堵墙")
+        return _result(first, trace, t0, "direct", note="", model=None)
+
+    # Ollama 没在跑：别报错，把确定性抓到的结果照样交出去。
+    # 抓得干净时本来就用不着模型，用户不该因为这个听不了文章。
+    if not ollama_ok:
+        emit("skip_model", reason="Ollama 未运行，跳过模型整理")
+        return _result(first, trace, t0, "direct", note="", model=None)
+
+    # 用户只是要"深度清理"，而稿子已经在手里 —— 不用绕工具回路：
+    # 直接调 clean_page。清理本来就是一个单步动作，让模型先"决定去抓"再"决定
+    # 去清"纯属浪费一轮，还多一个翻车点（实测那轮会偶发空回复）。
+    if do_clean and auto and first.get("ok"):
+        emit("clean_start", reason="稿子已到手，直接进深度清理")
+        _clean_page(state, 0, model, ollama_url, num_ctx, keep_alive, emit)
+        return _result(state["pages"][0], trace, t0, "agent",
+                       note="已清掉头尾的网页垃圾", model=model)
+
     # ---------- 第二级：模型介入 ----------
     def call_fetch(a: dict) -> dict:
         mode = a.get("mode") or "auto"
@@ -228,6 +255,16 @@ def run(url: str, model: str, ollama_url: str, num_ctx: int = 32768,
         emit("fetch", tool="fetch_page", mode=mode, idx=i, ok=bool(d.get("ok")),
              quality=d.get("quality"), chars=d.get("chars"), route=d.get("route"),
              error=d.get("error"))
+        # 同一个错误连撞两次就别再撞了（模型有时会固执地重试同一个 mode）
+        if not d.get("ok"):
+            err = str(d.get("error") or "")
+            if err and err == state.get("_last_fetch_err"):
+                state["_fail_streak"] = state.get("_fail_streak", 1) + 1
+            else:
+                state["_fail_streak"] = 1
+            state["_last_fetch_err"] = err
+        else:
+            state["_fail_streak"] = 0
         return brief(i, d)
 
     def call_clean(a: dict) -> dict:
@@ -262,10 +299,24 @@ def run(url: str, model: str, ollama_url: str, num_ctx: int = 32768,
 
     used = 0
     for _round in range(max_tool_calls + 1):
-        try:
-            msg = _chat(messages, model, ollama_url, num_ctx, keep_alive, tools=TOOLS)
-        except Exception as e:
-            emit("error", where="model", message=f"{type(e).__name__}: {str(e)[:150]}")
+        # 小模型偶尔会吐一个彻底的空回复（既没文字也没工具调用）——采样是随机的，
+        # 原地重试一次基本就能出结果，比直接放弃划算得多。
+        msg: dict = {}
+        for attempt in range(2):
+            try:
+                msg = _chat(messages, model, ollama_url, num_ctx, keep_alive,
+                            tools=TOOLS,
+                            temperature=0.2 + 0.2 * attempt)
+            except Exception as e:
+                emit("error", where="model", message=f"{type(e).__name__}: {str(e)[:150]}")
+                msg = {}
+                break
+            if (msg.get("tool_calls") or []) or (msg.get("content") or "").strip():
+                break
+            emit("retry", round=_round + 1, attempt=attempt + 1,
+                 reason="模型这一轮什么都没输出，重发一次")
+
+        if not msg:
             break
 
         calls = msg.get("tool_calls") or []
@@ -292,6 +343,9 @@ def run(url: str, model: str, ollama_url: str, num_ctx: int = 32768,
             messages.append({"role": "tool", "tool_name": name,
                              "content": json.dumps(out, ensure_ascii=False)})
         if state["chosen"] is not None or used >= max_tool_calls:
+            break
+        if state.get("_fail_streak", 0) >= 2:
+            emit("stop", reason="连续两次抓取报同一个错，提前收手")
             break
 
     # ---------- 收尾：模型没 finish 也要给结果 ----------

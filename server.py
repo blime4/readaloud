@@ -78,7 +78,7 @@ DEFAULT_CONFIG = {
     "prefs": {"style": "", "mode": "none", "model": "", "quality": False},
 }
 
-ENGINE_VERSION = "1.3.0"
+ENGINE_VERSION = "1.3.1"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -89,6 +89,8 @@ FEATURES = [
     "keep-alive",           # 模型常驻，避免重复加载
     "web-fetch-quality",    # fetch 返回质量分/诊断/噪声清理统计
     "web-agent",            # /api/agent：工具调用小模型主导取稿
+    "local-url-direct",     # 回环/内网地址直连，不经过代理
+    "fail-fast",            # 抓不到就不叫模型空转，直接如实报错
 ]
 
 # 页面文件：优先用 docs/（= GitHub Pages 站点目录），本地与线上共用同一份，
@@ -859,6 +861,7 @@ def api_agent():
         clean        true = 强制走模型深度清理
         model        指定模型，默认 agent_model 或 small_model
         max_calls    工具调用上限
+        retry        抓不到时也让模型硬试一次（默认关：多半是白烧时间）
     """
     body = request.get_json(silent=True) or {}
     raw = (body.get("text") or "").strip()
@@ -867,8 +870,9 @@ def api_agent():
         return jsonify({"ok": False, "error": "没找到有效的 http/https 链接"}), 400
 
     model = pick_agent_model(body.get("model") or "")
-    if not ollama_models():
-        return jsonify({"ok": False, "error": "Ollama 没在运行，取稿 Agent 需要它来决策"}), 503
+    # Ollama 没开也算不上错 —— 抓得干净时压根不需要模型。把"能不能用模型"
+    # 交给 run 内部判断，而不是在这里一刀切 503。
+    has_ollama = bool(ollama_models())
 
     do_clean = bool(body.get("clean"))
     try:
@@ -881,6 +885,8 @@ def api_agent():
             do_clean=do_clean,
             fetch_timeout=float(CFG.get("fetch_timeout", 25)),
             proxy=CFG.get("fetch_proxy", "auto"),
+            retry_on_fail=bool(body.get("retry")),
+            ollama_ok=has_ollama,
             max_tool_calls=int(body.get("max_calls")
                                or CFG.get("agent_max_tool_calls", 4)),
         )

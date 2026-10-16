@@ -332,6 +332,32 @@ def html_to_lines(html: str) -> list[str]:
         line = re.sub(r"[ \t\u3000]+", " ", line).strip()
         if line:
             out.append(line)
+    return _glue_bare_markers(out)
+
+
+# 只有标记、没有内容的行。缩进过的 HTML 很常见：
+#     <h1>\n  浅谈 One UI6.0 更新\n</h1>
+# 井号和标题会被换行拆成两行 —— 如果不粘回去，下游既认不出这是标题，
+# 又会把标题、作者卡片、正文第一句全糊成一段（实测踩过）。
+_BARE_MARKER_RE = re.compile(r"^(#{1,6}|>|[-*•·▪◦]|\(?\d{1,2}[.)、])$")
+
+
+def _glue_bare_markers(lines: list[str]) -> list[str]:
+    out: list[str] = []
+    pending = ""
+    for line in lines:
+        m = _BARE_MARKER_RE.match(line)
+        if m:
+            if pending:                  # 连着两个空标记，各自保留
+                out.append(pending)
+            pending = m.group(1)
+            continue
+        if pending:
+            line = pending + " " + line
+            pending = ""
+        out.append(line)
+    if pending:
+        out.append(pending)
     return out
 
 
@@ -428,55 +454,94 @@ def is_template_junk(t: str) -> bool:
     return uniq / len(t) < 0.38
 
 
-def drop_junk(paras: list[str]) -> tuple[list[str], int]:
-    """丢掉明显的噪声行，返回 (干净段落, 丢掉的数量)。"""
-    kept = []
-    dropped = 0
-    total = len(paras)
-    for p in paras:
-        t = p.strip()
-        # 带结构标记的行（标题/引文/列表项）通常短于 14 字也照样有意义：
-        # "# 快速面板"、"引文原话" 这些不能被"太短就当菜单丢掉"的规则误伤。
-        is_struct = bool(STRUCT_LINE_RE.match(t))
-        core = re.sub(r"^\s*(?:#{1,6}\s+|>\s+|[-*•·▪◦]\s+)", "", t).strip()
-        # 结构行带标记，说明上游确实是从 <h?> / <li> / <blockquote> 里提出来的，
-        # 门槛放宽到 2 字（"引言"这种短标题真实存在）；普通行仍要求 4 字。
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+_CL_PUNCT_RE = re.compile(r"[。！？；，、：.!?;,]")
+
+
+def _is_junk_line(t: str, pre: bool = False) -> bool:
+    """这一行是不是网页垃圾。pre=True 表示"段落重排之前"的判断。
+
+    两遍判断的差别只在**长度类**规则上：重排前的"行"是原始排版单位，英文站
+    一行两三个词是常态，按长度杀会直接吃掉正文；重排后的"行"已经是段落，
+    短就是真短。内容类规则（按钮文案、推广语、整行链接）没有这个问题，两遍都查。
+    """
+    # 带结构标记的行（标题/引文/列表项）通常短于 14 字也照样有意义：
+    # "# 快速面板"、"引文原话" 这些不能被"太短就当菜单丢掉"的规则误伤。
+    is_struct = bool(STRUCT_LINE_RE.match(t))
+    core = re.sub(r"^\s*(?:#{1,6}\s+|>\s+|[-*•·▪◦]\s+)", "", t).strip()
+    cjk = bool(_CJK_RE.search(t))
+    length_rules_apply = not (pre and not cjk)
+
+    # 太短：结构行放宽到 2 字（"引言"这种短标题真实存在），普通行要求 4 字
+    if length_rules_apply:
         too_short = len(core) < 2 if is_struct else len(t) < 4
         if too_short:
-            dropped += 1
-            continue
-        # 整行就是"点赞/关注/赞赏"这类按钮文案
-        if JUNK_FULL_RE.match(core):
-            dropped += 1
-            continue
-        # 推广语/互动引导：短行里出现就丢；长段落里出现说明是正常行文，保留
-        if len(core) < 70 and JUNK_FRAG_RE.search(core):
-            dropped += 1
-            continue
-        if JUNK_LINKLINE_RE.match(core):
-            dropped += 1
-            continue
-        # 相关阅读墙：带域名、又不是完整句子
-        if len(t) < 90 and DOMAIN_RE.search(core) and not REAL_END_RE.search(core):
-            dropped += 1
-            continue
-        # 模板重复行（作者卡片、标签云）
-        if is_template_junk(t):
-            dropped += 1
-            continue
-        # 纯符号/纯 emoji
-        if not re.search(r"[\w\u4e00-\u9fff]", t):
-            dropped += 1
-            continue
-        # 短行且没有任何句读 → 多半是菜单/标签（结构行除外）
-        if not is_struct and len(t) < 14 and not re.search(r"[。！？；，、：.!?;,]", t):
+            return True
+    # 整行就是"点赞/关注/赞赏"这类按钮文案
+    if JUNK_FULL_RE.match(core):
+        return True
+    # 推广语/互动引导：短行里出现就丢；长段落里出现说明是正常行文，保留
+    if len(core) < 70 and JUNK_FRAG_RE.search(core):
+        return True
+    if JUNK_LINKLINE_RE.match(core):
+        return True
+    # 纯符号/纯 emoji
+    if not re.search(r"[\w\u4e00-\u9fff]", t):
+        return True
+
+    if pre:
+        # 重排前只多查这一条：短中文行、没有任何句读 → 作者卡片 / 阅读时长 /
+        # 标签云。必须在 reflow 把它们粘进正文之前杀掉。
+        if cjk and not is_struct and len(t) <= 14 and not _CL_PUNCT_RE.search(t):
+            return True
+        # 其余规则是"段落级"的判断，用在碎行上会误伤（英文长句的行很容易
+        # 落进模板重复行的长度窗口），重排后再查。
+        return False
+
+    if is_struct:
+        return False
+    # 相关阅读墙：带域名、又不是完整句子
+    if len(t) < 90 and DOMAIN_RE.search(core) and not REAL_END_RE.search(core):
+        return True
+    # 模板重复行（作者卡片、标签云）
+    if is_template_junk(t):
+        return True
+    # 短行且没有任何句读 → 多半是菜单/标签
+    if len(t) < 14 and not _CL_PUNCT_RE.search(t):
+        return True
+    return False
+
+
+def drop_junk(paras: list[str]) -> tuple[list[str], int]:
+    """丢掉明显的噪声行，返回 (干净段落, 丢掉的数量)。"""
+    return _drop(paras, pre=False)
+
+
+def drop_junk_lines(lines: list[str]) -> tuple[list[str], int]:
+    """段落重排**之前**先清一遍。
+
+    非做不可的理由：作者卡片、阅读时长、"关注我们"这类碎片行又短又没有句读，
+    一旦被 reflow 接进正文段落，就再也分不出来了 —— 输出会长成
+    「作者名 少数派作者 7 分钟阅读 12月26日，我的手机收到了…」，
+    读出来是灾难。必须在它们被粘起来之前杀掉。
+    """
+    return _drop(lines, pre=True)
+
+
+def _drop(items: list[str], pre: bool) -> tuple[list[str], int]:
+    kept = []
+    dropped = 0
+    total = len(items)
+    for p in items:
+        t = p.strip()
+        if _is_junk_line(t, pre=pre):
             dropped += 1
             continue
         kept.append(t)
 
     # 若砍得太狠（剩下不到 15%），说明规则误伤，退回原样
     if total >= 8 and len(kept) < total * 0.15:
-        return paras, 0
+        return items, 0
     return kept, dropped
 
 
@@ -546,7 +611,30 @@ def _get(url: str, mode: str, timeout: float, proxies: Optional[str]):
     kw = {"timeout": timeout, "headers": headers, "allow_redirects": True}
     if proxies:
         kw["proxies"] = {"http": proxies, "https": proxies}
+    else:
+        # 显式声明"这两个协议都不走代理"。只传 proxies=None 是不够的 ——
+        # requests 会回头去读环境变量里的 HTTP_PROXY，把"直连"偷偷变成
+        # "走代理"：目标一旦是回环/内网地址，代理只会回一个 502，
+        # 于是"本机自己起的服务"反而抓不到。（实测踩过）
+        kw["proxies"] = {"http": None, "https": None}
     return requests.get(url, **kw)
+
+
+# 回环 / 内网地址：这些一律直连，代理对它们没有任何意义
+_LOCAL_HOST_RE = re.compile(
+    r"^(?:localhost|127\.|0\.0\.0\.0|\[?::1\]?|10\.|192\.168\.|169\.254\.|"
+    r"172\.(?:1[6-9]|2\d|3[01])\.)", re.I)
+
+
+def is_local_url(url: str) -> bool:
+    """判断是不是"就在本机/局域网里"的地址 —— 这类目标不该过代理。"""
+    m = re.match(r"^https?://([^/:?#]+)", url or "", re.I)
+    if not m:
+        return False
+    host = m.group(1).strip("[]").lower()
+    if host.endswith(".local") or "." not in host:
+        return True                      # mDNS 名或裸机器名，都是内网
+    return bool(_LOCAL_HOST_RE.match(host))
 
 
 # --------------------------------------------------------------------------
@@ -554,7 +642,12 @@ def _get(url: str, mode: str, timeout: float, proxies: Optional[str]):
 # --------------------------------------------------------------------------
 
 def strip_leading_title(text: str, title: str) -> str:
-    """正文开头常常把标题又抄了一遍，读出来会"念两遍标题"。"""
+    """正文开头常常把标题又抄了一遍，读出来会"念两遍标题"。
+
+    小心：只能在这一行**基本就是标题**时才删。英文站常把标题、日期、正文首句
+    挤进同一段（"How to Do Great Work July 2023 If you collected lists…"），
+    那时整行删掉等于把开篇正文吃掉了。
+    """
     if not title or not text:
         return text
     key = re.sub(r"[\s，。、：:！？!?\-|_—]+", "", title)
@@ -563,8 +656,14 @@ def strip_leading_title(text: str, title: str) -> str:
     lines = text.split("\n")
     if not lines:
         return text
-    first = re.sub(r"[\s，。、：:！？!?\-|_—]+", "", lines[0])
-    if first and (key.startswith(first) or first.startswith(key)):
+    # 比较时忽略行首的结构标记（"# 标题" 也要能认出来）
+    head_raw = re.sub(r"^\s*(?:#{1,6}\s+|>\s+|[-*•·▪◦]\s+)", "", lines[0]).strip()
+    first = re.sub(r"[\s，。、：:！？!?\-|_—]+", "", head_raw)
+    if not first:
+        return text
+    if len(first) > len(key) + 24:
+        return text                      # 这行里还有别的内容，不是单纯标题
+    if key.startswith(first) or first.startswith(key):
         return "\n".join(lines[1:]).lstrip()
     return text
 
@@ -610,9 +709,12 @@ def to_reading_text(html: str, url: str) -> tuple[str, str, str, int]:
         if route == "trafilatura":
             # trafilatura 已经输出 markdown 文本，只需再清一遍噪声行
             paras = [ln.strip() for ln in frag.split("\n") if ln.strip()]
+            paras, drop_n = drop_junk(paras)
         else:
-            paras = reflow(html_to_lines(strip_noise(frag)))
-        paras, drop_n = drop_junk(paras)
+            # 先按"行"清一遍，再重排 —— 顺序不能反（见 drop_junk_lines 的说明）
+            lines, drop_n = drop_junk_lines(html_to_lines(strip_noise(frag)))
+            paras, d2 = drop_junk(reflow(lines))
+            drop_n += d2
         paras, tail_n = trim_tail_wall(paras)
         drop_n += tail_n
         text = tidy_wiki_annotations("\n".join(paras))
@@ -645,10 +747,17 @@ def fetch(url: str, mode: str = "auto", timeout: float = 25.0,
     if mode == "auto":
         modes = ["desktop", "mobile"]
 
+    # 本机 / 局域网地址永远直连：代理帮不上忙，只会把它挡成 502
+    if is_local_url(url):
+        proxy_list: list[Optional[str]] = [None]
+        diag["local_url"] = True
+    else:
+        proxy_list = _proxy_candidates(proxy)
+
     best: Optional[dict] = None
     last_err = ""
 
-    for px in _proxy_candidates(proxy):
+    for px in proxy_list:
         for md in modes:
             tag = f"{md}{'+proxy' if px else ''}"
             try:

@@ -181,7 +181,42 @@ kept2, _ = webfetch.drop_junk(
 check("长段落里的敏感词不误删", len(kept2), 1)
 
 
-print("\n=== 6. 尾部相关阅读墙 ===")
+print("\n=== 6. 重排之前先清行（不然碎片会被粘进正文）===")
+
+# 缩进过的 HTML 极常见：<h1>\n  标题\n</h1>。井号和标题一旦被换行拆开，
+# 下游既认不出标题，又会把标题+作者卡片+首段糊成一坨。
+_hl = webfetch.html_to_lines("<h1>\n  浅谈 One UI6.0 更新\n</h1>\n<p>正文来了。</p>")
+check("标题的井号与标题粘回同一行", _hl[0], "# 浅谈 One UI6.0 更新")
+check("井号行数只剩一行", sum(1 for x in _hl if x.startswith("#")), 1)
+
+# 作者卡片碎片：又短又没有句读，必须在 reflow 之前杀掉
+_scraps = ["# 浅谈 One UI6.0 更新", "趁着雨", "少数派作者", "联合作者", "7 分钟阅读",
+           "12月26日，我的手机收到了更新推送，我直接安装更新，毕竟也是期待了很久的。"]
+_pre, _pre_n = webfetch.drop_junk_lines(_scraps)
+check("作者卡片碎片重排前被清掉 4 行", _pre_n, 4)
+check("标题与正文都留着", len(_pre), 2)
+_reflowed = webfetch.reflow(_pre)
+check_true("重排后不会把碎片粘进正文",
+           _reflowed[1].startswith("12月26日"), _reflowed[1][:40])
+check_true("标题独占一段", _reflowed[0].startswith("# 浅谈"), _reflowed[0][:40])
+
+# 英文站靠硬换行排版，短行是正文碎片，重排前绝不能按长度杀
+_en = ["If you collected lists of techniques for doing", "great work in a lot",
+       "of different fields, what would the", "intersection look like?",
+       "Partly my goal was to create a guide that could be used by someone",
+       "working in any field."]
+_en_pre, _en_n = webfetch.drop_junk_lines(_en)
+check("英文硬换行的短行一行都没被误删", _en_n, 0)
+_en_para = webfetch.reflow(_en_pre)
+check("短行被接回完整段落", len(_en_para), 2)
+check_true("碎行已经接成一句完整的话",
+           _en_para[0].endswith("intersection look like?"), _en_para[0][-40:])
+check_true("首段一个词都没少",
+           _en_para[0].startswith("If you collected") and "great work in a lot" in _en_para[0],
+           _en_para[0][:70])
+
+
+print("\n=== 7. 尾部相关阅读墙 ===")
 
 paras = ["正文第一段。", "正文第二段。", "正文第三段。", "正文第四段。",
          "正文第五段。", "正文第六段。", "相关文章标题一", "相关文章标题二",
@@ -195,7 +230,7 @@ trimmed2, n2 = webfetch.trim_tail_wall(paras[:7] + ["相关文章标题一"])
 check("尾部不足 3 行不动手", n2, 0)
 
 
-print("\n=== 7. 拦截页识别 ===")
+print("\n=== 8. 拦截页识别 ===")
 
 check_true("安全检测页被识别",
            webfetch.looks_blocked("火山引擎 正在进行安全检测，请稍后重试") is not None)
@@ -207,13 +242,177 @@ check_true("正常正文不被误判",
            webfetch.looks_blocked("这是一篇正常文章的正文，讲述了一个完整的故事。") is None)
 
 
-print("\n=== 8. 标题去重 ===")
+print("\n=== 9. 标题去重 ===")
 t = webfetch.strip_leading_title("浅谈One UI6.0更新\n正文第一段内容在这里。", "浅谈One UI6.0更新")
 check_true("正文开头的重复标题被去掉", t.startswith("正文第一段"), t)
+# 带结构标记的重复标题也要认得出来
+t = webfetch.strip_leading_title("# 浅谈One UI6.0更新\n正文第一段内容在这里。", "浅谈One UI6.0更新")
+check_true("「# 标题」形式也去掉", t.startswith("正文第一段"), t)
+# 标题、日期、正文首句挤在同一行时，整行删掉会把开篇吃掉
+t = webfetch.strip_leading_title(
+    "How to Do Great Work July 2023 If you collected lists of techniques for "
+    "doing great work in a lot of different fields, what would the intersection "
+    "look like?", "How to Do Great Work")
+check_true("标题后还跟着正文时不整段删掉", t.startswith("How to Do Great Work"), t[:50])
+
+
+print("\n=== 10. 回环 / 内网地址不走代理 ===")
+
+# 真实踩过的坑：本机 Clash 开着时，抓"自己起的本地服务"会走代理，
+# 代理对 127.0.0.1 只能回 502 —— 于是本机页面反而抓不到。必须直连。
+for u, want, why in [
+    ("http://127.0.0.1:8756/", True, "回环 IP"),
+    ("http://localhost:5000/a", True, "localhost"),
+    ("http://192.168.1.10:8080/", True, "C 类内网"),
+    ("https://10.28.31.54/docs", True, "A 类内网"),
+    ("http://172.20.0.9/", True, "B 类内网"),
+    ("http://myhost:8000/", True, "裸机器名"),
+    ("https://paulgraham.com/x.html", False, "公网站点不该被当成内网"),
+    ("https://172.32.0.1/", False, "172.32 已出内网段"),
+]:
+    check(f"{why}：{u.split('/')[2][:28]}", webfetch.is_local_url(u), want)
+
+# 直连时必须在 requests 层面显式关掉代理，否则它会去读环境变量 HTTP_PROXY
+# （把"直连"悄悄变成"走代理"，这个 bug 就是这么做出来的）。
+_orig_get = webfetch.requests.get
+_got: dict = {}
+
+
+def _fake_get(url, **kw):
+    _got.clear()
+    _got.update(kw)
+
+    class _Resp:
+        status_code = 200
+        content = b""
+        headers: dict = {}
+        apparent_encoding = "utf-8"
+    _Resp.url = url
+    return _Resp()
+
+
+try:
+    webfetch.requests.get = _fake_get
+    webfetch._get("http://127.0.0.1:1/x", "desktop", 3, None)
+    check("直连时显式声明 http/https 都不走代理",
+          _got.get("proxies"), {"http": None, "https": None})
+    webfetch._get("https://example.com/", "desktop", 3, "http://127.0.0.1:7897")
+    check("给了代理就按代理走",
+          _got.get("proxies"),
+          {"http": "http://127.0.0.1:7897", "https": "http://127.0.0.1:7897"})
+finally:
+    webfetch.requests.get = _orig_get
+
+# 端到端：起一个真的本地服务，同时把环境变量里的代理指向一个死端口。
+# 回环地址能抓到 = 代理确实被绕过去了。
+import functools
+import http.server
+import json
+import os
+import socketserver
+import threading
+
+_BODY = (
+    "<html><head><meta charset='utf-8'><title>本地样本页</title></head><body>"
+    "<div id='content'><h1>本地样本标题</h1>"
+    "<p>这是本地服务返回的第一段正文，用来验证回环地址不会被系统代理拦截，"
+    "段落长度要足够长才能通过质量门槛，所以这里多写了一些没有实际含义的说明文字。"
+    "如果代理没有被绕过去，这一段根本不可能出现在抓取结果里，只会得到一个 502。</p>"
+    "<p>这是第二段。回环地址走代理时，代理不认识 127.0.0.1 指向哪里，"
+    "只能回一个网关错误；而环境变量里的代理又是很多机器默认就有的东西，"
+    "所以这条路径必须显式关掉代理才能稳定工作。两段合起来应当能被判断为"
+    "一份可朗读的稿子，而不是空壳页面。</p>"
+    "</div></body></html>")
+
+
+class _LocalHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802
+        body = _BODY.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+socketserver.TCPServer.allow_reuse_address = True
+_srv = socketserver.TCPServer(("127.0.0.1", 0), _LocalHandler)
+_local_url = f"http://127.0.0.1:{_srv.server_address[1]}/a.html"
+threading.Thread(target=_srv.serve_forever, daemon=True).start()
+
+_old_env = {k: os.environ.get(k) for k in ("HTTP_PROXY", "http_proxy",
+                                           "HTTPS_PROXY", "https_proxy")}
+os.environ.update({"HTTP_PROXY": "http://127.0.0.1:9", "http_proxy": "http://127.0.0.1:9",
+                   "HTTPS_PROXY": "http://127.0.0.1:9", "https_proxy": "http://127.0.0.1:9"})
+try:
+    _d = webfetch.fetch(_local_url, timeout=5)
+    check_true("环境变量里有死代理时，回环地址照样抓到",
+               bool(_d.get("ok")) and _d.get("chars", 0) > 60,
+               f"err={_d.get('error')} diag={json.dumps(_d.get('diag'), ensure_ascii=False)[:160]}")
+    check_true("诊断里标出了这是本地地址", (_d.get("diag") or {}).get("local_url") is True)
+finally:
+    for k, v in _old_env.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    _srv.shutdown()
+    _srv.server_close()
+
+
+print("\n=== 11. 抓不到时不该让模型空转 ===")
+import webagent
+
+_calls = {"n": 0}
+
+
+def _fail_fetch(url, mode="auto", timeout=25.0, proxy="auto"):
+    _calls["n"] += 1
+    return {"ok": False, "error": "抓取失败：HTTP 403",
+            "blocked": "登录后查看", "diag": {"tried": [{"mode": "desktop+proxy", "status": 403}]}}
+
+
+def _low_fetch(url, mode="auto", timeout=25.0, proxy="auto"):
+    _calls["n"] += 1
+    return {"ok": True, "title": "样本", "text": "这里是正文。", "chars": 6, "paras": 1,
+            "quality": 30, "grade": "poor", "route": "整页", "dropped": 0,
+            "diag": {"tried": []}, "url": url}
+
+
+_orig_fetch = webagent.webfetch.fetch
+try:
+    # 网络层就失败（无正文可交）→ 直接如实报错。ollama_url 指向死端口，
+    # 一旦真的去调模型必然抛错，所以"调用次数 == 1"就证明模型没被叫醒。
+    webagent.webfetch.fetch = _fail_fetch
+    _calls["n"] = 0
+    _d1 = webagent.run("https://example.com/a", model="qwen2.5:7b",
+                       ollama_url="http://127.0.0.1:9", auto=True)
+    check("彻底抓不到时只抓一次，不喊模型", _calls["n"], 1)
+    check_true("返回的是可读的失败原因", not _d1.get("ok") and "403" in str(_d1.get("error")),
+               str(_d1.get("error")))
+    check_true("trace 说明了为什么没喊模型",
+               any(t.get("kind") == "skip_model" for t in _d1.get("trace") or []),
+               json.dumps(_d1.get("trace"), ensure_ascii=False)[:160])
+
+    # 抓到了但很脏 + Ollama 没开 → 照样把稿子交出去，只是不整理
+    webagent.webfetch.fetch = _low_fetch
+    _calls["n"] = 0
+    _d2 = webagent.run("https://example.com/a", model="qwen2.5:7b",
+                       ollama_url="http://127.0.0.1:9", auto=True, ollama_ok=False)
+    check("Ollama 没开时也不重复抓", _calls["n"], 1)
+    check_true("Ollama 没开也能拿到正文（不报错）", bool(_d2.get("ok")), str(_d2.get("error")))
+    check_true("trace 注明是 Ollama 没开",
+               any(t.get("kind") == "skip_model" and "Ollama" in str(t.get("reason"))
+                   for t in _d2.get("trace") or []))
+finally:
+    webagent.webfetch.fetch = _orig_fetch
 
 
 if "--offline" not in sys.argv:
-    print("\n=== 9. 真实站点（联网，会被限流）===")
+    print("\n=== 12. 真实站点（联网，会被限流）===")
     cases = [
         # (名称, 链接, 最少字数)
         ("微信公众号", "https://mp.weixin.qq.com/s/QadB3L6GDAsJEZ54DZSVxA", 1500),
@@ -249,7 +448,7 @@ if "--offline" not in sys.argv:
         check_true("知乎请求未抛异常", False, str(e)[:80])
 
     # 真实站点上的结构贯通（本地样本那条是确定性的，这条是"线上确实也这样"）
-    print("\n=== 10. 真实站点上的结构贯通 ===")
+    print("\n=== 13. 真实站点上的结构贯通 ===")
     try:
         import text_nlp as NLP
         d = cache.get("掘金") or {}
