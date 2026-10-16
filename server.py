@@ -66,7 +66,7 @@ DEFAULT_CONFIG = {
     "prefs": {"style": "", "mode": "none", "model": "", "quality": False},
 }
 
-ENGINE_VERSION = "1.2.0"
+ENGINE_VERSION = "1.2.1"
 
 # 页面文件：优先用 docs/（= GitHub Pages 站点目录），本地与线上共用同一份，
 # 避免出现"本地能跑、线上是旧版"的分叉。
@@ -172,8 +172,31 @@ def list_voices(refresh: bool = False) -> list:
         return []
 
 
+def _prosody(value, unit: str, fallback: str) -> str:
+    """把语速/音调/音量规整成 edge-tts 认得的「±数值单位」写法。
+
+    坑：前端滑块取到 0 时会拼出 "0%" / "0Hz"（少了正号），而 edge-tts 只认
+    带符号的写法，会直接报 Invalid volume '0%' —— 表现为「页面显示已连接，
+    但每一句都播不出来」。默认音调/音量恰好都是 0，所以这个坑一踩就是全坏。
+    这里统一兜底：缺符号补 '+'、非法值退回默认、单位重复/带空格都容忍。
+    """
+    raw = str(value if value is not None else "").strip().replace(" ", "")
+    if not raw:
+        return str(fallback)
+    if unit and raw.lower().endswith(unit.lower()):
+        raw = raw[: -len(unit)]
+    m = re.fullmatch(r"([+-]?)(\d+(?:\.\d+)?)", raw)
+    if not m:
+        return str(fallback)
+    return f"{m.group(1) or '+'}{m.group(2)}{unit}"
+
+
 def synth(text: str, voice: str, rate: str, pitch: str, volume: str) -> Path:
     """合成一段语音，带磁盘缓存。"""
+    # 先规整韵律参数，避免 "0%" 这类写法让 edge-tts 直接失败
+    rate = _prosody(rate, "%", CFG["rate"])
+    pitch = _prosody(pitch, "Hz", CFG["pitch"])
+    volume = _prosody(volume, "%", CFG["volume"])
     key = hashlib.sha1(f"{voice}|{rate}|{pitch}|{volume}|{text}".encode("utf-8")).hexdigest()[:24]
     path = TTS_CACHE / f"{key}.mp3"
     if path.exists() and path.stat().st_size > 0:

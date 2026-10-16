@@ -46,3 +46,22 @@ import urllib.parse
 u = "http://127.0.0.1:8756/api/tts?" + urllib.parse.urlencode({"text": d["segments"][0], "voice": "zh-CN-XiaoxiaoNeural"})
 r = urllib.request.urlopen(u, timeout=40)
 print("6) tts 首段 ->", r.status, r.headers.get("Content-Type"), len(r.read()), "bytes")
+
+# --- 7) 回归：韵律参数缺正号的写法也必须能合成 ---
+# 背景：edge-tts 只认 "+0%" / "+0Hz"，写成 "0%" 会直接报 Invalid volume。
+# 网页端滑块取到 0 时正好会漏掉正号，而默认音调/音量就是 0 —— 一踩就是
+# 「页面显示已连接，但每一句都播不出来」。这里把四种写法都锁住。
+for tag, q in [
+    ("缺正号", {"rate": "0%", "pitch": "0Hz", "volume": "0%"}),
+    ("标准",   {"rate": "+8%", "pitch": "+0Hz", "volume": "+0%"}),
+    ("负数",   {"rate": "-5%", "pitch": "-2Hz", "volume": "50%"}),
+    ("空值",   {"rate": "", "pitch": "", "volume": ""}),
+]:
+    u = "http://127.0.0.1:8756/api/tts?" + urllib.parse.urlencode(
+        {"text": "回归测试", "voice": "zh-CN-XiaoxiaoNeural", **q})
+    r = urllib.request.urlopen(u, timeout=40)
+    ctype, n = r.headers.get("Content-Type"), len(r.read())
+    good = r.status == 200 and ctype.startswith("audio/")
+    print(f"7) tts[{tag}] ->", r.status, ctype, n, "bytes", "OK" if good else "!! 异常")
+    if not good:
+        sys.exit(1)

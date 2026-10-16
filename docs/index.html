@@ -781,19 +781,21 @@ function updateBar() {
 }
 
 /* ---------- 播放 ---------- */
+/* edge-tts 只认带符号的「±数值单位」；0 也必须写成 "+0%"，写成 "0%" 会被它拒绝。
+   默认音调/音量都是 0，所以漏加号 = 一句都播不出来（页面却显示已连接）。 */
+const sgn = (n, unit) => (n >= 0 ? '+' : '') + n + unit;
 /* 每句的语速 = 全局语速 + 该句偏移（标题更慢、条目稍快），让念稿有语气层次 */
 function segRate(i) {
   const base = S.base ? S.base.rate : 8;
   const d = S.items[i] && S.items[i].rate ? S.items[i].rate : 0;
   const v = Math.max(-40, Math.min(50, base + d));
-  return (v > 0 ? '+' : '') + v + '%';
+  return sgn(v, '%');
 }
 function ttsURL(i) {
   const b = S.base;
   const q = new URLSearchParams({
     text: S.items[i].text, voice: b.voice,
-    rate: segRate(i), pitch: (b.pitch > 0 ? '+' : '') + b.pitch + 'Hz',
-    volume: (b.volume > 0 ? '+' : '') + b.volume + '%',
+    rate: segRate(i), pitch: sgn(b.pitch, 'Hz'), volume: sgn(b.volume, '%'),
   });
   return API + '/api/tts?' + q.toString();
 }
@@ -952,9 +954,9 @@ async function prepare(text, mode, opts = {}) {
       signal: ac.signal,
       body: JSON.stringify({
         text, ai: mode, model: $('#model').value, quality: S.quality || false,
-        voice: $('#voice').value, rate: (baseStyle().rate > 0 ? '+' : '') + baseStyle().rate + '%',
-        pitch: (baseStyle().pitch > 0 ? '+' : '') + baseStyle().pitch + 'Hz',
-        volume: (baseStyle().volume > 0 ? '+' : '') + baseStyle().volume + '%',
+        voice: $('#voice').value, rate: sgn(baseStyle().rate, '%'),
+        pitch: sgn(baseStyle().pitch, 'Hz'),
+        volume: sgn(baseStyle().volume, '%'),
       }),
     });
     const d = await r.json();
@@ -1192,8 +1194,7 @@ $('#btnTry').onclick = async () => {
   const b = baseStyle();
   const demo = '这是朗读试听，音色和语速听起来合适吗？';
   const url = API + '/api/tts?' + new URLSearchParams({
-    text: demo, voice: b.voice, rate: (b.rate > 0 ? '+' : '') + b.rate + '%',
-    pitch: (b.pitch > 0 ? '+' : '') + b.pitch + 'Hz',
+    text: demo, voice: b.voice, rate: sgn(b.rate, '%'), pitch: sgn(b.pitch, 'Hz'),
   }).toString();
   const a = new Audio(url);
   a.play().then(() => toast('正在试听…')).catch(() => toast('试听失败，请再点一次'));
