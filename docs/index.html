@@ -563,7 +563,20 @@ async function loadHealth() {
     $('#stModel').textContent = h.ollama ? `Ollama 就绪` : 'Ollama 未启动（无法总结/润色）';
     $('#stClient').textContent = `${h.clients} 个播放端`;
     setDot('on');
+    checkEngineFreshness(h);
   } catch (e) { /* 交给轮询 */ }
+}
+
+/* 引擎跑的是旧代码就明确提示：改完 server.py 进程不会自己换代码，
+   不提示的话会出现「页面是新的、引擎还是两天前的旧版」却没人察觉。 */
+const REQUIRED_FEATURES = ['structured-items', 'prosody-normalize'];
+function checkEngineFreshness(h) {
+  const has = new Set(h.features || []);
+  const missing = REQUIRED_FEATURES.filter(f => !has.has(f));
+  const el = $('#engineHint');
+  if (!missing.length) { if (el) el.innerHTML = ''; return; }
+  if (el) el.innerHTML = `<b style="color:#c05a00">引擎是旧版（v${h.version}）</b>，缺少 ${missing.join('、')}，部分效果不生效。点下面的「重启引擎」即可升级。`;
+  toast(`本机引擎是旧版 v${h.version}，建议点「重启引擎」升级`, 6000);
 }
 
 async function loadVoices() {
@@ -808,12 +821,45 @@ function preload(i) {
 }
 function warmup(from, n) { for (let k = 0; k < n; k++) preload(from + k); }
 
+/* ---------- 断点续读 ----------
+   长文听到一半难免要关页面/刷新，以前回来只能从头再听一遍。
+   这里把"下一句该读第几句"连同文本指纹一起记着，内容没变就自动定位回去。 */
+let _resumeTimer = null;
+function textHash(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return h + ':' + s.length;
+}
+function saveResume() {
+  clearTimeout(_resumeTimer);
+  _resumeTimer = setTimeout(() => {
+    if (!S.items.length) return;
+    try {
+      store.set('resume', {
+        h: textHash($('#txt').value), next: S.idx + 1,
+        n: S.items.length, ts: Date.now(),
+      });
+    } catch (e) { /* 隐私模式等场景忽略 */ }
+  }, 1000);
+}
+function maybeResume() {
+  const r = store.get('resume', null);
+  if (!r || !S.items.length || typeof r.next !== 'number') return;
+  if (r.h !== textHash($('#txt').value)) return;          // 换过稿子就别乱跳
+  if (r.next <= 0 || r.next >= S.items.length) return;    // 已读完或数据异常
+  if (Date.now() - (r.ts || 0) > 7 * 864e5) return;       // 超过一周的旧进度不要了
+  S.idx = r.next - 1;
+  highlight();
+  toast(`已定位到上次读到的第 ${r.next} 句，按「▶」接着听`, 4500);
+}
+
 function playAt(i, force) {
   clearTimeout(S.pauseTimer);
   if (i >= S.items.length) { finish(); return; }
   if (i < 0) i = 0;
   S.idx = i;
   highlight();
+  saveResume();
   const a = S.audio || (S.audio = new Audio());
   a.onended = null;
   a.onerror = null;
@@ -914,9 +960,12 @@ async function play() {
     if (!d) return;
     adoptPrepared(d);
     renderItems();
-    warmup(0, 3);
+    // 有断点就从断点接着读（maybeResume 已把位置写进 S.idx），否则从头开始。
+    // 注意别写死 playAt(0) —— 那样刚弹完"已定位到第 N 句"就又跳回第一句了。
+    const start = S.idx >= 0 ? S.idx + 1 : 0;
+    warmup(start, 3);
     S.playing = true;
-    playAt(0, true);
+    playAt(start, true);
   } catch (e) {
     toast('出错了：' + e.message, 3600);
   } finally { S.busy = false; overlay(false); }
@@ -1015,6 +1064,7 @@ function adoptPrepared(d) {
     } else { $('#recRow').style.display = 'none'; }
   }
   S.base = baseStyle();
+  maybeResume();
 }
 function friendly(name) {
   const v = VOICES.find(x => x.name === name);
@@ -1174,8 +1224,8 @@ $('#rate').oninput = e => {
   S.base = baseStyle(); count(); liveChange();
   store.set('rate', +e.target.value);
 };
-$('#pitch').oninput = e => { $('#pitchV').textContent = fmt(+e.target.value) + 'Hz'; S.base = baseStyle(); liveChange(); };
-$('#vol').oninput = e => { $('#volV').textContent = fmt(+e.target.value) + '%'; S.base = baseStyle(); liveChange(); };
+$('#pitch').oninput = e => { $('#pitchV').textContent = fmt(+e.target.value) + 'Hz'; store.set('pitch', +e.target.value); S.base = baseStyle(); liveChange(); };
+$('#vol').oninput = e => { $('#volV').textContent = fmt(+e.target.value) + '%'; store.set('vol', +e.target.value); S.base = baseStyle(); liveChange(); };
 $('#voice').onchange = () => {
   store.set('voice', $('#voice').value);
   store.set('voiceTouched', true);
@@ -1254,8 +1304,15 @@ async function savePrefs(p) {
 /* ---------- 启动 ---------- */
 async function boot() {
   applyTheme(store.get('theme', 'auto'));
-  const r = (n, d) => { if (n) { $('#rate').value = n; $('#rateV').textContent = fmt(n) + '%'; } };
-  r(store.get('rate', 8));
+  // 语速/音调/音量三个滑块都记着：以前只存了语速，辛苦调好的音调音量一刷新就没了
+  const restore = (id, valId, val, unit) => {
+    if (val === null || val === undefined || val === '') return;
+    $(id).value = val;
+    $(valId).textContent = fmt(+val) + unit;
+  };
+  restore('#rate', '#rateV', store.get('rate', 8), '%');
+  restore('#pitch', '#pitchV', store.get('pitch', 0), 'Hz');
+  restore('#vol', '#volV', store.get('vol', 0), '%');
   count(); renderHistory();
   const perm = await permissionState();
   if (isLocalHost() || perm.state === 'granted') {

@@ -133,6 +133,25 @@ check("故事稿推荐叙事音", "yunjian" in r2["voice"].lower(), True)
 check("英文稿推荐英文音色", r3["voice"].startswith("en-"), True)
 check("中英混排推荐多语种音色", "Multilingual" in r4["voice"], True)
 
+print("=== 7) 结构层次（回归：kind 不能被洗成 para）===")
+# 曾经的 bug：/api/prepare 先 clean_text(raw) 再 plan_text()，而 clean_text 会把
+# #、-、> 一起洗掉，于是标题/列表/引文永远识别不出来、全变成 para，
+# 「标题慢读、条目紧凑、引用留白」这套语气层次静默失效 —— 页面看着正常，就是读着平。
+struct_raw = "# 季度复盘\n\n正文一段。\n\n- 条目一\n- 条目二\n\n> 引用一句。\n"
+sp = N.prepare(struct_raw)
+kinds = [it["kind"] for it in sp["items"]]
+print(f"    kinds = {kinds}")
+check("标题仍是 heading", "heading" in kinds, True)
+check("列表仍是 list", "list" in kinds, True)
+check("引用仍是 quote", "quote" in kinds, True)
+check("标题停顿 > 正文停顿",
+      max(it["pause"] for it in sp["items"] if it["kind"] == "heading")
+      > max(it["pause"] for it in sp["items"] if it["kind"] == "para"), True)
+# 括号注释被改写成逗号分隔后，整段可能以逗号收尾 —— 朗读时是"话没说完"的半截停顿
+tail = N.prepare("- 客户占比（Top10）68%\n")["items"][-1]["text"]
+print(f"    列表项收尾: {tail!r}")
+check("列表项不以逗号收尾", not tail.endswith(("，", ",", "、", "：")), True)
+
 print()
 print(f"通过 {len(OK)} 项，失败 {len(BAD)} 项")
 if BAD:

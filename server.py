@@ -62,11 +62,25 @@ DEFAULT_CONFIG = {
     "auto_voice": True,             # 按内容自动推荐音色
     "long_doc_chars": 6000,         # 超过这个字数就分块总结，避免静默截断
     "cache_limit": 400,             # 最多缓存多少个音频片段
+    # 上下文窗口。必须给"思考 + 正文"都留出空间：实测 8192 时 qwen3.5:9b 思考了
+    # 一万七千多字就把预算烧光，正文输出 0 字（点「升配」等三分钟换来一句报错）。
+    # 本机 16G 显存足够放到 32768。
+    "num_ctx": 32768,
+    "keep_alive": "30m",            # 让模型多在内存里待一会儿，免得隔几分钟再问要重新加载
     # 用户偏好：会注入 AI 提示词，让总结/润色越用越像你要的样子
     "prefs": {"style": "", "mode": "none", "model": "", "quality": False},
 }
 
-ENGINE_VERSION = "1.2.1"
+ENGINE_VERSION = "1.2.2"
+
+# 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
+# —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
+FEATURES = [
+    "structured-items",     # prepare 返回带 kind 的 items（标题/列表/引文分层）
+    "prosody-normalize",    # 韵律参数缺正号也能合成
+    "num-ctx-config",       # 上下文窗口可配（升配模型能出正文）
+    "keep-alive",           # 模型常驻，避免重复加载
+]
 
 # 页面文件：优先用 docs/（= GitHub Pages 站点目录），本地与线上共用同一份，
 # 避免出现"本地能跑、线上是旧版"的分叉。
@@ -257,7 +271,9 @@ def ollama_chat(system: str, user: str, model: str, json_mode: bool = False,
         "model": model,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
         "stream": stream,
-        "options": {"temperature": temperature, "num_ctx": 8192},
+        "keep_alive": str(CFG.get("keep_alive", "30m")),
+        "options": {"temperature": temperature,
+                    "num_ctx": int(CFG.get("num_ctx", 32768))},
     }
     # 注意：不要传 think 参数。实测在 Ollama 里给 qwen3 系列传 think=false 反而会把
     # 推理过程写进正文（qwen3:4b 尤为明显），不传才干净。
@@ -657,6 +673,10 @@ def health():
     return jsonify({
         "ok": True,
         "version": ENGINE_VERSION,
+        # 能力探测：网页端据此判断"连上的引擎是不是旧版"。
+        # 老实现在改完之后不会自动重启，曾出现过"页面是新的、引擎还是两天前的旧代码"
+        # 却毫无提示的情况。加一项功能就往这里加一个标记，页面会自己发现落后。
+        "features": FEATURES,
         "ollama": bool(models),
         "models": [m.get("name") for m in models],
         "voices": len(list_voices()),
@@ -919,11 +939,15 @@ def api_prepare():
     long_doc = False
     source = clean_text(raw)
     final_text = source
+    # 结构解析要用「原文」：clean_text 会把 #、-、> 这些结构标记一起洗掉，
+    # 拿洗过的纯文本去解析，标题/列表/引文永远识别不出来，kind 全是 para。
+    plan_src = raw
 
     if ai in ("summarize", "polish"):
         try:
             final_text, style2, model, cached = ai_refine(source, ai, body)
             style.update(style2)
+            plan_src = final_text          # AI 产出是纯文本，重新规整即可
         except Exception as e:
             # AI 不靠谱时绝不阻断朗读：退回原文，并把原因告诉调用方
             log.warning("AI 未通过质量检查，改为朗读原文: %s", e)
@@ -931,9 +955,10 @@ def api_prepare():
             ai = "none"
             model = None
             final_text = source
+            plan_src = raw
         long_doc = len(source) >= int(CFG.get("long_doc_chars", 6000))
 
-    r = plan_text(final_text, max_len=max_len, do_normalize=do_norm)
+    r = plan_text(plan_src, max_len=max_len, do_normalize=do_norm)
     segs = r["segments"]
     if not segs and r["text"]:
         segs = [r["text"]]

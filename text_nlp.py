@@ -485,11 +485,25 @@ RE_CJK = re.compile(r"[\u3400-\u9fff]")
 RE_LATIN = re.compile(r"[A-Za-z]")
 CANTONESE_HINTS = ("嘅", "唔", "係", "咁", "喺", "哋", "嘢", "睇", "冇", "咗", "嗰")
 TECH_HINTS = ("API", "SDK", "HTTP", "JSON", "函数", "接口", "部署", "配置", "报错",
-              "代码", "版本", "数据库", "服务器", "参数", "日志")
-STORY_HINTS = ("故事", "小说", "曾经", "那年", "回忆", "他", "她", "旅途", "传说")
+              "代码", "版本", "数据库", "服务器", "参数", "日志", "编译", "调试",
+              "架构", "异步", "并发", "缓存", "算法", "依赖")
+# 财经/商业：以前没有这一类，财报会被判成"通用内容"退回默认女声
+FINANCE_HINTS = ("营收", "利润", "毛利", "净利", "同比", "环比", "增长", "下滑", "估值",
+                 "市盈率", "股价", "基金", "投资", "收益率", "财报", "业绩", "成本",
+                 "预算", "融资", "现金流", "资产", "负债", "市值", "份额", "营收额")
+NEWS_HINTS = ("记者", "报道", "通讯", "据悉", "发布会", "声明", "通报",
+              "发言人", "官方", "今日", "昨日", "上午", "下午")
+ACADEMIC_HINTS = ("研究", "论文", "实验", "样本", "假设", "文献", "综述", "方法论",
+                  "理论", "数据表明", "结果表明", "统计分析", "显著性")
+# 注意：这里刻意不放"他/她"——它们太常见，会把任何叙事都误判成小说
+STORY_HINTS = ("故事", "小说", "曾经", "那年", "回忆", "旅途", "传说",
+               "很久以前", "小时候", "那一夜")
 LIVELY_HINTS = ("哈哈", "开心", "太棒", "好玩", "冲鸭", "!", "！")
 
 PREFERRED = {
+    "zh-finance": ["zh-CN-YunyangNeural", "zh-CN-YunjianNeural", "zh-CN-XiaoxiaoNeural"],
+    "zh-news": ["zh-CN-YunyangNeural", "zh-CN-XiaoxiaoNeural"],
+    "zh-academic": ["zh-CN-YunxiNeural", "zh-CN-YunyangNeural", "zh-CN-XiaoxiaoNeural"],
     "zh-tech": ["zh-CN-YunyangNeural", "zh-CN-YunxiNeural", "zh-CN-XiaoxiaoNeural"],
     "zh-story": ["zh-CN-YunjianNeural", "zh-CN-XiaoxiaoNeural", "zh-CN-YunxiNeural"],
     "zh-lively": ["zh-CN-XiaoyiNeural", "zh-CN-XiaoxiaoNeural"],
@@ -545,10 +559,22 @@ def recommend_voice(text: str, available: list | None = None) -> dict:
     if lang["mixed"]:
         return {"voice": pick(PREFERRED["zh-mixed"]),
                 "reason": "中英夹读较多，用多语种音色更自然", "lang": lang}
+    # 下面按"内容类型"挑音色。顺序有意义：财经/技术的播报感要求最明确，先判。
+    if sum(t.count(w) for w in FINANCE_HINTS) >= 3:
+        return {"voice": pick(PREFERRED["zh-finance"]),
+                "reason": "财经数据类内容，用沉稳的播报音", "lang": lang}
     if sum(t.count(w) for w in TECH_HINTS) >= 3:
         return {"voice": pick(PREFERRED["zh-tech"]),
                 "reason": "技术类内容，用沉稳播报音", "lang": lang}
-    if sum(t.count(w) for w in STORY_HINTS) >= 3:
+    if sum(t.count(w) for w in ACADEMIC_HINTS) >= 3:
+        return {"voice": pick(PREFERRED["zh-academic"]),
+                "reason": "学术论述类内容，用清晰平实的音色", "lang": lang}
+    if sum(t.count(w) for w in NEWS_HINTS) >= 3:
+        return {"voice": pick(PREFERRED["zh-news"]),
+                "reason": "新闻播报类内容，用标准播报音", "lang": lang}
+    # 叙事类阈值放宽到 2：下面这些词都是"叙事专属"标记，
+    # 不像"数据/模型"那样随处可见，命中两个基本就确定是讲故事了。
+    if sum(t.count(w) for w in STORY_HINTS) >= 2:
         return {"voice": pick(PREFERRED["zh-story"]),
                 "reason": "叙事类内容，用讲述感音色", "lang": lang}
     liveliness = sum(t.count(w) for w in LIVELY_HINTS)
@@ -569,7 +595,13 @@ def prepare(raw: str, max_len: int = 62, min_len: int = 9, do_normalize: bool = 
         t = clean_inline(b["text"])
         if not t:
             continue
-        cooked.append({"kind": b["kind"], "text": normalize(t, do_normalize)})
+        t = normalize(t, do_normalize)
+        # 括号注释会被读法规整改写成逗号分隔（"占比（Top10）68%）" -> "...，Top10..."），
+        # 于是整段可能以逗号/顿号收尾。朗读时那是个"话没说完"的半截停顿，
+        # 听起来很怪；补成句号，分句和停顿都干脆。
+        t = re.sub(r"[，,、：:；;]+$", "。", t)
+        if t and t != "。":
+            cooked.append({"kind": b["kind"], "text": t})
     text = "\n\n".join(b["text"] for b in cooked).strip()
     items = split_items("", max_len=max_len, min_len=min_len, blocks=cooked) if cooked else []
     if not items and text:
