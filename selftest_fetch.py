@@ -369,13 +369,13 @@ import webagent
 _calls = {"n": 0}
 
 
-def _fail_fetch(url, mode="auto", timeout=25.0, proxy="auto"):
+def _fail_fetch(url, mode="auto", timeout=25.0, proxy="auto", **kw):
     _calls["n"] += 1
     return {"ok": False, "error": "抓取失败：HTTP 403",
             "blocked": "登录后查看", "diag": {"tried": [{"mode": "desktop+proxy", "status": 403}]}}
 
 
-def _low_fetch(url, mode="auto", timeout=25.0, proxy="auto"):
+def _low_fetch(url, mode="auto", timeout=25.0, proxy="auto", **kw):
     _calls["n"] += 1
     return {"ok": True, "title": "样本", "text": "这里是正文。", "chars": 6, "paras": 1,
             "quality": 30, "grade": "poor", "route": "整页", "dropped": 0,
@@ -411,8 +411,155 @@ finally:
     webagent.webfetch.fetch = _orig_fetch
 
 
+print("\n=== 12. Cookie 文本解析（三种粘法都要认）===")
+import cookies as _ck
+
+_p1 = _ck.parse_cookie_text("z_c0=AAA; d_c0=BBB; _xsrf=CCC")
+check("纯 Cookie 头", _p1, {"z_c0": "AAA", "d_c0": "BBB", "_xsrf": "CCC"})
+
+_p2 = _ck.parse_cookie_text("  Cookie: z_c0=AAA; d_c0=BBB")
+check("从 Network 复制的整行", _p2, {"z_c0": "AAA", "d_c0": "BBB"})
+
+_p3 = _ck.parse_cookie_text(
+    "curl 'https://www.zhihu.com/' -H 'cookie: z_c0=AAA; d_c0=BBB' -H 'user-agent: x'")
+check("Copy as cURL 的整段命令", _p3, {"z_c0": "AAA", "d_c0": "BBB"})
+
+_p4 = _ck.parse_cookie_text("z_c0=AAA\nd_c0=BBB\n_xsrf=CCC")
+check("换行分隔（有些人从表格复制会变成一行一个）", len(_p4), 3)
+
+_p5 = _ck.parse_cookie_text('z_c0="AAA"; d_c0=\'BBB\'')
+check("值上带引号", _p5, {"z_c0": "AAA", "d_c0": "BBB"})
+
+check("空串不炸", _ck.parse_cookie_text(""), {})
+check("垃圾文本不炸", _ck.parse_cookie_text("这不是 cookie"), {})
+# 伪头（Copy as cURL 里常见的 :authority 之类）不能混进来
+check_true("伪头被排除",
+           ":authority" not in _ck.parse_cookie_text(
+               "curl x -H 'cookie: z_c0=A; :authority: zhihu.com'"))
+
+
+print("\n=== 13. 域名归一（写进去和读出来必须是同一个键）===")
+for host, want in [("www.zhihu.com", "zhihu.com"),
+                   ("zhuanlan.zhihu.com", "zhihu.com"),
+                   ("zhihu.com", "zhihu.com"),
+                   ("mp.weixin.qq.com", "mp.weixin.qq.com"),
+                   ("www.google.com", ""),
+                   ("localhost", ""),
+                   ("", "")]:
+    check(f"base_domain({host!r})", _ck.base_domain(host), want)
+check("site_info_for 认得出知乎", (_ck.site_info_for("zhuanlan.zhihu.com") or {}).get("name"), "知乎")
+check("不认识的站返回 None", _ck.site_info_for("example.com"), None)
+
+# 存取用临时文件，绝不能碰用户真实的 cookies.json
+import tempfile
+_real_store = _ck.STORE_FILE
+_ck.STORE_FILE = pathlib.Path(tempfile.mkdtemp()) / "cookies.json"
+try:
+    _ck.clear()
+    # 用户粘贴时给的是 www.zhihu.com，读的时候查的是 zhihu.com —— 必须归一，
+    # 否则表现为"明明提示保存成功，抓取时却没带上"。（实测踩过）
+    _ck.set_site(_ck.base_domain("www.zhihu.com") or "www.zhihu.com",
+                 {"z_c0": "X", "d_c0": "Y", "osd": "Z"},
+                 ua="UA-1", source="manual")
+    check("写入的键是主域", list(_ck.load()["sites"].keys()), ["zhihu.com"])
+    _got = _ck.for_url("https://zhuanlan.zhihu.com/p/1")
+    check("zhuanlan 子域能读到", len(_got["jar"]), 3)
+    check("www 子域也能读到", len(_ck.for_url("https://www.zhihu.com/q/1")["jar"]), 3)
+    check("UA 一起存下来了（__zse_ck 与 UA 绑定）", _got["ua"], "UA-1")
+    check("未配置的站返回 None", _ck.for_url("https://example.com/a"), None)
+
+    # 合并语义：用户往往只想补一个 z_c0，不该把他之前导入的整套冲掉
+    _ck.set_site("zhihu.com", {"_xsrf": "NEW"}, ua="UA-1", source="manual")
+    _after = _ck.for_url("https://zhihu.com/")["jar"]
+    check("合并后总数变多而不是被覆盖", len(_after), 4)
+    check_true("原有的 z_c0 还在", _after.get("z_c0") == "X")
+    check("有登录凭证判定为已登录", _ck._looks_logged_in("zhihu.com", _after))
+
+    _ck.set_site("zhihu.com", {"d_c0": "Y"}, ua="UA-1", source="browser", merge=False)
+    check("merge=False 是整体覆盖（浏览器导入用）",
+          len(_ck.for_url("https://zhihu.com/")["jar"]), 1)
+
+    st = _ck.status()
+    check("status 把 zhihu.com 算作已配置", "zhihu.com" in st["configured"])
+    _ck.clear("zhihu.com")
+    check("clear 指定站", _ck.status()["configured"], [])
+    _ck.clear()
+    check("clear 全部", _ck.load()["sites"], {})
+finally:
+    _ck.STORE_FILE = _real_store
+
+
+print("\n=== 14. 登录态真的被带上了请求头 ===")
+# 起一个只在本机听的迷你服务，把收到的请求头记下来，验证三件事：
+#   1. Cookie 确实带上了（知乎这类站靠这个过 403）
+#   2. UA 用的是登录态里那一个（__zse_ck 与 UA 绑定，换 UA 就失效）
+#   3. 顺带补了浏览器导航头（缺这些头本身就很可疑）
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+
+class _Rec(BaseHTTPRequestHandler):
+    seen = []
+
+    def do_GET(self):                                  # noqa: N802
+        _Rec.seen.append({k.lower(): v for k, v in self.headers.items()})
+        body = ("<html><head><meta charset='utf-8'><title>本机探针</title></head>"
+                "<body><article><h1>探针页</h1><p>"
+                + "这段正文只是为了让响应看起来像一篇正常文章。" * 8
+                + "</p></article></body></html>").encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+_srv = HTTPServer(("127.0.0.1", 0), _Rec)
+_port = _srv.server_address[1]
+threading.Thread(target=_srv.serve_forever, daemon=True).start()
+
+_PROBE = f"http://127.0.0.1:{_port}/probe"
+_LOGIN = {"cookie": "z_c0=OK; d_c0=DEV", "ua": "UA-FROM-LOGIN",
+          "referer": "https://www.zhihu.com/", "domain": "zhihu.com"}
+
+_rec = webfetch._get(_PROBE, "desktop", 6, None, _LOGIN)
+_h1 = _Rec.seen[-1]
+check("Cookie 带上了", _h1.get("cookie"), "z_c0=OK; d_c0=DEV")
+check("UA 用的是登录态里的那个", _h1.get("user-agent"), "UA-FROM-LOGIN")
+check("Referer 用站点首页", _h1.get("referer"), "https://www.zhihu.com/")
+check("补了 Sec-Fetch-Dest", _h1.get("sec-fetch-dest"), "document")
+check("补了 Upgrade-Insecure-Requests", _h1.get("upgrade-insecure-requests"), "1")
+
+_rec2 = webfetch._get(_PROBE, "desktop", 6, None, None)
+_h2 = _Rec.seen[-1]
+check_true("没登录态时不该凭空冒出 Cookie", not _h2.get("cookie"), str(_h2.get("cookie"))[:60])
+check("没登录态时用默认 UA", _h2.get("user-agent"), webfetch.UA_DESKTOP)
+
+# 走一遍完整 fetch：本机地址 + 配了登录态 → 不该因为注入登录态而出错
+_d14 = webfetch.fetch(_PROBE, timeout=8, allow_browser=False)
+check_true("完整链路能抓到探针页", bool(_d14.get("ok")), str(_d14.get("error"))[:120])
+check_true("正文是探针页的内容",
+           "探针页" in (_d14.get("text") or ""), (_d14.get("text") or "")[:60])
+_srv.shutdown()
+
+# 内网地址不该去碰浏览器兜底（本地服务自己就是抓取目标，不是被风控的站点）
+check("本机地址标记为 local", webfetch.is_local_url(_PROBE))
+
+
+print("\n=== 15. 站点元信息与提示语 ===")
+_meta = webfetch._site_meta("https://zhuanlan.zhihu.com/p/670368800")
+check("认得知乎", (_meta or {}).get("name"), "知乎")
+check_true("列出了关键 cookie", "z_c0" in (_meta or {}).get("关键 cookie", []))
+check("不认识的站返回 None", webfetch._site_meta("https://example.com/a"), None)
+check("没配登录态时 _looks_logged_in 为假", webfetch._looks_logged_in(None), False)
+
+
 if "--offline" not in sys.argv:
-    print("\n=== 12. 真实站点（联网，会被限流）===")
+    print("\n=== 16. 真实站点（联网，会被限流）===")
     cases = [
         # (名称, 链接, 最少字数)
         ("微信公众号", "https://mp.weixin.qq.com/s/QadB3L6GDAsJEZ54DZSVxA", 1500),
@@ -448,7 +595,7 @@ if "--offline" not in sys.argv:
         check_true("知乎请求未抛异常", False, str(e)[:80])
 
     # 真实站点上的结构贯通（本地样本那条是确定性的，这条是"线上确实也这样"）
-    print("\n=== 13. 真实站点上的结构贯通 ===")
+    print("\n=== 17. 真实站点上的结构贯通 ===")
     try:
         import text_nlp as NLP
         d = cache.get("掘金") or {}

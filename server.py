@@ -37,6 +37,7 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 import text_nlp as NLP
 import webfetch
 import webagent
+import cookies as LOGIN
 
 # ---------------------------------------------------------------- 基础配置
 
@@ -74,11 +75,15 @@ DEFAULT_CONFIG = {
     "fetch_proxy": "auto",          # auto=探测到本机 7897 代理就用；也可填具体地址或留空直连
     "agent_model": "",              # 取稿 Agent 用的模型，留空则跟 small_model
     "agent_max_tool_calls": 4,      # Agent 最多调几次工具
+    # 登录态（知乎这类站没登录态就 403）
+    "use_login": True,              # 抓到认识的站点时自动带上已配的登录态
+    "browser_login_port": 9222,     # 「打开登录窗口」时浏览器监听的调试端口
+    "browser_fetch": True,          # 规则抓取全军覆没时，让浏览器自己去取
     # 用户偏好：会注入 AI 提示词，让总结/润色越用越像你要的样子
     "prefs": {"style": "", "mode": "none", "model": "", "quality": False},
 }
 
-ENGINE_VERSION = "1.3.1"
+ENGINE_VERSION = "1.4.0"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -91,6 +96,8 @@ FEATURES = [
     "web-agent",            # /api/agent：工具调用小模型主导取稿
     "local-url-direct",     # 回环/内网地址直连，不经过代理
     "fail-fast",            # 抓不到就不叫模型空转，直接如实报错
+    "site-login",           # 登录态：/api/login，从浏览器借 cookie 读知乎这类站
+    "browser-fetch",        # 抓不动时让本机浏览器自己去取（含渲染后的 DOM）
 ]
 
 # 页面文件：优先用 docs/（= GitHub Pages 站点目录），本地与线上共用同一份，
@@ -802,6 +809,176 @@ def api_plan():
                     "items": r["items"], "count": len(r["segments"])})
 
 
+# --------------------------------------------------------------------------
+# 登录态
+#
+# 知乎、小红书这类站**没有登录态就是不给内容**：裸请求是 403（一个 zse
+# 挑战页），带上浏览器 cookie 但没登录就变成软 404，只有带上登录凭证
+# （知乎的 z_c0）才是正文。所以这里做三件事：借登录态、存登录态、验登录态。
+#
+# 浏览器 cookie 库本身读不了 —— Chrome 127+ 的 App-Bound Encryption 让
+# Local State 里只剩 app_bound_encrypted_key，解密要走 COM 提权接口。
+# 所以走 CDP：让浏览器自己把 cookie 交出来（能拿到 HttpOnly 的 z_c0）。
+# --------------------------------------------------------------------------
+
+# 专用浏览器配置目录。**必须是独立目录**：Chrome 136 起不允许在默认
+# user-data-dir 上开调试端口（防止恶意程序接管你的日常浏览器）。
+BROWSER_PROFILE_DIR = BASE / "browser-profile"
+
+
+def _browser_exe() -> str:
+    """找一个能开调试端口的 Chromium 系浏览器。"""
+    pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+    pf86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+    local = os.environ.get("LOCALAPPDATA", "")
+    cands = [
+        Path(pf) / "Google/Chrome/Application/chrome.exe",
+        Path(pf86) / "Google/Chrome/Application/chrome.exe",
+        Path(local) / "Google/Chrome/Application/chrome.exe" if local else None,
+        Path(pf86) / "Microsoft/Edge/Application/msedge.exe",
+        Path(pf) / "Microsoft/Edge/Application/msedge.exe",
+        Path(local) / "Microsoft/Edge/Application/msedge.exe" if local else None,
+    ]
+    for c in cands:
+        try:
+            if c and c.exists():
+                return str(c)
+        except OSError:
+            continue
+    return ""
+
+
+def _open_login_window(home: str = "https://www.zhihu.com/") -> dict:
+    """开一个带调试端口的浏览器窗口，让用户在里面登录一次。
+
+    用独立 profile，所以不会碰你日常浏览器；登录一次以后
+    cookie 就存在这个 profile 里，引擎随时能取。
+    """
+    exe = _browser_exe()
+    if not exe:
+        return {"ok": False, "error": "没在本机找到 Chrome 或 Edge"}
+    port = int(CFG.get("browser_login_port", 9222))
+    already = LOGIN.probe_browsers([port])
+    if already:
+        return {"ok": True, "already": True, "port": port,
+                "browser": already[0].get("browser"),
+                "note": f"127.0.0.1:{port} 上已经有浏览器在跑了，直接用它"}
+    try:
+        BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+        subprocess.Popen(
+            [exe, f"--remote-debugging-port={port}",
+             f"--user-data-dir={BROWSER_PROFILE_DIR}",
+             "--no-first-run", "--no-default-browser-check",
+             "--new-window", home],
+            close_fds=True)
+    except Exception as e:
+        return {"ok": False, "error": f"启动浏览器失败：{type(e).__name__}: {e}"}
+    return {"ok": True, "port": port, "exe": exe, "home": home,
+            "note": "浏览器已打开。在这个窗口里登录一次知乎，然后回来点「从浏览器导入」。"}
+
+
+@app.get("/api/login")
+def api_login_get():
+    """当前登录态一览：配了哪些站、有没有能一键导入的浏览器。"""
+    st = LOGIN.status()
+    st["browsers"] = LOGIN.probe_browsers()
+    st["exe"] = _browser_exe()
+    st["profile_dir"] = str(BROWSER_PROFILE_DIR)
+    st["port"] = int(CFG.get("browser_login_port", 9222))
+    st["use_login"] = bool(CFG.get("use_login", True))
+    st["browser_fetch"] = bool(CFG.get("browser_fetch", True))
+    return jsonify(st)
+
+
+@app.post("/api/login")
+def api_login_post():
+    """登录态操作。一个端点管五种动作，前端好接。
+
+    action=import  从本机浏览器把 cookie 整套搬过来（可带 warmup 预热）
+    action=paste   手工粘贴 Cookie（不需要浏览器配合）
+    action=clear   清掉某个站或全部
+    action=probe   看看哪些调试端口开着
+    action=open    开一个带调试端口的登录窗口
+    action=test    用当前登录态试抓一个链接，看通不通
+    """
+    body = request.get_json(silent=True) or {}
+    action = (body.get("action") or "import").strip()
+
+    if action == "probe":
+        return jsonify({"ok": True, "browsers": LOGIN.probe_browsers()})
+
+    if action == "open":
+        return jsonify(_open_login_window(body.get("home") or "https://www.zhihu.com/"))
+
+    if action == "import":
+        warm = body.get("warmup") or []
+        if isinstance(warm, str):
+            warm = [warm] if warm else []
+        if not warm and body.get("url"):
+            warm = LOGIN.warmup_urls_for(body["url"])
+        r = LOGIN.import_from_cdp(warmup=warm or None)
+        if r.get("ok"):
+            log.info("登录态导入：端口 %s，导入 %s 个站", r.get("port"),
+                     len(r.get("imported") or []))
+        return jsonify(r), (200 if r.get("ok") else 400)
+
+    if action == "paste":
+        raw = body.get("cookie") or ""
+        domain = (body.get("domain") or "").strip().lower()
+        jar = LOGIN.parse_cookie_text(raw)
+        if not jar:
+            return jsonify({"ok": False,
+                            "error": "没能从这段文本里读出 cookie。"
+                                     "至少要像 `z_c0=xxx; d_c0=yyy` 这样"}), 400
+        if not domain:
+            return jsonify({"ok": False, "error": "请指定这是哪个站的 cookie"}), 400
+        # 先归一域名，保证和 for_url() 查的是同一个键
+        dom = LOGIN.base_domain(domain) or re.sub(r"^www\.", "", domain)
+        if not LOGIN.base_domain(domain):
+            # 不在已知站点表里也能存，但补一条记录，状态面板才看得到
+            LOGIN.SITES.setdefault(dom, {"name": dom, "referer": f"https://{dom}/",
+                                         "关键 cookie": [], "hint": "自定义站点"})
+        ua = (body.get("ua") or "").strip() or webfetch.UA_DESKTOP
+        entry = LOGIN.set_site(dom, jar, ua=ua, source="manual",
+                               note=body.get("note") or "",
+                               merge=bool(body.get("merge", True)))
+        return jsonify({"ok": True, "domain": dom,
+                        "count": len(entry.get("cookie") or {}),
+                        "added": len(jar), "keys": sorted(jar)[:14],
+                        "has_login": LOGIN._looks_logged_in(dom, entry.get("cookie") or {}),
+                        "entry": {k: v for k, v in entry.items() if k != "cookie"}})
+
+    if action == "clear":
+        n = LOGIN.clear((body.get("domain") or "").strip().lower())
+        return jsonify({"ok": True, "cleared": n})
+
+    if action == "test":
+        url = (body.get("url") or "").strip()
+        if not re.match(r"^https?://", url, re.I):
+            return jsonify({"ok": False, "error": "给个 http/https 链接"}), 400
+        got = LOGIN.for_url(url)
+        d = webfetch.fetch(url,
+                           timeout=float(CFG.get("fetch_timeout", 25)),
+                           proxy=CFG.get("fetch_proxy", "auto"),
+                           login=bool(CFG.get("use_login", True)),
+                           allow_browser=False)
+        return jsonify({
+            "ok": bool(d.get("ok")),
+            "error": d.get("error"),
+            "used_login": bool(got),
+            "domain": (got or {}).get("domain"),
+            "has_login": LOGIN._looks_logged_in((got or {}).get("domain") or "",
+                                                (got or {}).get("jar") or {})
+            if got else False,
+            "title": d.get("title"), "chars": d.get("chars"),
+            "quality": d.get("quality"), "route": d.get("route"),
+            "head": (d.get("text") or "")[:260],
+            "diag": d.get("diag"),
+        })
+
+    return jsonify({"ok": False, "error": f"不认识的动作：{action}"}), 400
+
+
 @app.get("/api/fetch")
 @app.post("/api/fetch")
 def api_fetch():
@@ -823,7 +1000,9 @@ def api_fetch():
     try:
         d = webfetch.fetch(url, mode=mode,
                            timeout=float(CFG.get("fetch_timeout", 25)),
-                           proxy=CFG.get("fetch_proxy", "auto"))
+                           proxy=CFG.get("fetch_proxy", "auto"),
+                           login=bool(CFG.get("use_login", True)),
+                           allow_browser=bool(CFG.get("browser_fetch", True)))
     except Exception as e:
         log.exception("抓取网页失败")
         return jsonify({"ok": False, "error": f"抓取失败：{type(e).__name__}: {e}"}), 502
@@ -831,6 +1010,7 @@ def api_fetch():
     if not d.get("ok"):
         return jsonify({"ok": False, "error": d.get("error") or "没能提取到正文",
                         "blocked": d.get("blocked"),
+                        "need_login": bool(d.get("need_login")),
                         "diag": d.get("diag")}), 422
 
     # 正文原样带回，**不要**在这里 clean_text：
@@ -887,6 +1067,8 @@ def api_agent():
             proxy=CFG.get("fetch_proxy", "auto"),
             retry_on_fail=bool(body.get("retry")),
             ollama_ok=has_ollama,
+            use_login=bool(CFG.get("use_login", True)),
+            allow_browser=bool(CFG.get("browser_fetch", True)),
             max_tool_calls=int(body.get("max_calls")
                                or CFG.get("agent_max_tool_calls", 4)),
         )

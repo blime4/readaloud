@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import socket
+import time
 import html as _html
 from typing import Iterable, Optional
 from urllib.parse import urlparse
@@ -606,8 +607,34 @@ def _proxy_candidates(configured: str = "auto") -> list[Optional[str]]:
     return [None]
 
 
-def _get(url: str, mode: str, timeout: float, proxies: Optional[str]):
-    headers = HEADERS_MOBILE if mode == "mobile" else HEADERS_DESKTOP
+# 真实浏览器发起导航时会带这几个头。知乎、小红书这类风控站对缺失它们的
+# 请求更敏感 —— 补上之后"像不像浏览器"就不用靠猜了。
+NAV_HEADERS = {
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+}
+
+
+def _get(url: str, mode: str, timeout: float, proxies: Optional[str],
+         login: Optional[dict] = None):
+    """发一次请求。
+
+    `login` 是 cookies.for_url() 给的登录态，含 cookie / ua / referer。
+    **UA 必须和 cookie 配套** —— 知乎的 `__zse_ck` 与 UA 绑定，
+    拿浏览器的 cookie 配我们自己的 UA，反而会被判异常。
+    """
+    headers = dict(HEADERS_MOBILE if mode == "mobile" else HEADERS_DESKTOP)
+    if login:
+        if login.get("ua"):
+            headers["User-Agent"] = login["ua"]
+        if login.get("cookie"):
+            headers["Cookie"] = login["cookie"]
+        if login.get("referer"):
+            headers["Referer"] = login["referer"]
+        headers.update(NAV_HEADERS)
     kw = {"timeout": timeout, "headers": headers, "allow_redirects": True}
     if proxies:
         kw["proxies"] = {"http": proxies, "https": proxies}
@@ -729,23 +756,142 @@ def to_reading_text(html: str, url: str) -> tuple[str, str, str, int]:
     return title, best_text, best_route, best_drop
 
 
-def fetch(url: str, mode: str = "auto", timeout: float = 25.0,
-          proxy: str = "auto") -> dict:
-    """抓一个链接并返回可直接朗读的正文 + 诊断信息。
+# --------------------------------------------------------------------------
+# 登录态与浏览器兜底
+#
+# 有些站（知乎最典型）没登录态就是不给内容：
+#     裸请求                     → HTTP 403（一个 zse 挑战页）
+#     带浏览器 cookie（未登录）  → HTTP 200，但还是软 404
+#     带浏览器 cookie（已登录）  → 正常全文
+# 所以抓取前先问一句"这个站配了登录态吗"，失败后再考虑两件事：
+# 一是从浏览器刷新一次登录态（cookie 会过期），二是干脆让浏览器自己上。
+# --------------------------------------------------------------------------
 
-    返回：
-        ok     是否拿到了可用正文
-        title  标题
-        text   清洗后的正文（段落已重排）
-        diag   诊断：字数/段落数/评分/路线/拦截原因/试过的策略
+_REFRESH_AT = {"t": 0.0, "result": None}
+_PROBE_AT = {"t": 0.0, "found": None}
+
+
+def _login_for(url: str) -> Optional[dict]:
+    """这个 URL 有没有配好的登录态。只读一个小 json，开销可以忽略。"""
+    try:
+        import cookies
+        return cookies.for_url(url)
+    except Exception:
+        return None
+
+
+def _site_known(url: str) -> bool:
+    try:
+        import cookies
+        return bool(cookies.base_domain(cookies.host_of(url)))
+    except Exception:
+        return False
+
+
+def _refresh_login(force: bool = False, min_gap: float = 60.0,
+                   warmup=None) -> Optional[dict]:
+    """从浏览器重新拉一次登录态。
+
+    `__zse_ck` 这类风控 cookie 寿命不长，撞上 403 时主动刷新一次比让
+    用户手动点更省事。加节流是因为连抓多篇时不该每次都去连浏览器。
+
+    想拿结果就传 force=True —— 节流挡住的只是"这次去不去拉"，
+    不改变语义。
+
+    `warmup` 是一组地址：会让浏览器先去访问一次，把风控 cookie 刷新到
+    最新。实测不做这一步的话，搬过来的常常是已经失效的凉 cookie。
     """
-    diag: dict = {"tried": []}
-    if not re.match(r"^https?://", url or "", re.I):
-        return {"ok": False, "error": "不是有效的 http/https 链接", "diag": diag}
+    if not force:
+        if time.time() - _REFRESH_AT["t"] < min_gap:
+            return None
+    _REFRESH_AT["t"] = time.time()
+    try:
+        import cookies
+        r = cookies.import_from_cdp(warmup=warmup)
+        _REFRESH_AT["result"] = r
+        return r
+    except Exception:
+        return None
 
+
+def _browser_available() -> Optional[dict]:
+    """本机有没有开着调试端口的浏览器。结果缓存 30 秒 —— 扫端口虽快，
+    但没必要每抓一篇都扫一遍。"""
+    if time.time() - _PROBE_AT["t"] < 30:
+        return _PROBE_AT["found"]
+    _PROBE_AT["t"] = time.time()
+    try:
+        import cdp
+        _PROBE_AT["found"] = cdp.pick_browser()
+    except Exception:
+        _PROBE_AT["found"] = None
+    return _PROBE_AT["found"]
+
+
+def _fetch_via_browser(url: str, timeout: float = 40.0) -> Optional[dict]:
+    """最后一招：让本机浏览器自己去打开页面，把渲染后的 DOM 交回来。
+
+    浏览器带着登录态、真 UA，自己过 JS 挑战，所以我们只需要从 DOM 里
+    捞内容。**带 HTML 回来而不是纯文本**：innerText 会丢掉 h1 / li /
+    blockquote，读出来就是平的；带 HTML 回来能走同一条清理管线。
+    """
+    info = _browser_available()
+    if not info:
+        return None
+    try:
+        import cdp
+        page = cdp.fetch_text(info["port"], url,
+                              ws_url=info.get("webSocketDebuggerUrl"),
+                              wait=min(12.0, max(5.0, timeout * 0.4)),
+                              timeout=timeout)
+    except Exception:
+        return None
+    if not page.get("ok"):
+        return None
+
+    html = page.get("html") or ""
+    if html:
+        title, text, route, dropped = to_reading_text(html, url)
+        route = f"浏览器代抓·{route}"
+    else:
+        title = page.get("title") or ""
+        text = page.get("text") or ""
+        route, dropped = "浏览器代抓", 0
+    if not title:
+        title = page.get("title") or ""
+    sc = score(text, title)
+    return {
+        "ok": sc["chars"] >= 120,
+        "title": title, "text": text, "url": page.get("url") or url,
+        "chars": sc["chars"], "paras": sc["paras"], "avg_para": sc["avg_para"],
+        "quality": sc["score"], "grade": classify(sc["score"]), "route": route,
+        "dropped": dropped, "html_bytes": len(html), "blocked": None,
+        "mode": "browser", "proxied": False, "browser": True,
+        "browser_port": info["port"], "waited": page.get("waited"),
+    }
+
+
+def _good(cand: Optional[dict]) -> bool:
+    return bool(cand and cand.get("ok") and (cand.get("quality") or 0) >= 55)
+
+
+def _run_attempts(url: str, mode: str, timeout: float, proxy: str,
+                  login: Optional[dict], diag: dict,
+                  best: Optional[dict] = None,
+                  quick: bool = False) -> tuple[Optional[dict], str]:
+    """按「代理 × 身份」的组合跑一轮，返回(目前最好的候选, 最后的错误)。
+
+    `quick=True` 只打最可能命中的那一次。这不是抠性能，是**必须的**：
+    知乎这类站对频率极敏感 —— 实测同一篇文章连打 8 次
+    （两轮 × 桌面/手机 × 代理/直连）之后整站返回 403，隔一会儿单发才恢复。
+    所以一旦有了登录态（身份已由 cookie 锁定），换 UA 换代理地猛打
+    只会把自己打进风控名单。
+    """
     modes = ["mobile"] if mode == "mobile" else ["desktop"]
     if mode == "auto":
         modes = ["desktop", "mobile"]
+    if quick:
+        modes = modes[:1]
 
     # 本机 / 局域网地址永远直连：代理帮不上忙，只会把它挡成 502
     if is_local_url(url):
@@ -753,15 +899,17 @@ def fetch(url: str, mode: str = "auto", timeout: float = 25.0,
         diag["local_url"] = True
     else:
         proxy_list = _proxy_candidates(proxy)
+    if quick:
+        proxy_list = proxy_list[:1]
 
-    best: Optional[dict] = None
     last_err = ""
-
     for px in proxy_list:
         for md in modes:
             tag = f"{md}{'+proxy' if px else ''}"
+            if login:
+                tag += "+登录态"
             try:
-                r = _get(url, md, timeout, px)
+                r = _get(url, md, timeout, px, login)
             except Exception as e:
                 last_err = f"{type(e).__name__}: {str(e)[:120]}"
                 diag["tried"].append({"mode": tag, "error": last_err})
@@ -788,7 +936,7 @@ def fetch(url: str, mode: str = "auto", timeout: float = 25.0,
                     "avg_para": sc["avg_para"], "quality": sc["score"],
                     "grade": classify(sc["score"]), "route": route,
                     "dropped": dropped, "html_bytes": len(r.content),
-                    "blocked": blocked, "diag": diag, "mode": md,
+                    "blocked": blocked, "mode": md,
                     "proxied": bool(px)}
             if cand["ok"]:
                 # 桌面端拿到的通常比移动端完整，同分优先保留先拿到的
@@ -803,10 +951,90 @@ def fetch(url: str, mode: str = "auto", timeout: float = 25.0,
                 break
         if best and best.get("ok") and best.get("quality", 0) >= 70:
             break
+    return best, last_err
+
+
+def fetch(url: str, mode: str = "auto", timeout: float = 25.0,
+          proxy: str = "auto", login: bool = True,
+          allow_browser: bool = True) -> dict:
+    """抓一个链接并返回可直接朗读的正文 + 诊断信息。
+
+    过程分四级，越往后越慢，所以能早停就早停：
+
+        1. 直接请求（带上已配好的登录态）
+        2. 抓得不好 → 从浏览器刷新登录态重试一次（cookie 会过期）
+        3. 还是不行 → 让浏览器自己去打开页面，把渲染后的 DOM 交回来
+        4. 都不行 → 如实报错，并说清是哪一关卡住了
+
+    返回：
+        ok     是否拿到了可用正文
+        title  标题
+        text   清洗后的正文（段落已重排）
+        diag   诊断：字数/段落数/评分/路线/拦截原因/试过的策略
+    """
+    diag: dict = {"tried": []}
+    if not re.match(r"^https?://", url or "", re.I):
+        return {"ok": False, "error": "不是有效的 http/https 链接", "diag": diag}
+
+    jar = _login_for(url) if login else None
+    if jar:
+        diag["login"] = {"domain": jar["domain"], "source": jar["source"],
+                         "age": jar["age"], "cookies": len(jar["jar"])}
+
+    # 已经配好登录态、或者这个站明摆着要登录态的，第一轮只打一次。
+    # 理由见 _run_attempts 的注释：换着身份猛打会触发风控，
+    # 而且带登录态时身份已经由 cookie 锁定了，换 UA 反而有害。
+    quick = bool(jar) or _site_known(url)
+    best, last_err = _run_attempts(url, mode, timeout, proxy, jar, diag,
+                                   quick=quick)
+
+    # 第二级：抓不到 / 抓得差，而这个站又是需要登录态的站点 → 刷新后重试
+    if login and not _good(best) and _site_known(url):
+        before = jar["header"] if jar else ""
+        warm = []
+        try:
+            import cookies
+            warm = cookies.warmup_urls_for(url)
+        except Exception:
+            pass
+        # 让浏览器去访问一次会把自己的频率限制也重置掉一部分，中间留一点
+        # 间隔，别把"刚被拒的请求"换个 cookie 立刻再打一遍。
+        time.sleep(1.0)
+        refreshed = _refresh_login(warmup=warm)
+        jar2 = _login_for(url)
+        warmed_ok = bool(((refreshed or {}).get("warmup") or {}).get("ok"))
+        # cookie 值没变也值得重试 —— 浏览器"真的访问过一次"这件事本身
+        # 就会让服务端侧的会话状态刷新（实测预热前后 cookie 一模一样，
+        # 但请求从 403 变成 200）。
+        if jar2 and (jar2["header"] != before or warmed_ok):
+            diag["login_refreshed"] = True
+            diag["tried"].append({"mode": "刷新登录态后重试"})
+            best, err2 = _run_attempts(url, mode, timeout, proxy, jar2, diag,
+                                       best, quick=True)
+            last_err = err2 or last_err
+
+    # 第三级：让浏览器自己上。到这一步 requests 已经没辙了。
+    if allow_browser and not _good(best) and not is_local_url(url):
+        b3 = _fetch_via_browser(url, timeout=max(timeout, 35.0))
+        if b3 and (_good(b3) or not _good(best)):
+            diag["tried"].append({"mode": "浏览器代抓", "chars": b3.get("chars")})
+            best = b3
 
     if best is None:
-        return {"ok": False, "diag": diag,
-                "error": f"抓取失败：{last_err or '未知原因'}"}
+        # 连页面都没拿到（比如一直是 403）。把"该配登录态"直接说出来，
+        # 而不是让用户对着"稍后重试"反复撞墙。
+        hint = ""
+        site = _site_meta(url)
+        if site:
+            if jar:
+                hint = (f"。{site['name']} 的登录态被拒了（{last_err}），"
+                        f"多半是 cookie 过期 —— 点「登录态」重新导入一次即可")
+            else:
+                hint = (f"。{site['name']} 需要登录态才能读：点「登录态」→"
+                        f"「从浏览器导入」，或在浏览器里复制 Cookie 粘进来")
+        diag["picked"] = None
+        return {"ok": False, "diag": diag, "need_login": bool(site),
+                "error": f"抓取失败：{last_err or '未知原因'}{hint}"}
 
     if not best["ok"]:
         reason = best.get("blocked")
@@ -818,11 +1046,41 @@ def fetch(url: str, mode: str = "auto", timeout: float = 25.0,
                           "也可能是站点在限流或做校验")
             else:
                 reason = f"正文太短（{best.get('chars', 0)} 字）"
-        best["error"] = (f"没能提取到正文：{reason}。"
-                         f"稍等片刻重试，或用浏览器打开后复制正文。")
+        site = _site_meta(url)
+        if site and not jar:
+            extra = (f"。这个站需要登录态：点「登录态」里的「从浏览器导入」，"
+                     f"或在浏览器里复制 Cookie 粘进来"
+                     f"（{site['name']} 要 {'、'.join(site.get('关键 cookie') or [])}）")
+        elif site and not _looks_logged_in(jar):
+            extra = (f"。已配的 {site['name']} 登录态里没有登录凭证，"
+                     f"可能只导入了匿名 cookie，重新导入一次试试")
+        else:
+            extra = "。稍等片刻重试，或用浏览器打开后复制正文。"
+        best["error"] = f"没能提取到正文：{reason}{extra}"
+        best["need_login"] = bool(site and not _good(best))
     diag["picked"] = {"mode": best.get("mode"), "route": best.get("route"),
                       "quality": best.get("quality"), "chars": best.get("chars")}
+    best["diag"] = diag
     return best
+
+
+def _site_meta(url: str) -> Optional[dict]:
+    try:
+        import cookies
+        return cookies.site_info_for(url)
+    except Exception:
+        return None
+
+
+def _looks_logged_in(jar: Optional[dict]) -> bool:
+    if not jar:
+        return False
+    try:
+        import cookies
+        return cookies._looks_logged_in(jar["domain"], jar["jar"])
+    except Exception:
+        # 判断不了就当"有"，免得让用户白折腾
+        return bool(jar.get("jar"))
 
 
 if __name__ == "__main__":  # 手动调试：python webfetch.py <url>

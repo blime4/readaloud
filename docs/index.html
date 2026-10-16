@@ -86,6 +86,57 @@
   .ustat .steps{margin:6px 0 0; padding-left:2px; list-style:none}
   .ustat .steps li{padding:2px 0; color:var(--txt-3)}
   .ustat .steps li::before{content:"→ "; opacity:.55}
+  /* ---------- 登录态面板（知乎这类站没登录态就是 403） ---------- */
+  .lp-btn{display:inline-flex; align-items:center; gap:5px}
+  .lp-btn .lp-dot{width:7px;height:7px;border-radius:50%;background:var(--txt-3);flex:none}
+  .lp-btn .lp-dot.ok{background:var(--ok)}
+  .lp-btn.on{background:var(--accent-soft); border-color:var(--btn-bd); color:var(--accent)}
+  .loginpanel{
+    padding:12px 14px 14px; background:var(--panel-2);
+    border-bottom:1px solid var(--line); font-size:12px;
+  }
+  .lp-head{display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; margin-bottom:9px}
+  .lp-head b{font-size:13px}
+  .lp-head .lp-sub{color:var(--txt-3); font-size:12px}
+  .lp-actions{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px}
+  .lp-list{display:flex; flex-direction:column; gap:6px}
+  .lp-empty{color:var(--txt-3); padding:4px 2px}
+  .lp-item{
+    display:flex; align-items:center; gap:9px; padding:7px 10px;
+    background:var(--panel); border:1px solid var(--line); border-radius:9px;
+  }
+  .lp-item .n{font-weight:600; color:var(--txt); min-width:74px; flex:none}
+  .lp-item .m{color:var(--txt-3); flex:1; min-width:0; overflow:hidden;
+              text-overflow:ellipsis; white-space:nowrap}
+  .lp-item .tag{font-size:11px; padding:1px 7px; border-radius:99px;
+                border:1px solid var(--line); color:var(--txt-3); flex:none}
+  .lp-item .tag.ok{color:var(--ok)}
+  .lp-item .tag.warn{color:var(--warn)}
+  .lp-item .tag.bad{color:var(--danger)}
+  .lp-item .x{cursor:pointer; color:var(--txt-3); flex:none; user-select:none; padding:0 2px}
+  .lp-item .x:hover{color:var(--danger)}
+  .lp-paste{margin:0 0 10px; padding:10px; background:var(--panel);
+            border:1px solid var(--line); border-radius:10px}
+  .lp-paste textarea{
+    width:100%; min-height:64px; resize:vertical; box-sizing:border-box;
+    font:12px/1.6 ui-monospace,Consolas,monospace;
+    background:var(--code); color:var(--txt);
+    border:1px solid var(--line); border-radius:8px; padding:8px 10px; outline:0;
+  }
+  .lp-paste textarea:focus{border-color:var(--btn-bd)}
+  .lp-row{display:flex; gap:8px; align-items:center; margin-bottom:7px; flex-wrap:wrap}
+  .lp-row select{
+    font:12px inherit; padding:5px 8px; border-radius:8px;
+    background:var(--panel); color:var(--txt); border:1px solid var(--line);
+  }
+  .lp-hint{color:var(--txt-3); font-size:11.5px; line-height:1.7; margin-top:6px}
+  .lp-hint code{background:var(--code); padding:1px 5px; border-radius:5px; font-size:11px}
+  .lp-msg{margin-top:8px; font-size:12px; line-height:1.75; color:var(--txt-2)}
+  .lp-msg.ok{color:var(--ok)}
+  .lp-msg.bad{color:var(--danger)}
+  .lp-steps{margin:6px 0 0; padding-left:0; list-style:none; color:var(--txt-2)}
+  .lp-steps li{padding:2px 0}
+  .lp-steps li::before{content:"→ "; opacity:.5}
   body.night .ustat .ok{color:#3fb950}
   body.night .ustat .warn{color:#d29922}
   body.night .ustat .bad{color:#f85149}
@@ -244,8 +295,44 @@
         <input type="checkbox" id="urlClean"> 智能整理
       </label>
       <button class="ghost tiny" id="btnUrlFetch" title="只抓取正文，不朗读">只抓取</button>
+      <span class="grow"></span>
+      <button class="ghost tiny lp-btn" id="btnLogin"
+              title="知乎这类站没有登录态就只给一个 403，这里可以把浏览器里的登录态借过来">
+        🔑 登录态 <span class="lp-dot" id="lpDot"></span>
+      </button>
     </div>
     <div class="ustat" id="urlStat" style="display:none"></div>
+    <div class="loginpanel" id="loginPanel" style="display:none">
+      <div class="lp-head">
+        <b>登录态</b>
+        <span class="lp-sub">有些站（知乎、小红书最典型）没有登录态就只返回一个 403 挑战页，换 UA 是过不去的 —— 借浏览器里已经登录的那套 cookie 才行。</span>
+      </div>
+      <div class="lp-actions">
+        <button class="primary tiny" id="lpImport">📥 从浏览器导入</button>
+        <button class="ghost tiny" id="lpOpen">🪟 打开登录窗口</button>
+        <button class="ghost tiny" id="lpPasteToggle">📋 手动粘贴</button>
+        <button class="ghost tiny" id="lpRefresh">↻ 刷新</button>
+      </div>
+      <div class="lp-paste" id="lpPasteBox" style="display:none">
+        <div class="lp-row">
+          <select id="lpDomain"></select>
+          <button class="primary tiny" id="lpSave">保存</button>
+        </div>
+        <textarea id="lpCookie" spellcheck="false"
+          placeholder="把浏览器的 Cookie 粘进来，三种粘法都认：
+  1) z_c0=xxx; d_c0=yyy; __zse_ck=zzz
+  2) Cookie: z_c0=xxx; d_c0=yyy      （从 Network 面板复制的整行）
+  3) 整段『Copy as cURL』命令"></textarea>
+        <div class="lp-hint">
+          怎么拿：F12 → Network → 刷新页面 → 点任意一个请求 → 找到
+          <b>Request Headers</b> 里的 <code>Cookie</code> 一行 → 整行复制过来。<br>
+          <b>一定要从 Network 面板复制</b>：在 Console 里敲 <code>document.cookie</code> 拿不到
+          <code>z_c0</code>（它是 HttpOnly 的），而那正是登录凭证。
+        </div>
+      </div>
+      <div class="lp-list" id="lpList"></div>
+      <div class="lp-msg" id="lpMsg"></div>
+    </div>
     <textarea id="txt" placeholder="把要朗读的内容粘进来（支持 Markdown，会自动清理标题/表格/代码/链接，并规整数字与符号）…
 
 也可以直接按快捷键：复制任意位置的一段文字 → 按 Ctrl+Alt+R，这里会自动开始朗读。"></textarea>
@@ -1280,6 +1367,7 @@ async function fetchUrl(url, auto, clean, retry) {
     if (!d.ok) {
       const err = new Error(d.error || '抓取失败');
       err.blockedHint = d.blocked ? String(d.blocked) : '';
+      err.needLogin = !!d.need_login;
       throw err;
     }
 
@@ -1298,12 +1386,25 @@ async function fetchUrl(url, auto, clean, retry) {
   } catch (e) {
     const el = $('#urlStat');
     el.style.display = 'block';
+    // 需要登录态的站（知乎最典型）别只说"抓取失败" —— 用户根本不知道该干什么。
+    // 直接把按钮摆到他面前：点一下就把浏览器里的登录态借过来，然后自动重试。
+    const need = !!e.needLogin;
     el.innerHTML = `<div class="bad">抓取失败：${esc(e.message)}</div>` +
       (e.blockedHint ? `<div class="hint">站点原因：${esc(e.blockedHint)}</div>` : '') +
-      `<div class="hint">需要登录的页面（知乎、付费内容、会员文章）抓不到是正常的，
-        把浏览器里看到的正文复制进来一样能读。</div>` +
-      `<div style="margin-top:8px"><button class="ghost tiny" id="btnUrlRetry"
-        title="交给模型换策略再抓一次，通常要十几秒">🧠 让模型硬试一次</button></div>`;
+      (need
+        ? `<div class="hint">这个站要登录态才给正文，光换浏览器标识是过不去的。
+             点下面的按钮，把浏览器里已经登录的那套 cookie 借过来 —— 一次配好，长期有效。</div>
+           <div style="margin-top:8px"><button class="primary tiny" id="btnUrlLogin">🔑 配登录态并重试</button></div>`
+        : `<div class="hint">需要登录的页面（付费内容、会员文章）抓不到是正常的，
+             把浏览器里看到的正文复制进来一样能读。</div>
+           <div style="margin-top:8px"><button class="ghost tiny" id="btnUrlRetry"
+             title="交给模型换策略再抓一次，通常要十几秒">🧠 让模型硬试一次</button></div>`);
+    const lb = $('#btnUrlLogin');
+    if (lb) lb.onclick = async () => {
+      lpToggle(true);
+      await lpImport();          // 导入成功后会自己试抓一次
+      fetchUrl(url, auto, clean, retry);
+    };
     const rb = $('#btnUrlRetry');
     if (rb) rb.onclick = () => fetchUrl(url, auto, clean, true);
     toast(e.message, 4200);
@@ -1368,6 +1469,193 @@ $('#btnUndo').onclick = () => {
   if (!S.history.length) return toast('没有可撤销的变更');
   $('#txt').value = S.history.pop(); S.items = []; S.idx = -1; count(); toast('已撤销');
 };
+/* ---------- 登录态：知乎这类站没有登录态就只给一个 403 挑战页 ----------
+   为什么必须借浏览器的 cookie：实测（2026-10-16）
+     裸请求                  → HTTP 403（650 字节的 zse 挑战页）
+     带上浏览器 cookie（未登录）→ HTTP 200，但正文是软 404
+     带上浏览器 cookie（已登录）→ 正常全文
+   所以这事跟 UA 无关，跟"有没有登录凭证"有关。 */
+const LP = { open: false, data: null };
+
+function lpToggle(force) {
+  LP.open = (force === undefined) ? !LP.open : !!force;
+  $('#loginPanel').style.display = LP.open ? 'block' : 'none';
+  $('#btnLogin').classList.toggle('on', LP.open);
+  if (LP.open) lpRefresh();
+}
+function lpMsg(html, kind) {
+  const el = $('#lpMsg');
+  el.className = 'lp-msg' + (kind ? ' ' + kind : '');
+  el.innerHTML = html || '';
+}
+function lpAge(sec) {
+  sec = sec || 0;
+  if (!sec) return '';
+  if (sec < 90) return '刚刚';
+  if (sec < 3600) return Math.round(sec / 60) + ' 分钟前';
+  if (sec < 86400) return Math.round(sec / 3600) + ' 小时前';
+  return Math.round(sec / 86400) + ' 天前';
+}
+function lpCurrentUrl() {
+  const v = ($('#urlIn').value || '').trim();
+  return /^https?:\/\//i.test(v) ? v : '';
+}
+
+async function lpRefresh() {
+  try {
+    const d = await (await fetch(API + '/api/login')).json();
+    LP.data = d;
+    lpRender(d);
+  } catch (e) {
+    lpMsg('连不上引擎：' + esc(e.message), 'bad');
+  }
+}
+
+function lpRender(d) {
+  const sites = d.sites || [];
+  const cfg = sites.filter(s => s.configured);
+  const rest = sites.filter(s => !s.configured);
+
+  // 标题栏那个小圆点：只要有任意一站拿到了真正的登录凭证就亮绿
+  const anyOk = cfg.some(s => s.has_login);
+  const dot = $('#lpDot');
+  dot.className = 'lp-dot' + (anyOk ? ' ok' : '');
+  dot.title = anyOk ? '已有站配好登录态'
+    : (cfg.length ? '配了登录态但缺登录凭证' : '还没配登录态');
+
+  // 粘贴用的站点下拉（认识的站 + 自定义）
+  const sel = $('#lpDomain');
+  if (sel.options.length !== sites.length + 1) {
+    sel.innerHTML = sites.map(s => `<option value="${s.domain}">${esc(s.name)}</option>`).join('')
+      + '<option value="__custom__">其它站点（自己填域名）</option>';
+  }
+
+  const rows = cfg.map(s => {
+    const tag = s.has_login
+      ? '<span class="tag ok">已登录</span>'
+      : '<span class="tag warn">缺登录凭证</span>';
+    const src = s.source === 'browser' ? '从浏览器导入' : '手动粘贴';
+    return `<div class="lp-item">
+      <span class="n">${esc(s.name)}</span>
+      ${tag}
+      <span class="m">${src} · ${s.count} 项 cookie · ${lpAge(s.age)}</span>
+      <span class="x" data-clear="${esc(s.domain)}" title="清掉这一站的登录态">✕</span>
+    </div>`;
+  }).join('');
+
+  const brs = d.browsers || [];
+  const brHint = brs.length
+    ? `<div class="lp-hint">本机有 <b>${esc(brs[0].browser || '浏览器')}</b>（端口 ${brs[0].port}）开着调试端口，可以直接导入。</div>`
+    : `<div class="lp-hint">本机没有开着调试端口的浏览器。先点「🪟 打开登录窗口」开一个并在里面登录一次；不想开浏览器就用「📋 手动粘贴」。</div>`;
+
+  $('#lpList').innerHTML =
+    (rows || '<div class="lp-empty">还没有配置任何登录态。</div>')
+    + brHint
+    + (rest.length ? `<div class="lp-hint">还可以配：${rest.map(s => esc(s.name)).join('、')}</div>` : '');
+
+  document.querySelectorAll('[data-clear]').forEach(el => {
+    el.onclick = () => lpClear(el.getAttribute('data-clear'));
+  });
+}
+
+async function lpPost(body) {
+  return (await fetch(API + '/api/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })).json();
+}
+
+async function lpImport() {
+  $('#lpImport').disabled = true;
+  lpMsg('正在从浏览器读取登录态…<br>（如果浏览器有一阵子没访问过目标站，会先让它访问一次来刷新风控 cookie，大约 5 秒）');
+  try {
+    const d = await lpPost({ action: 'import', url: lpCurrentUrl() || 'https://www.zhihu.com/' });
+    if (!d.ok) {
+      lpMsg(esc(d.error || '导入失败') + (d.hint ? '<br>' + esc(d.hint) : ''), 'bad');
+      return;
+    }
+    const got = d.imported || [];
+    if (!got.length) {
+      lpMsg('连上浏览器了，但里面没有这些站的 cookie。<br>'
+        + '先点「🪟 打开登录窗口」，在弹出的窗口里登录一次，再回来点导入。', 'bad');
+    } else {
+      const names = got.map(x => esc(x.name)
+        + (x.logged_in ? '（已登录）' : '（只有匿名 cookie，缺登录凭证）')).join('、');
+      const warmed = d.warmup && d.warmup.ok ? '　已顺带让浏览器刷新过一次 cookie。' : '';
+      lpMsg(`导入成功：${names}。${warmed}`, 'ok');
+    }
+    await lpRefresh();
+    const u = lpCurrentUrl();
+    if (u && got.some(x => x.logged_in)) await lpTest(u);
+  } catch (e) {
+    lpMsg('导入出错：' + esc(e.message), 'bad');
+  } finally {
+    $('#lpImport').disabled = false;
+  }
+}
+
+async function lpOpen() {
+  lpMsg('正在打开登录窗口…');
+  const d = await lpPost({ action: 'open', home: lpCurrentUrl() || 'https://www.zhihu.com/' });
+  if (!d.ok) return lpMsg(esc(d.error || '打开失败'), 'bad');
+  lpMsg(esc(d.note || '浏览器已打开')
+    + '<ul class="lp-steps"><li>在弹出的窗口里登录</li>'
+    + '<li>登录完回到这里，点「📥 从浏览器导入」</li>'
+    + '<li>以后不用重复登录</li></ul>', 'ok');
+  await lpRefresh();
+}
+
+async function lpSave() {
+  const dom = $('#lpDomain').value;
+  let domain = dom;
+  if (dom === '__custom__') {
+    domain = prompt('这个 cookie 属于哪个站？填域名，例如 zhihu.com') || '';
+    if (!domain) return;
+  }
+  const cookie = ($('#lpCookie').value || '').trim();
+  if (!cookie) return lpMsg('先把 Cookie 粘到上面的框里', 'bad');
+  const d = await lpPost({ action: 'paste', domain, cookie });
+  if (!d.ok) return lpMsg(esc(d.error || '保存失败'), 'bad');
+  $('#lpCookie').value = '';
+  lpMsg(`已保存 ${esc(d.domain)}：新增 ${d.added} 项，现有 ${d.count} 项`
+    + (d.has_login ? '，含登录凭证。' : '，但<b>没看到登录凭证</b> —— 可能只复制到了匿名 cookie。'), 
+    d.has_login ? 'ok' : 'bad');
+  await lpRefresh();
+}
+
+async function lpClear(domain) {
+  const d = await lpPost({ action: 'clear', domain });
+  lpMsg(`已清掉 ${esc(domain)} 的登录态`, 'ok');
+  await lpRefresh();
+}
+
+async function lpTest(url) {
+  lpMsg('正在用当前登录态试抓…');
+  try {
+    const d = await lpPost({ action: 'test', url });
+    if (d.ok) {
+      const how = d.has_login ? '登录态已生效' : '但没带登录凭证，可能只抓到公开部分';
+      lpMsg(`试抓成功：<b>${d.chars}</b> 字 · 质量 ${d.quality} · 路线 ${esc(d.route || '')}（${how}）`, 'ok');
+    } else {
+      lpMsg('试抓失败：' + esc(d.error || '未知原因'), 'bad');
+    }
+  } catch (e) {
+    lpMsg('试抓出错：' + esc(e.message), 'bad');
+  }
+}
+
+$('#btnLogin').onclick = () => lpToggle();
+$('#lpImport').onclick = lpImport;
+$('#lpOpen').onclick = lpOpen;
+$('#lpRefresh').onclick = lpRefresh;
+$('#lpSave').onclick = lpSave;
+$('#lpPasteToggle').onclick = () => {
+  const box = $('#lpPasteBox');
+  const show = box.style.display === 'none';
+  box.style.display = show ? 'block' : 'none';
+  if (show) $('#lpCookie').focus();
+};
+
 /* ---------- 链接抓取 ---------- */
 $('#btnUrlGo').onclick = () => fetchUrl(null, true);
 $('#btnUrlFetch').onclick = () => fetchUrl(null, false);
@@ -1485,6 +1773,7 @@ async function boot() {
   restore('#pitch', '#pitchV', store.get('pitch', 0), 'Hz');
   restore('#vol', '#volV', store.get('vol', 0), '%');
   count(); renderHistory();
+  lpRefresh();          // 「登录态」按钮上的小圆点：开局就知道配没配
   const perm = await permissionState();
   if (isLocalHost() || perm.state === 'granted') {
     const ok = await connect();

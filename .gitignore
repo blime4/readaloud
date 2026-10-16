@@ -13,5 +13,11 @@ python.path
 # 页面构建产物
 node_modules/
 
-# 临时探针产物（手工 curl 验证时留下的中间 JSON）
+# 临时探针产物（手工 curl 验证时留下的中间 JSON / 脚本）
 _t_*.json
+_probe_*.py
+
+# 登录态：这里存的是你自己账号的 cookie，**绝对不能进仓库**
+cookies.json
+# 「打开登录窗口」用的独立浏览器配置目录
+browser-profile/

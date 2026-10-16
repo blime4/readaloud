@@ -93,6 +93,7 @@ AI 功能额外需要 [Ollama](https://ollama.com)；没有也能正常朗读，
 | `POST /api/plan` | 只清洗+规整+逐句，不碰 AI |
 | `GET\|POST /api/fetch?url=` | 抓网页正文。返回 `title/text/chars` 外加 `quality`（0-100 质量分）、`route`（用了哪条提取路线）、`dropped`（清掉多少行网页残留）、`diag`（试过哪些策略） |
 | `POST /api/agent` | 让会调工具的小模型主导取稿。body：`{url, clean, model, retry}`。先走零模型开销的规则抓取（通常 <1 秒）；抓得够干净就直接返回，彻底抓不到就直接报错（`retry:true` 才让模型硬试）；勾 `clean` 时直接深度清理。返回 `trace` 记录模型每一步动作 |
+| `GET\|POST /api/login` | 登录态管理。GET 返回各站配置状态与本机可借用的浏览器；POST 按 `action` 分派：`import`（从浏览器整套搬 cookie，可带 `warmup` 预热）/ `paste`（手工粘贴，支持纯 Cookie 头、Network 整行、Copy as cURL 三种粘法）/ `clear` / `open`（开一个带调试端口的登录窗口）/ `probe` / `test`（用当前登录态试抓一个链接） |
 | `POST /api/ai` | 总结 / 润色（`stream=true` 可流式，结果自动缓存） |
 | `GET /api/tts?text=&voice=&rate=&pitch=&volume=` | 直接返回 MP3 |
 | `GET /api/recommend` | 按内容推荐音色 |
@@ -139,11 +140,50 @@ ollama pull qwen2.5:7b   # 会调工具、不思考，取稿 Agent 用它
 换成肯定式的「每一轮都调用一个工具，工具调用就是你这一轮的全部回答」后 4/4 成功。
 小模型处理"不要做 X"远不如"要做 Y"可靠。
 
+## 知乎 403 怎么解决（登录态）
+
+知乎、小红书这类站**没有登录态就是不给内容**。实测（2026-10-16）：
+
+| 请求方式 | 结果 |
+| --- | --- |
+| 裸 requests | HTTP 403，返回 650 字节的 zse 挑战页 |
+| 带浏览器 cookie（未登录） | HTTP 200 —— 风控过了，但正文是软 404 |
+| 带浏览器 cookie（已登录） | 正常全文 |
+
+所以这事跟 UA 无关，跟**有没有登录凭证**（知乎的 `z_c0`）有关。解法在页面右上角的
+「🔑 登录态」面板里，两条路：
+
+1. **从浏览器导入**（推荐）：点「🪟 打开登录窗口」→ 在弹出的窗口里登录一次 →
+   点「📥 从浏览器导入」。走 CDP 从浏览器实时取 cookie，连 HttpOnly 的 `z_c0`
+   都能拿到，一次配好长期有效。抓取时撞上 403 还会自动刷新登录态重试。
+2. **手动粘贴**：浏览器 F12 → Network → 刷新 → 点任意请求 → 复制
+   `Request Headers` 里的 `Cookie` 整行 → 粘进面板。**必须从 Network 面板复制**，
+   Console 里敲 `document.cookie` 拿不到 HttpOnly 的 `z_c0`。
+
+为什么不能直接读浏览器的 cookie 数据库：Chrome 127+ 启用 App-Bound Encryption，
+本机实测 Chrome 155 的 `Local State` 里只剩 `app_bound_encrypted_key`，解密要走
+COM 提权接口 —— 普通进程做不到，所以只能走 CDP 或手工粘贴。
+
+三个实测踩过的坑，都写进了代码注释：
+
+- **cookie 必须和 UA 配套**。`__zse_ck` 与 UA 绑定，拿浏览器的 cookie 配自己的 UA
+  反而被判异常。导入时把浏览器真实 UA 一起存下来（无头标识 `Headless` 会抹掉）。
+- **凉 cookie 等于没配**。风控 cookie 寿命极短，把浏览器里"十分钟前"的搬过来照样 403；
+  让浏览器先真的访问一次站点首页再取，立刻变 200。所以导入支持 `warmup` 预热，
+  抓取失败自愈时也会先预热。
+- **不能换着身份猛打**。知乎对频率极敏感：同一篇连打 8 次
+  （两轮 × 桌面/手机 × 代理/直连）后整站 403。所以带上登录态后第一轮只打一次。
+
+另外，本机对**未监听**的回环端口不做立即拒绝（connect 挂满 2 秒才失败），
+扫 5 个空端口就是 10 秒 —— `/api/login` 一度因此要 10.6 秒才返回，
+面板打开像卡死。现在先自己做带超时的 TCP 探活（0.12 秒）再发 HTTP，
+并且缓存 8 秒。
+
 ## 自检
 
 ```bash
 .venv/Scripts/python.exe selftest_nlp.py     # 文本智能层：结构/规整/切句/音色推荐（42 项）
-.venv/Scripts/python.exe selftest_fetch.py   # 网页取稿：编码/重排/噪声/结构/真实站点（49 项）
+.venv/Scripts/python.exe selftest_fetch.py   # 网页取稿：编码/重排/噪声/结构/登录态/真实站点（136 项）
 .venv/Scripts/python.exe selftest_fetch.py --offline   # 只跑纯函数，不联网
 .venv/Scripts/python.exe _selftest.py        # 端到端：剪贴板/热键/分句/合成/推送
 ```

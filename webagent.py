@@ -177,9 +177,14 @@ def run(url: str, model: str, ollama_url: str, num_ctx: int = 32768,
         keep_alive: str = "30m", auto: bool = True, do_clean: bool = False,
         fetch_timeout: float = 25.0, proxy: str = "auto",
         retry_on_fail: bool = False, ollama_ok: bool = True,
+        use_login: bool = True, allow_browser: bool = True,
         on_event: Optional[Callable[[dict], None]] = None,
         max_tool_calls: int = 4) -> dict:
-    """把链接抓成朗读稿。auto=True 时先走零模型开销的快路。"""
+    """把链接抓成朗读稿。auto=True 时先走零模型开销的快路。
+
+    `use_login` / `allow_browser` 交给 webfetch 决定要不要带登录态、
+    要不要在规则抓取失败时动用本机浏览器。
+    """
     t0 = time.time()
     trace: list[dict] = []
     state: dict = {"pages": [], "chosen": None, "note": ""}
@@ -211,12 +216,19 @@ def run(url: str, model: str, ollama_url: str, num_ctx: int = 32768,
                 "head": txt[:280], "tail": txt[-220:]}
 
     # ---------- 第一级：确定性抓取 ----------
-    first = webfetch.fetch(url, mode="auto", timeout=fetch_timeout, proxy=proxy)
+    first = webfetch.fetch(url, mode="auto", timeout=fetch_timeout, proxy=proxy,
+                           login=use_login, allow_browser=allow_browser)
     idx0 = store(first)
     emit("fetch", tool="deterministic", mode="auto",
          ok=bool(first.get("ok")), quality=first.get("quality"),
          chars=first.get("chars"), route=first.get("route"),
          error=first.get("error"))
+    # 需要登录态的站点（知乎最典型）应该在抓取阶段就把话说明白，
+    # 别让用户以为"这站抓不了"。
+    if first.get("need_login"):
+        emit("need_login",
+             reason="这个站要登录态才给正文",
+             hint="点页面上的「登录态」→「从浏览器导入」，一次配好长期有效")
     good = bool(first.get("ok")) and (first.get("quality") or 0) >= 65
     if auto and good and not do_clean:
         return _result(first, trace, t0, "direct", note="", model=None)
@@ -226,7 +238,9 @@ def run(url: str, model: str, ollama_url: str, num_ctx: int = 32768,
     # 也只是"再抓一次"，撞的是同一堵墙。实测：白烧 39 秒、产出 0 字。
     # 想让它硬试，调用方传 retry_on_fail=True。
     if not first.get("ok") and not retry_on_fail:
-        emit("skip_model", reason="网络层没拿到内容，重抓是同一堵墙")
+        emit("skip_model",
+             reason=("缺登录态，重抓也是同一堵墙" if first.get("need_login")
+                     else "网络层没拿到内容，重抓是同一堵墙"))
         return _result(first, trace, t0, "direct", note="", model=None)
 
     # Ollama 没在跑：别报错，把确定性抓到的结果照样交出去。
@@ -250,7 +264,8 @@ def run(url: str, model: str, ollama_url: str, num_ctx: int = 32768,
         if mode not in ("auto", "desktop", "mobile"):
             mode = "auto"
         d = webfetch.fetch(a.get("url") or url, mode=mode,
-                           timeout=fetch_timeout, proxy=proxy)
+                           timeout=fetch_timeout, proxy=proxy,
+                           login=use_login, allow_browser=allow_browser)
         i = store(d)
         emit("fetch", tool="fetch_page", mode=mode, idx=i, ok=bool(d.get("ok")),
              quality=d.get("quality"), chars=d.get("chars"), route=d.get("route"),
@@ -440,6 +455,7 @@ def _result(page: dict, trace: list, t0: float, path: str, note: str,
     if not page.get("ok"):
         return {"ok": False, "error": page.get("error") or "没能抓到正文",
                 "blocked": page.get("blocked"), "title": page.get("title", ""),
+                "need_login": bool(page.get("need_login")),
                 "trace": trace, "path": path, "model": model,
                 "elapsed": round(time.time() - t0, 1),
                 "diag": page.get("diag")}
