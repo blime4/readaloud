@@ -35,6 +35,8 @@ import edge_tts
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 import text_nlp as NLP
+import webfetch
+import webagent
 
 # ---------------------------------------------------------------- 基础配置
 
@@ -67,11 +69,16 @@ DEFAULT_CONFIG = {
     # 本机 16G 显存足够放到 32768。
     "num_ctx": 32768,
     "keep_alive": "30m",            # 让模型多在内存里待一会儿，免得隔几分钟再问要重新加载
+    # 抓网页（/api/fetch、/api/agent）
+    "fetch_timeout": 25,            # 单次抓取超时（秒）
+    "fetch_proxy": "auto",          # auto=探测到本机 7897 代理就用；也可填具体地址或留空直连
+    "agent_model": "",              # 取稿 Agent 用的模型，留空则跟 small_model
+    "agent_max_tool_calls": 4,      # Agent 最多调几次工具
     # 用户偏好：会注入 AI 提示词，让总结/润色越用越像你要的样子
     "prefs": {"style": "", "mode": "none", "model": "", "quality": False},
 }
 
-ENGINE_VERSION = "1.2.2"
+ENGINE_VERSION = "1.3.0"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -80,6 +87,8 @@ FEATURES = [
     "prosody-normalize",    # 韵律参数缺正号也能合成
     "num-ctx-config",       # 上下文窗口可配（升配模型能出正文）
     "keep-alive",           # 模型常驻，避免重复加载
+    "web-fetch-quality",    # fetch 返回质量分/诊断/噪声清理统计
+    "web-agent",            # /api/agent：工具调用小模型主导取稿
 ]
 
 # 页面文件：优先用 docs/（= GitHub Pages 站点目录），本地与线上共用同一份，
@@ -410,6 +419,35 @@ def looks_like_cot(s: str) -> bool:
     return len(s) > 2500 and s.count("\n") > 15
 
 
+def pick_agent_model(prefer: str = "") -> str:
+    """给取稿 Agent 挑模型：会调工具、而且**不思考**。
+
+    为什么要专门挑"不思考"的：本机装的 qwen3 系列一律带 thinking，
+    做「哪些行是网页垃圾」这种判断时输出只有十来个字符，却要先思考几十秒
+    （实测 qwen3:4b 清理一次 175 秒，qwen2.5:7b 只要 6 秒，而且判得更准）。
+    Agent 要连调好几轮工具，模型一慢整条链就没法用。
+
+    挑选顺序：用户指定 → 已装模型里"有 tools 无 thinking"的 → small_model。
+    """
+    installed = [m for m in ollama_models() if m.get("name")]
+    names = [m.get("name") for m in installed]
+    if prefer and prefer in names:
+        return prefer
+    if CFG.get("agent_model") and CFG["agent_model"] in names:
+        return CFG["agent_model"]
+
+    def has(m, cap):
+        return cap in (m.get("capabilities") or [])
+
+    for m in installed:
+        if has(m, "tools") and not has(m, "thinking"):
+            return m["name"]
+    for m in installed:
+        if has(m, "tools"):
+            return m["name"]
+    return CFG.get("small_model") or (names[0] if names else "qwen3:4b")
+
+
 def pick_models(body: dict) -> list:
     """候选模型链：用户指定/小模型 -> 升配模型。"""
     installed = [m.get("name") for m in ollama_models()]
@@ -679,10 +717,39 @@ def health():
         "features": FEATURES,
         "ollama": bool(models),
         "models": [m.get("name") for m in models],
+        # 会调工具的模型有哪些 —— 取稿 Agent 只能靠它们
+        "tool_models": [m.get("name") for m in models if "tools" in (m.get("capabilities") or [])],
+        "fetch": _fetch_caps(),
         "voices": len(list_voices()),
         "clients": len(_subscribers),
         "config": CFG,
     })
+
+
+_fetch_caps_cache: dict = {}
+
+
+def _fetch_caps() -> dict:
+    """抓取能力自述：用不用得上专业提取库、走不走代理。"""
+    if _fetch_caps_cache:
+        return _fetch_caps_cache
+    try:
+        import trafilatura  # noqa: F401
+        has_traf = True
+    except Exception:
+        has_traf = False
+    try:
+        proxies = webfetch._proxy_candidates(CFG.get("fetch_proxy", "auto"))
+        proxy = proxies[0] if proxies and proxies[0] else ""
+    except Exception:
+        proxy = ""
+    _fetch_caps_cache.update({
+        "engine": "webfetch",
+        "trafilatura": has_traf,
+        "proxy": proxy,
+        "agent_ready": has_traf,
+    })
+    return _fetch_caps_cache
 
 
 @app.get("/api/voices")
@@ -733,62 +800,15 @@ def api_plan():
                     "items": r["items"], "count": len(r["segments"])})
 
 
-RE_NOISE_TAG = re.compile(
-    r"<(script|style|noscript|svg|iframe|template|nav|header|footer|aside|form|select|button)"
-    r"[^>]*>.*?</\1\s*>", re.S | re.I)
-RE_NOISE_ATTR = re.compile(
-    r"<(div|section|ul|ol|span|p|dl)[^>]*(?:id|class)\s*=\s*[\"'][^\"']*"
-    r"(?:nav|menu|sidebar|breadcrumb|comment|copyright|footer|header|toolbar|share|related|"
-    r"recommend|advert|\bads?\b|pagination|tag-list|meta|catalog|toc)[^\"']*[\"'][^>]*>"
-    r".*?</\1\s*>", re.S | re.I)
-
-
-def _looks_like_nav(line: str) -> bool:
-    """判断一行是不是导航/菜单/标签云这类"不是正文"的东西。"""
-    t = line.strip()
-    if len(t) < 12:
-        return True
-    if re.search(r"[。！？；，、：.!?;,]", t):
-        return False                       # 有标点，像正常句子
-    if len(t.split()) >= 4:
-        return True                        # 无标点的长行 + 空格分词多 = 菜单条
-    if re.fullmatch(r"[\w\u4e00-\u9fff]{1,4}([\s·|/›»]+\S{1,6}){3,}", t):
-        return True
-    return False
-
-
-def extract_main_text(raw: str) -> str:
-    """从网页 HTML 里抠出正文（不用额外依赖的轻量做法）。"""
-    s = re.sub(r"<!--.*?-->", " ", raw, flags=re.S)
-    # 先盯住常见正文容器，命中就只取它，能显著减少噪声
-    for pat in (r"<article[^>]*>(.*?)</article\s*>",
-                r'<[^>]+(?:id|class)\s*=\s*["\'][^"\']*(?:js_content|rich_media_content|'
-                r"article-content|post-content|entry-content|markdown-body)[^\"']*[\"'][^>]*>(.*?)</div\s*>",
-                r"<main[^>]*>(.*?)</main\s*>"):
-        m = re.search(pat, s, re.S | re.I)
-        if m and len(re.sub(r"<[^>]+>", "", m.group(1))) > 200:
-            s = m.group(1)
-            break
-    s = RE_NOISE_TAG.sub(" ", s)
-    s = RE_NOISE_ATTR.sub(" ", s)
-    s = re.sub(r"</(p|div|li|h[1-6]|tr|section|article|blockquote|dd|dt)>", "\n", s, flags=re.I)
-    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.I)
-    s = re.sub(r"<[^>]+>", " ", s)
-    s = _html.unescape(s)
-    s = re.sub(r"[ \t\u3000]+", " ", s)
-    lines = []
-    for line in s.split("\n"):
-        line = re.sub(r"\s+", " ", line).strip()
-        if not line or _looks_like_nav(line):
-            continue
-        lines.append(line)
-    return "\n\n".join(lines).strip()
-
-
 @app.get("/api/fetch")
 @app.post("/api/fetch")
 def api_fetch():
-    """把一个网页正文抓成可朗读的文本。剪贴板里是链接时直接用它。"""
+    """把一个网页抓成可朗读的正文。剪贴板里是链接、Obsidian 里贴了链接都走这里。
+
+    真正的活儿在 webfetch 里（编码探测 / 站点适配 / 段落重排 / 噪声清理 /
+    质量评分）。这里只负责取参数、做规范化、把诊断信息一并回给调用方 ——
+    让前端能说清"为什么没抓到"，而不是丢一句"抓取失败"。
+    """
     if request.method == "POST":
         body = request.get_json(silent=True) or {}
     else:
@@ -796,29 +816,80 @@ def api_fetch():
     url = (body.get("url") or "").strip()
     if not re.match(r"^https?://", url, re.I):
         return jsonify({"ok": False, "error": "不是有效的 http/https 链接"}), 400
-    try:
-        r = requests.get(url, timeout=20, headers={
-            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                           "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        })
-        r.raise_for_status()
-        raw = r.text
-    except Exception as e:
-        return jsonify({"ok": False, "error": f"抓取失败：{e}"}), 502
 
-    title = ""
-    m = re.search(r"<title[^>]*>(.*?)</title>", raw, re.S | re.I)
-    if m:
-        title = _html.unescape(re.sub(r"\s+", " ", m.group(1))).strip()
-    text = extract_main_text(raw)
-    cleaned = clean_text(text)
-    if len(cleaned) < 120:
-        return jsonify({"ok": False, "chars": len(cleaned),
-                        "error": "没能从这个页面提取到正文（可能需要登录，或内容由脚本动态加载）。"
-                                 "请手动复制正文后再朗读。"}), 422
-    return jsonify({"ok": True, "title": title, "text": cleaned,
-                    "chars": len(cleaned), "url": r.url})
+    mode = (body.get("mode") or "auto").strip()
+    try:
+        d = webfetch.fetch(url, mode=mode,
+                           timeout=float(CFG.get("fetch_timeout", 25)),
+                           proxy=CFG.get("fetch_proxy", "auto"))
+    except Exception as e:
+        log.exception("抓取网页失败")
+        return jsonify({"ok": False, "error": f"抓取失败：{type(e).__name__}: {e}"}), 502
+
+    if not d.get("ok"):
+        return jsonify({"ok": False, "error": d.get("error") or "没能提取到正文",
+                        "blocked": d.get("blocked"),
+                        "diag": d.get("diag")}), 422
+
+    # 正文原样带回，**不要**在这里 clean_text：
+    # clean_text 会把 "#/-/>" 这些结构标记一起洗掉，而下游 /api/prepare 正是靠
+    # 这些标记认标题、条目、引文。洗掉之后每一次抓取都退化成"全是普通段落"，
+    # 语气分层（标题慢读、条目紧凑、引用留白）整个失效 —— 网页读着就是平的。
+    # 读音规整由 prepare 里的 do_normalize 负责，不在这里做。
+    text = d["text"]
+    return jsonify({"ok": True, "title": d.get("title", ""), "text": text,
+                    "chars": len(text), "url": d.get("url"),
+                    "quality": d.get("quality"), "grade": d.get("grade"),
+                    "paras": d.get("paras"), "route": d.get("route"),
+                    "dropped": d.get("dropped"),
+                    "diag": d.get("diag")})
+
+
+@app.post("/api/agent")
+def api_agent():
+    """让会调工具的小模型主导"把一个链接变成朗读稿"。
+
+    分两级：先走零模型开销的确定性抓取（通常不到 1 秒），抓得够干净就直接返回；
+    抓不到、抓得差、或用户要求「深度清理」时才唤醒模型，让它换策略重抓、
+    或挑出稿子头尾的网页垃圾。
+
+    body:
+        url          要抓的链接（也可以只给 text，会从里面找链接）
+        text         原始输入，便于"帮我读这篇 https://…"这种整句
+        clean        true = 强制走模型深度清理
+        model        指定模型，默认 agent_model 或 small_model
+        max_calls    工具调用上限
+    """
+    body = request.get_json(silent=True) or {}
+    raw = (body.get("text") or "").strip()
+    url = (body.get("url") or "").strip() or webagent.extract_url(raw)
+    if not re.match(r"^https?://", url, re.I):
+        return jsonify({"ok": False, "error": "没找到有效的 http/https 链接"}), 400
+
+    model = pick_agent_model(body.get("model") or "")
+    if not ollama_models():
+        return jsonify({"ok": False, "error": "Ollama 没在运行，取稿 Agent 需要它来决策"}), 503
+
+    do_clean = bool(body.get("clean"))
+    try:
+        d = webagent.run(
+            url, model=model,
+            ollama_url=CFG["ollama_url"],
+            num_ctx=int(CFG.get("num_ctx", 32768)),
+            keep_alive=str(CFG.get("keep_alive", "30m")),
+            auto=body.get("auto", True) is not False,
+            do_clean=do_clean,
+            fetch_timeout=float(CFG.get("fetch_timeout", 25)),
+            proxy=CFG.get("fetch_proxy", "auto"),
+            max_tool_calls=int(body.get("max_calls")
+                               or CFG.get("agent_max_tool_calls", 4)),
+        )
+    except Exception as e:
+        log.exception("取稿 Agent 失败")
+        return jsonify({"ok": False, "error": f"取稿失败：{type(e).__name__}: {e}"}), 502
+
+    # 同样保留结构标记，交给 /api/prepare 去认标题/条目/引文（见 api_fetch 的说明）
+    return jsonify(d)
 
 
 @app.get("/api/settings")
@@ -827,7 +898,9 @@ def api_settings_get():
                     "config": {k: CFG[k] for k in ("normalize", "auto_voice", "max_len",
                                                    "long_doc_chars", "default_voice",
                                                    "rate", "pitch", "volume",
-                                                   "small_model", "quality_model")}})
+                                                   "small_model", "quality_model",
+                                                   "agent_model", "fetch_proxy",
+                                                   "fetch_timeout")}})
 
 
 @app.post("/api/settings")

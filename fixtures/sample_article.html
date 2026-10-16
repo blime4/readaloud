@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>一篇用于回归测试的文章 - 示例站点</title>
+  <meta property="og:title" content="线程优化实战笔记">
+</head>
+<body>
+  <header class="site-header">
+    <nav class="main-nav"><a href="/">首页</a><a href="/tech">技术</a><a href="/about">关于</a></nav>
+  </header>
+
+  <div class="article-wrap">
+    <div class="article-content markdown-body">
+      <h1>线程优化实战笔记</h1>
+      <p>最近在研究一些大厂 App 的线程实现，发现它们在创建线程这件事上做了不少文章，
+         解决的问题恰好是我之前做线上卡顿优化时遇到过的，因此把方案整理成这篇笔记。</p>
+
+      <h2>背景</h2>
+      <p>在 Java 里真正的内核线程是在执行 start 函数的时候创建的，走的是 nativeCreate 这条路径。
+         不同厂商的 ROM 在这里塞了各自的钩子，导致线上表现差异很大，这也是排查时最容易被忽略的一点。</p>
+
+      <h2>优化思路</h2>
+      <p>整体上有三条路可以走，各自的成本和收益并不一样：</p>
+      <ul>
+        <li>收敛线程数量，把零散创建改成统一调度</li>
+        <li>调整线程栈大小，降低单线程的内存占用</li>
+        <li>复用已有线程，避免频繁创建销毁带来的抖动</li>
+      </ul>
+
+      <h3>线程收敛</h3>
+      <blockquote>判断一个 App 的线程数量是否合理，最直接的办法是看它在低端机上的峰值表现。</blockquote>
+      <p>线程收敛需要涉及字节码插桩和各种对象代理，复杂度会高一些，
+         可以根据当前项目的实际线程数情况再考虑是否需要优化。</p>
+
+      <h2>结论</h2>
+      <p>这些优化手段需要根据项目的实际情况来选择。主线程创建线程的优化实现比较简单、影响面也比较低，
+         可以优先实施；线程数收敛的复杂度更高，收益也更大。</p>
+
+      <p>延伸阅读：<a href="https://example.com/other">另一篇讲内存优化的文章</a></p>
+    </div>
+
+    <aside class="sidebar">
+      <div class="related-articles">
+        <h4>相关阅读</h4>
+        <a href="/post/1">Android 平台下的 CPU 利用率优化实现</a>
+        <a href="/post/2">基于 JVMTI 实现性能监控</a>
+        <a href="/post/3">虚拟内存优化：线程与多进程</a>
+      </div>
+    </aside>
+  </div>
+
+  <footer class="site-footer">
+    <div class="copyright">版权所有 © 2026 示例站点</div>
+    <div class="reward">赞赏支持</div>
+    <p>另可以关注我的个人公众号：技术笔记，后续将分享更多性能优化方案</p>
+  </footer>
+
+  <script>window.__DATA__ = {a: 1};</script>
+</body>
+</html>

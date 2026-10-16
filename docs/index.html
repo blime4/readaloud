@@ -53,6 +53,42 @@
   }
   textarea::placeholder{color:var(--txt-3)}
   .toolbar{display:flex; flex-wrap:wrap; gap:8px; padding:10px 14px; border-top:1px solid var(--line); background:var(--panel-2)}
+  /* ---------- 链接抓取条 ---------- */
+  .urlbar{
+    display:flex; align-items:center; gap:8px; padding:9px 14px;
+    border-bottom:1px solid var(--line); background:var(--panel-2);
+  }
+  .urlbar .uicon{font-size:14px; opacity:.75}
+  .urlbar input{
+    flex:1; min-width:0; font:13px/1.5 inherit; color:var(--txt);
+    background:var(--panel); border:1px solid var(--line); border-radius:9px;
+    padding:8px 11px; outline:0; transition:.15s;
+  }
+  .urlbar input:focus{border-color:var(--btn-bd)}
+  .urlbar input::placeholder{color:var(--txt-3)}
+  .urlopts{
+    display:flex; align-items:center; gap:12px; padding:7px 14px 9px;
+    background:var(--panel-2); border-bottom:1px solid var(--line); flex-wrap:wrap;
+  }
+  .uopt{
+    display:inline-flex; align-items:center; gap:5px; font-size:12px;
+    color:var(--txt-2); cursor:pointer; user-select:none;
+  }
+  .uopt input{margin:0; cursor:pointer}
+  .ustat{
+    margin:0; padding:10px 14px; font-size:12px; line-height:1.75;
+    background:var(--panel-2); border-bottom:1px solid var(--line); color:var(--txt-2);
+  }
+  .ustat b{color:var(--txt)}
+  .ustat .ok{color:#2ea043}
+  .ustat .warn{color:#d29922}
+  .ustat .bad{color:#f85149}
+  .ustat .steps{margin:6px 0 0; padding-left:2px; list-style:none}
+  .ustat .steps li{padding:2px 0; color:var(--txt-3)}
+  .ustat .steps li::before{content:"→ "; opacity:.55}
+  body.night .ustat .ok{color:#3fb950}
+  body.night .ustat .warn{color:#d29922}
+  body.night .ustat .bad{color:#f85149}
   button{
     font:inherit; cursor:pointer; border:1px solid var(--line); background:var(--btn); color:var(--txt);
     padding:7px 13px; border-radius:10px; transition:.15s; display:inline-flex; align-items:center; gap:6px;
@@ -195,9 +231,21 @@
   <section class="card">
     <h2>文稿 <span class="sub" id="stCount">0 字</span>
       <span class="grow"></span>
-      <button class="ghost tiny" id="btnFetch" title="粘贴网页链接，抓正文来读">🔗 读网页</button>
       <button class="ghost tiny" id="btnUndo" title="撤销上一步文本变更">↶ 撤销</button>
     </h2>
+    <div class="urlbar">
+      <span class="uicon">🔗</span>
+      <input id="urlIn" type="url" spellcheck="false" autocomplete="off"
+             placeholder="粘贴网页链接，自动抓正文来读（微信 / 知乎 / 博客都行）">
+      <button class="primary tiny" id="btnUrlGo" title="抓取正文并开始朗读">抓取朗读</button>
+    </div>
+    <div class="urlopts">
+      <label class="uopt" title="让本机小模型把关：抓不到时换策略重抓，并清掉头尾混进来的导航、推广语、相关文章。会慢一些（模型要思考）。">
+        <input type="checkbox" id="urlClean"> 智能整理
+      </label>
+      <button class="ghost tiny" id="btnUrlFetch" title="只抓取正文，不朗读">只抓取</button>
+    </div>
+    <div class="ustat" id="urlStat" style="display:none"></div>
     <textarea id="txt" placeholder="把要朗读的内容粘进来（支持 Markdown，会自动清理标题/表格/代码/链接，并规整数字与符号）…
 
 也可以直接按快捷键：复制任意位置的一段文字 → 按 Ctrl+Alt+R，这里会自动开始朗读。"></textarea>
@@ -208,10 +256,12 @@
       <button class="ghost" id="btnClear">清空</button>
     </div>
     <details class="help">
-      <summary>怎么在别处用？（Obsidian / 快捷键 / 接口）</summary>
+      <summary>怎么在别处用？（贴链接 / Obsidian / 快捷键 / 接口）</summary>
       <ul>
+        <li><b>读网页</b>：把链接粘到上方输入框就会自动抓正文开读（也可直接把链接粘进文稿框再点朗读）。抓取会还原被网页硬换行切碎的句子，并清掉导航、推广语、相关文章这些残留；标题/条目/引文会按语气分层朗读。</li>
+        <li><b>智能整理</b>：勾上后让本机小模型把关 —— 抓不到时换身份重抓，并删掉头尾混进来的网页垃圾。会自动挑"会调工具但不思考"的模型（如 qwen2.5:7b），几秒完成。</li>
         <li><b>Obsidian</b>：选中文字后按 <code>Ctrl+Alt+P</code> 朗读，<code>Ctrl+Alt+O</code> 读整篇，<code>Ctrl+Alt+S</code> 总结后读。</li>
-        <li><b>任意软件</b>：复制文字 → <code>Ctrl+Alt+R</code>（读剪贴板）/ <code>+E</code>（读当前选中的字）/ <code>+S</code>（总结后读）。页面开着时直接在这里播出。</li>
+        <li><b>任意软件</b>：复制文字或链接 → <code>Ctrl+Alt+R</code>（读剪贴板，是链接就自动抓网页）/ <code>+E</code>（读当前选中的字）/ <code>+S</code>（总结后读）。</li>
         <li><b>键盘</b>：<code>空格</code> 播放/暂停，<code>←/→</code> 上一句/下一句，<code>Esc</code> 停止。</li>
         <li><b>URL 直达</b>：<code>?text=要读的内容&auto=1</code>；<code>?url=https://…</code> 可直接朗读网页正文。</li>
         <li><b>纯音频接口</b>：<code>/api/tts?text=你好</code> 直接返回 MP3。</li>
@@ -739,7 +789,12 @@ function updateBtns() {
 }
 /* 智能模式：超过阈值就自动先总结，让用户少做一个决定 */
 function autoLen() { return parseInt($('#autoLen').value, 10) || LONG_AI_CHARS_DEFAULT; }
+/* 一次性模式覆盖：抓网页时用。
+   "智能"模式对长文会自动先总结 —— 但用户贴一个链接说"读给我"，要的是那篇文章
+   本身，不是一百多字的摘要。所以抓链接这条路强制走原文，摘要改成显式点「总结」。*/
+let _oneShotMode = '';
 function effectiveMode() {
+  if (_oneShotMode) { const m = _oneShotMode; _oneShotMode = ''; return m; }
   const m = $('#mode').value;
   const n = $('#txt').value.replace(/\s/g, '').length;
   if (m === 'auto') return n > autoLen() ? 'summarize' : 'none';
@@ -950,6 +1005,11 @@ async function play() {
   if (S.busy) return;
   const text = $('#txt').value.trim();
   if (!text) return;
+  // 稿子里只放了一条链接？那用户的意思显然是"把这篇读给我"，不是"念这串网址"。
+  if (/^https?:\/\/\S+$/i.test(text)) {
+    $('#urlIn').value = text;
+    return fetchUrl(text, true);
+  }
   if (!ONLINE) { toast('还没连上本机引擎'); await connect({ manual: true }); return; }
   if (S.playing && S.audio) { togglePlay(); return; }
   S.busy = true;
@@ -1129,27 +1189,94 @@ async function aiInto(mode) {
 }
 
 /* ---------- 网页链接 -> 正文 ---------- */
-async function fetchUrl(url, auto) {
-  if (!url) {
-    const input = prompt('粘贴网页链接（会自动抓出正文）：', 'https://');
-    if (!input) return;
-    url = input.trim();
-  }
+/* 抓到的质量与模型动作，摊开给用户看 —— 不说清楚就只能靠猜 */
+function renderUrlStat(d, mode, auto) {
+  const el = $('#urlStat');
+  el.style.display = 'block';
+  const q = d.quality;
+  const cls = q >= 65 ? 'ok' : q >= 40 ? 'warn' : 'bad';
+  const qtxt = (q === undefined || q === null) ? '—' : `${q} / 100`;
+  const p = [];
+  p.push(`<div><b>${esc((d.title || '未取到标题').slice(0, 60))}</b></div>`);
+  p.push(`<div>正文 <b>${d.chars || 0}</b> 字 · ${d.paras || 0} 段` +
+         (d.route ? ` · 提取路线：${esc(d.route)}` : '') +
+         (d.dropped ? ` · 清掉 ${d.dropped} 行网页残留` : '') +
+         ` · 抓取质量 <span class="${cls}">${qtxt}</span></div>`);
+
+  const byModel = (d.trace || []).some(t => t.tool === 'fetch_page' || t.kind === 'clean' || t.tool === 'finish');
+  p.push(`<div>方式：<b>${mode === 'agent' ? '模型主导' : '规则直取'}</b>` +
+         (d.model ? ` · 模型 <code>${esc(d.model)}</code>` : '') +
+         (d.elapsed ? ` · 用时 ${d.elapsed}s` : '') +
+         (byModel ? '' : ' · 未动用模型（抓得已经够干净）') + `</div>`);
+  p.push(`<div>朗读：<b>按原文</b>` +
+         (auto ? '，不会自动缩成摘要' : '') +
+         ` · 想听摘要点「✨ 总结」，想更顺口点「🎭 润色」</div>`);
+
+  const steps = (d.trace || []).map(t => {
+    if (t.kind === 'fetch' && t.tool === 'deterministic')
+      return `规则抓取：质量 ${t.quality ?? '—'}、${t.chars ?? 0} 字` + (t.error ? `（${esc(t.error)}）` : '');
+    if (t.kind === 'fetch' && t.tool === 'fetch_page')
+      return `模型换 ${t.mode} 身份重抓：质量 ${t.quality ?? '—'}、${t.chars ?? 0} 字`;
+    if (t.kind === 'clean')
+      return t.ok ? `模型清理头尾：删掉 ${t.removed} 行网页垃圾` : `模型清理：跳过（${esc(t.error || '')}）`;
+    if (t.kind === 'finish') return `模型定稿${t.note ? '：' + esc(t.note) : ''}`;
+    if (t.kind === 'fallback') return '模型没给结论，按质量分自动选稿';
+    if (t.kind === 'error') return `出错：${esc(t.message || '')}`;
+    return null;
+  }).filter(Boolean);
+  if (steps.length) p.push(`<ul class="steps">${steps.map(s => `<li>${s}</li>`).join('')}</ul>`);
+  el.innerHTML = p.join('');
+}
+
+async function fetchUrl(url, auto, clean) {
+  if (url === undefined || url === null) url = ($('#urlIn').value || '').trim();
+  if (!url) { toast('先粘贴一个网页链接'); $('#urlIn').focus(); return; }
   if (!/^https?:\/\//i.test(url)) { toast('请填 http/https 开头的链接'); return; }
   if (!ONLINE) { toast('还没连上本机引擎'); return; }
-  overlay(true, '正在抓取网页正文…');
-  progress(30);
+  if (clean === undefined) clean = $('#urlClean').checked;
+
+  overlay(true, clean ? '正在用本机模型整理网页…（模型思考较慢，请稍候）' : '正在抓取网页正文…');
+  progress(25);
+  let d = null, mode = 'rules';
   try {
-    const r = await fetch(API + '/api/fetch?url=' + encodeURIComponent(url));
-    progress(80);
-    const d = await r.json();
+    // 优先走 Agent：它内部先做零模型开销的抓取，够干净就直接返回（不到 1 秒），
+    // 所以"快"和"智能"不需要用户二选一。
+    try {
+      const r = await fetch(API + '/api/agent', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url, text: url, clean: !!clean }),
+      });
+      d = await r.json();
+      mode = d.path === 'agent' ? 'agent' : 'rules';
+      // Ollama 没起来 / Agent 不可用 → 退回纯规则抓取，别让用户读不成
+      if (!d.ok && (r.status === 503 || /Ollama/.test(d.error || ''))) d = null;
+    } catch (e) { d = null; }
+
+    if (!d) {
+      const r2 = await fetch(API + '/api/fetch?url=' + encodeURIComponent(url));
+      d = await r2.json();
+      mode = 'rules';
+    }
+    progress(85);
     if (!d.ok) throw new Error(d.error || '抓取失败');
+
     pushHistory($('#txt').value);
     $('#txt').value = (d.title ? d.title + '\n\n' : '') + d.text;
     count(); renderHistory();
+    renderUrlStat(d, mode, !!auto);
     toast(`已抓取「${(d.title || '').slice(0, 18) || '网页'}」共 ${d.chars} 字`, 3600);
-    if (auto) play();
+    if (auto) {
+      // 贴链接就是"把这篇读给我"，读原文。想听摘要再点「总结」。
+      _oneShotMode = 'none';
+      play();
+    } else {
+      _oneShotMode = '';
+    }
   } catch (e) {
+    const el = $('#urlStat');
+    el.style.display = 'block';
+    el.innerHTML = `<div class="bad">抓取失败：${esc(e.message)}</div>
+      <div class="hint">如果是需要登录的页面（知乎、付费内容），把浏览器里看到的正文复制过来一样能读。</div>`;
     toast(e.message, 4200);
   } finally { overlay(false); }
 }
@@ -1212,7 +1339,22 @@ $('#btnUndo').onclick = () => {
   if (!S.history.length) return toast('没有可撤销的变更');
   $('#txt').value = S.history.pop(); S.items = []; S.idx = -1; count(); toast('已撤销');
 };
-$('#btnFetch').onclick = () => fetchUrl(null, true);
+/* ---------- 链接抓取 ---------- */
+$('#btnUrlGo').onclick = () => fetchUrl(null, true);
+$('#btnUrlFetch').onclick = () => fetchUrl(null, false);
+// 用户自己动了模式选择，就丢掉"抓链接读原文"那个一次性覆盖
+$('#mode').onchange = () => { _oneShotMode = ''; savePrefs({ mode: $('#mode').value }); };
+$('#urlIn').addEventListener('keydown', e => {
+  if (e.key === 'Enter') { e.preventDefault(); fetchUrl(null, true); }
+});
+// 在链接框里粘贴 → 直接抓。这就是"我输入一个链接，你读给我"的那个动作，
+// 不需要再让人多点一次按钮。
+$('#urlIn').addEventListener('paste', () => {
+  setTimeout(() => {
+    const v = ($('#urlIn').value || '').trim();
+    if (/^https?:\/\/\S+$/i.test(v)) fetchUrl(v, true);
+  }, 60);
+});
 $('#btnQuality').onclick = () => {
   S.quality = !S.quality;
   $('#btnQuality').textContent = S.quality ? '↓ 标准' : '↑ 升配';
