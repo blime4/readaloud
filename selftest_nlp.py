@@ -57,6 +57,29 @@ print("=== 2) 行内清洗 ===")
 c = N.clean_inline("**加粗**、==高亮==、`code`、~~删除~~、<br>换行</br>、&nbsp;空 格、😀、^[脚注]、[[双链|别名]]。")
 check("富文本残留清干净", c, "加粗、高亮、code、删除、 换行 、 空 格、别名。")
 
+gitbook_entry = """Adam's apple
+*/ˌædəmz 'æpəl/ · n*
+
+**释义**　喉结
+
+{% hint style="info" %} **词源**
+
+典出《圣经·旧约·创世纪》。
+
+Adam 一词源自希伯来语，原义为“人”。 {% endhint %}*&#x20;
+"""
+spoken_entry = ("Adam's apple\n\n释义 喉结\n\n词源\n\n典出《圣经·旧约·创世纪》。"
+                "\n\nAdam 一词源自希伯来语，原义为“人”。")
+check("GitBook 词条去掉音标行和提示框标记，保留正文", N.clean(gitbook_entry), spoken_entry)
+check("GitBook 清理适用于关闭读音规整的朗读稿",
+      N.prepare(gitbook_entry, do_normalize=False)["text"], spoken_entry)
+check("保留文档路径和正文中的语言学例子",
+      N.clean("/usr/local/\n\n/home/\n\n请比较 /æ/ 和 /ɑː/。"),
+      "/usr/local/\n\n/home/\n\n请比较 /æ/ 和 /ɑː/。")
+check("多读音元数据不进入朗读稿",
+      N.clean("## discount\n\n_/ˈdɪskaʊnt/（名词）；/dɪˈskaʊnt/（动词） · n_\n\n折扣"),
+      "discount\n\n折扣")
+
 print("=== 3) 读音规整 ===")
 cases = [
     ("日期", "2026-10-14", "2026年10月14日"),

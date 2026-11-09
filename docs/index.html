@@ -338,8 +338,9 @@
 也可以直接按快捷键：复制任意位置的一段文字 → 按 Ctrl+Alt+R，这里会自动开始朗读。"></textarea>
     <div class="toolbar">
       <button class="primary" id="btnPlay">▶ 朗读</button>
+      <button class="ghost" id="btnPolPlay">🎭 润色并朗读</button>
       <button class="ghost" id="btnSum" title="先压缩成朗读稿再读">✨ 总结</button>
-      <button class="ghost" id="btnPol" title="改写得更适合朗读（顺口、数字读法正确）">🎭 润色</button>
+      <button class="ghost" id="btnPol" title="只改写文稿，完成后可检查结果">🎭 润色</button>
       <button class="ghost" id="btnClear">清空</button>
     </div>
     <details class="help">
@@ -498,9 +499,19 @@ function toast(msg, ms = 2400) {
 function overlay(show, text) {
   if (text) $('#ovText').textContent = text;
   $('#overlay').classList.toggle('show', show);
-  if (!show) { $('#ovBar').style.width = '0'; }
+  if (!show) {
+    $('#ovBar').style.width = '0';
+    $('#ovBar').parentElement.hidden = false;
+  }
 }
 function progress(p) { $('#ovBar').style.width = Math.max(0, Math.min(100, p)) + '%'; }
+function showPolishProgress() {
+  const started = Date.now();
+  const label = () => `AI 正在润色（已等待 ${Math.floor((Date.now() - started) / 1000)} 秒）。完成后更新文稿，可点「取消」。`;
+  $('#ovBar').parentElement.hidden = true;
+  overlay(true, label());
+  return setInterval(() => { $('#ovText').textContent = label(); }, 1000);
+}
 function setDot(cls) { $('#dot').className = 'dot ' + cls; }
 
 /* ---------- 主题 ---------- */
@@ -886,6 +897,7 @@ function updateBtns() {
   const has = $('#txt').value.trim().length > 0;
   $('#btnSum').disabled = !has;
   $('#btnPol').disabled = !has;
+  $('#btnPolPlay').disabled = !has;
   $('#btnPlay').disabled = !has;
 }
 /* 智能模式：超过阈值就自动先总结，让用户少做一个决定 */
@@ -1102,24 +1114,28 @@ function liveChange() {
 }
 
 /* ---------- 主流程 ---------- */
-async function play() {
+async function play(requestedMode) {
   if (S.busy) return;
   const text = $('#txt').value.trim();
   if (!text) return;
   // 稿子里只放了一条链接？那用户的意思显然是"把这篇读给我"，不是"念这串网址"。
   if (/^https?:\/\/\S+$/i.test(text)) {
+    if (requestedMode === 'polish') { toast('请先抓取链接正文，再润色并朗读'); return; }
     $('#urlIn').value = text;
     return fetchUrl(text, true);
   }
   if (!ONLINE) { toast('还没连上本机引擎'); await connect({ manual: true }); return; }
-  if (S.playing && S.audio) { togglePlay(); return; }
+  if (S.playing && S.audio) {
+    if (!requestedMode) { togglePlay(); return; }
+    stopPlayback();
+  }
   S.busy = true;
-  const mode = effectiveMode();
+  const mode = requestedMode || effectiveMode();
   try {
     S.base = baseStyle();
     const d = await prepare(text, mode);
     if (!d) return;
-    adoptPrepared(d);
+    adoptPrepared(d, mode);
     renderItems();
     // 有断点就从断点接着读（maybeResume 已把位置写进 S.idx），否则从头开始。
     // 注意别写死 playAt(0) —— 那样刚弹完"已定位到第 N 句"就又跳回第一句了。
@@ -1143,21 +1159,20 @@ function baseStyle() {
 
 /* 调 /api/prepare，带"取消"和进度，且长文会先分块（服务端 map-reduce），
    返回后 AI 结果已落盘缓存 —— 同样的文字第二次是 0 秒。 */
-async function prepare(text, mode, opts = {}) {
-  const long = text.replace(/\s/g, '').length > (mode === 'summarize' ? 0 : 0);
-  if (mode !== 'none') {
-    overlay(true, mode === 'summarize' ? '小模型正在压缩成朗读稿…' : '小模型正在打磨润色…');
+async function prepare(text, mode) {
+  let iv;
+  if (mode === 'polish') {
+    iv = showPolishProgress();
+  } else if (mode === 'summarize') {
+    overlay(true, '小模型正在压缩成朗读稿…');
     progress(8);
-    const iv = setInterval(() => {
+    iv = setInterval(() => {
       const w = parseFloat($('#ovBar').style.width) || 8;
       progress(Math.min(92, w + Math.max(0.6, (92 - w) * 0.04)));
     }, 400);
-    S.cancelFn = () => { clearInterval(iv); };
-    var _iv = iv;
   }
   const ac = new AbortController();
-  const prevCancel = S.cancelFn;
-  S.cancelFn = () => { prevCancel && prevCancel(); ac.abort(); };
+  S.cancelFn = () => ac.abort();
   try {
     const r = await fetch(API + '/api/prepare', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1177,14 +1192,14 @@ async function prepare(text, mode, opts = {}) {
     if (e.name === 'AbortError') { toast('已取消'); return null; }
     throw e;
   } finally {
-    clearInterval(_iv);
+    clearInterval(iv);
     overlay(false);
     S.cancelFn = null;
   }
 }
 
 /* 把 prepare 的结果接到播放态：稿子、音色建议、时长提示都在这里落地 */
-function adoptPrepared(d) {
+function adoptPrepared(d, mode) {
   S.items = d.items || (d.segments || []).map(t => ({ text: t, kind: 'para', pause: 330, rate: 0 }));
   S.idx = -1;
   S.fail.clear();
@@ -1196,14 +1211,14 @@ function adoptPrepared(d) {
     const r = parsePct(d.style.rate), pi = parseHz(d.style.pitch);
     if (r) { $('#rate').value = r; $('#rateV').textContent = fmt(r) + '%'; }
     if (pi) { $('#pitch').value = pi; $('#pitchV').textContent = fmt(pi) + 'Hz'; }
-    if (d.style.note) toast(`已由 ${d.model} 处理：${d.style.note}`, 4000);
+    if (d.style.note) toast(`已由 ${esc(d.model)} 处理：${esc(d.style.note)}`, 4000);
   }
-  if (d.ai_note) toast(d.ai_note, 7000);
-  if (d.long_doc) toast('原文较长，已分块提炼后合并（避免长文被截断）', 4200);
+  if (d.ai === 'summarize' && d.long_doc) toast('原文较长，已分块提炼后合并（避免长文被截断）', 4200);
   if (d.ai_cached) toast('命中缓存，秒出（这段之前处理过）', 2600);
 
-  // 换稿：把 AI 结果写回文本框，并把原文存进历史，方便一键回退
-  if (d.ai !== 'none') {
+  // 换稿：写回 AI 结果或润色失败时的清理稿，原文可从历史恢复
+  const polishFallback = mode === 'polish' && d.ai === 'none' && d.ai_note;
+  if (d.ai !== 'none' || (polishFallback && d.text && d.text !== $('#txt').value)) {
     pushHistory($('#txt').value);
     $('#txt').value = d.text;
     count();
@@ -1226,6 +1241,7 @@ function adoptPrepared(d) {
   }
   S.base = baseStyle();
   maybeResume();
+  if (d.ai_note) toast(esc(d.ai_note), 7000);
 }
 function friendly(name) {
   const v = VOICES.find(x => x.name === name);
@@ -1238,15 +1254,19 @@ async function aiInto(mode) {
   if (!text || S.busy) return;
   if (!ONLINE) { toast('还没连上本机引擎'); return; }
   S.busy = true;
-  const label = mode === 'summarize' ? '小模型正在总结…' : '小模型正在润色…';
-  overlay(true, label);
-  progress(6);
+  let iv;
+  if (mode === 'polish') {
+    iv = showPolishProgress();
+  } else {
+    overlay(true, '小模型正在总结…');
+    progress(6);
+    iv = setInterval(() => {
+      const w = parseFloat($('#ovBar').style.width) || 6;
+      progress(Math.min(93, w + Math.max(0.6, (93 - w) * 0.05)));
+    }, 400);
+  }
   const ac = new AbortController();
   S.cancelFn = () => ac.abort();
-  const iv = setInterval(() => {
-    const w = parseFloat($('#ovBar').style.width) || 6;
-    progress(Math.min(93, w + Math.max(0.6, (93 - w) * 0.05)));
-  }, 400);
   try {
     if (mode === 'summarize') {
       const r = await fetch(API + '/api/ai', {
@@ -1277,7 +1297,7 @@ async function aiInto(mode) {
       $('#txt').value = d.text; count();
       if (d.rate) { const v = parsePct(d.rate); $('#rate').value = v; $('#rateV').textContent = fmt(v) + '%'; }
       if (d.pitch) { const v = parseHz(d.pitch); $('#pitch').value = v; $('#pitchV').textContent = fmt(v) + 'Hz'; }
-      toast(`润色完成${d.ai_cached ? '（缓存）' : ''} · ${d.note || d.model}`, 3600);
+      toast(`润色完成${d.ai_cached ? '（缓存）' : ''} · ${esc(d.note || d.model)}`, 3600);
     }
     renderHistory();
   } catch (e) {
@@ -1462,6 +1482,7 @@ function addHistory(text) {
 /* ---------- 事件绑定 ---------- */
 $('#txt').addEventListener('input', () => { S.items = []; S.idx = -1; count(); });
 $('#btnPlay').onclick = () => { addHistory($('#txt').value); play(); };
+$('#btnPolPlay').onclick = () => { addHistory($('#txt').value); play('polish'); };
 $('#btnSum').onclick = () => aiInto('summarize');
 $('#btnPol').onclick = () => aiInto('polish');
 $('#btnClear').onclick = () => { pushHistory($('#txt').value); $('#txt').value = ''; S.items = []; S.idx = -1; renderItems(); count(); };

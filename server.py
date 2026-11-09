@@ -284,7 +284,7 @@ def _strip_think(s: str) -> str:
 
 
 def ollama_chat(system: str, user: str, model: str, json_mode: bool = False,
-                temperature: float = 0.4, stream: bool = False):
+                temperature: float = 0.4, stream: bool = False, *, think: bool | None = None):
     payload = {
         "model": model,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -293,8 +293,9 @@ def ollama_chat(system: str, user: str, model: str, json_mode: bool = False,
         "options": {"temperature": temperature,
                     "num_ctx": int(CFG.get("num_ctx", 32768))},
     }
-    # 注意：不要传 think 参数。实测在 Ollama 里给 qwen3 系列传 think=false 反而会把
-    # 推理过程写进正文（qwen3:4b 尤为明显），不传才干净。
+    # 默认沿用模型设置。qwen3:4b 强制关闭思考时可能把推理写进正文。
+    if think is not None:
+        payload["think"] = think
     if json_mode:
         payload["format"] = "json"
     url = f"{CFG['ollama_url']}/api/chat"
@@ -337,12 +338,15 @@ SYS_SUMMARY = (
 )
 
 SYS_POLISH = (
-    "你是一位专业的有声书配音撰稿人，负责把文字打磨成好听的朗读稿。规则：\n"
-    "1. 去干净所有 Markdown（#、*、表格、链接、代码围栏、双链符号）；\n"
-    "2. 把符号/缩写/数字改写成顺口的中文读法（30% -> 百分之三十，AI -> 人工智能）；\n"
-    "3. 长句拆短，补足停顿标点（逗号、顿号、破折号），让呼吸节奏自然；\n"
-    "4. 保持原意与信息量，不删观点，不添加原文没有的内容；\n"
-    "5. 判断这段文字的语气体感（舒缓/叙述/激昂/技术说明等），给出建议语速 rate "
+    "你是有声书编辑。把原文逐段改写成可以直接念给听众听的稿子。\n"
+    "1. 保留原文语言、段落顺序和段落间的空行。保留事实、名字、数字、引文、例句及译文，"
+    "不要摘要或补充知识。\n"
+    "2. 去掉排版标记、网址和独立的音标注记。拆分难以一口气读完的长句，"
+    "补足停顿，把括号中的有效信息自然接进句子，把数字和符号写成适合原文语言的读法。\n"
+    "3. 遇到词典词条，把词头和释义连成一句，例如「Adam's apple，意思是喉结。」"
+    "保留英文词头、例句及有意义的词性信息，接着讲词源。把「词源」「例句」等栏目标记"
+    "改成自然过渡，或者在正文已有过渡时省掉栏目标记。\n"
+    "4. 给出与内容匹配的建议语速 rate "
     "（取值在 -15% 到 +20% 之间）与建议音调 pitch（取值在 -15Hz 到 +15Hz 之间）。\n"
     '只输出 JSON：{"text": "润色后的朗读稿", "rate": "+8%", "pitch": "+0Hz", '
     '"note": "一句话说明语气体感", "title": "不超过12字的短标题"}'
@@ -382,7 +386,11 @@ def pref_suffix() -> str:
 
 def _ai_key(text: str, mode: str, model: str, limit: int) -> str:
     pref = json.dumps(CFG.get("prefs") or {}, ensure_ascii=False, sort_keys=True)
-    raw = f"{mode}|{model}|{limit}|{len(text)}|{pref}|{text}"
+    # 润色稿缓存随提示词和验收规则换代，总结稿仍沿用原来的键。
+    cache_mode = "polish-v2" if mode == "polish" else mode
+    if mode == "polish" and model.partition(":")[0] == "qwen3.5":
+        cache_mode = "polish-v3"
+    raw = f"{cache_mode}|{model}|{limit}|{len(text)}|{pref}|{text}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:24]
 
 
@@ -420,12 +428,12 @@ COT_MARKERS = ("用户要求", "用户的内容", "用户提供", "用户给我�
                "我来分析", "用户希望")
 
 
-def looks_like_cot(s: str) -> bool:
+def looks_like_cot(s: str, *, check_layout: bool = True) -> bool:
     """识别"把思考过程写进正文"的典型症状。"""
     head = (s or "").lstrip()[:160]
     if any(m in head for m in COT_MARKERS):
         return True
-    return len(s) > 2500 and s.count("\n") > 15
+    return check_layout and len(s) > 2500 and s.count("\n") > 15
 
 
 def pick_agent_model(prefer: str = "") -> str:
@@ -525,6 +533,9 @@ def ai_refine(text: str, mode: str, body: dict, use_cache: bool = True):
 
     返回 (处理后的文本, 音色建议, 实际使用的模型, 是否命中缓存)。
     """
+    if mode == "polish" and len(text) >= int(CFG.get("long_doc_chars", 6000)):
+        raise AIBad("原文过长，请按章节或段落分段润色")
+
     limit = int(body.get("limit") or 300)
     requested = body.get("model") or (CFG["quality_model"] if body.get("quality") else CFG["small_model"])
     key = _ai_key(text, mode, requested, limit)
@@ -554,9 +565,11 @@ def ai_refine(text: str, mode: str, body: dict, use_cache: bool = True):
                                    "ts": time.time(), "src_len": len(text)})
                 return out, {}, model, False
 
+            # Qwen3.5 润色可以直接生成朗读稿，省去额外的推理时间。
+            think = False if mode == "polish" and model.partition(":")[0] == "qwen3.5" else None
             out = ollama_chat(SYS_POLISH + pref_suffix(),
                               f"请打磨下面这段文字的朗读稿：\n\n{text}",
-                              model, json_mode=True, temperature=0.3)
+                              model, json_mode=True, temperature=0.3, think=think)
             try:
                 obj = json.loads(out)
             except Exception:
@@ -564,9 +577,12 @@ def ai_refine(text: str, mode: str, body: dict, use_cache: bool = True):
             polished = clean_text(obj.get("text") or "")
             if not polished:
                 raise AIBad("润色结果为空")
-            if looks_like_cot(polished):
+            # 润色保留段落，换行数量本身不能用来判定思考过程。
+            if looks_like_cot(polished, check_layout=False):
                 raise AIBad("把思考过程写进了正文")
-            if len(text) > 150 and len(polished) < len(text) * 0.25:
+            source_chars = len(re.sub(r"\s+", "", text))
+            polished_chars = len(re.sub(r"\s+", "", polished))
+            if source_chars > 150 and polished_chars < source_chars * 0.6:
                 raise AIBad(f"只输出了 {len(polished)} 字，疑似截断")
             style = {
                 "rate": obj.get("rate") or CFG["rate"],
@@ -1211,13 +1227,13 @@ def api_prepare():
             plan_src = final_text          # AI 产出是纯文本，重新规整即可
         except Exception as e:
             # AI 不靠谱时绝不阻断朗读：退回原文，并把原因告诉调用方
-            log.warning("AI 未通过质量检查，改为朗读原文: %s", e)
-            ai_note = f"AI 输出未通过质量检查，已改为朗读原文。原因：{e}"
+            log.warning("AI 处理未完成，改为朗读清理后的原文: %s", e)
+            ai_note = f"AI 处理未完成，已改为朗读清理后的原文。原因：{e}"
             ai = "none"
             model = None
             final_text = source
             plan_src = raw
-        long_doc = len(source) >= int(CFG.get("long_doc_chars", 6000))
+        long_doc = ai == "summarize" and len(source) >= int(CFG.get("long_doc_chars", 6000))
 
     r = plan_text(plan_src, max_len=max_len, do_normalize=do_norm)
     segs = r["segments"]

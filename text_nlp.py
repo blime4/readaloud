@@ -67,6 +67,17 @@ RE_LIST = re.compile(r"^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$")
 RE_QUOTE = re.compile(r"^\s{0,3}>\s?(.*)$")
 RE_TABLE = re.compile(r"^\s*\|.*\|\s*$")
 RE_FRONTMATTER = re.compile(r"\A---\n.*?\n---\s*\n", re.S)
+RE_GITBOOK_HINT = re.compile(
+    r"{%\s*(?:hint(?:\s+style\s*=\s*(?:\"[^\"]*\"|'[^']*'))?|endhint)\s*%}", re.I)
+RE_GITBOOK_HINT_TAIL = re.compile(
+    r"(?<!\S){%\s*endhint\s*%}[*_]{1,2}(?=[ \t]*&(?:#x0*20|#0*32|nbsp);\s*$)", re.I)
+# 只跳过独占一行的「/读音/ · 词性」，正文里的音标、斜杠和文件路径照常处理。
+_DICT_PRON = r"/[^/\n]+/(?:\s*[（(][^）)\n]+[）)])?"
+_DICT_POS = r"(?:n|v|adj|adv|interj|prep|pron|conj|det|num|phr)\.?"
+RE_DICT_PRON = re.compile(
+    rf"\s*(?P<emphasis>\*{{1,2}}|_{{1,2}}|){_DICT_PRON}"
+    rf"(?:\s*[;；]\s*{_DICT_PRON})*\s*·\s*{_DICT_POS}"
+    rf"(?:\s*[&,/]\s*{_DICT_POS})*\s*(?P=emphasis)\s*", re.I)
 
 # 行内标记
 RE_IMG = re.compile(r"!\[[^\]]*\]\([^)]*\)")
@@ -183,6 +194,10 @@ def parse_blocks(raw: str) -> list:
             flush()
             continue
         if in_code:
+            continue
+        line = RE_GITBOOK_HINT.sub("", RE_GITBOOK_HINT_TAIL.sub("", line))
+        if RE_DICT_PRON.fullmatch(line):
+            flush()
             continue
         if RE_TABLE.match(line) or RE_HR.match(line):
             flush()
