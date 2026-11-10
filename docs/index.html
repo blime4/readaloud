@@ -1316,12 +1316,17 @@ function saveResume() {
         n: S.items.length, ts: Date.now(),
       });
     } catch (e) { /* 隐私模式等场景忽略 */ }
-    // 书架里的书，进度要写回服务端 —— 手机和电脑看的才是同一份
+    // 书架里的书，进度要写回服务端 —— 手机和电脑看的才是同一份。
+    // 但用户手动改过文稿就不是那本书了，别把别的文字的进度写上去。
     if (S.book) {
-      fetch(API + '/api/books/' + S.book.id + '/progress', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ next: S.idx + 1, total: S.items.length }),
-      }).catch(() => {});
+      if (S.bookHash && S.bookHash !== textHash($('#txt').value)) {
+        S.book = null;
+      } else {
+        fetch(API + '/api/books/' + S.book.id + '/progress', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ next: S.idx + 1, total: S.items.length }),
+        }).catch(() => {});
+      }
     }
   }, 1000);
 }
@@ -1537,7 +1542,12 @@ async function importLocalFile(file) {
     stopPlayback();
     $('#txt').value = data.text;
     // 导入即入库：书留在本机，手机上也能接着读
-    if (data.book) { S.book = data.book; S.pendingResume = null; loadShelf(); }
+    if (data.book) {
+      S.book = data.book;
+      S.bookHash = textHash(data.text);
+      S.pendingResume = null;
+      loadShelf();
+    }
     // 书籍通常很长，不能继承下拉框中的“智能”模式，否则会被压缩成摘要。
     _oneShotMode = 'none';
     toast(`已导入《${data.title}》${data.chars.toLocaleString()} 字，按原文开始朗读。`, 4200);
@@ -2279,6 +2289,7 @@ async function openBook(id) {
     shelfOpen(false);
     stopPlayback();
     S.book = book;
+    S.bookHash = textHash(book.text);
     S.pendingResume = book.progress;
     if ($('#txt').value.trim()) pushHistory($('#txt').value);
     $('#txt').value = book.text;
