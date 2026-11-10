@@ -25,6 +25,7 @@ import os
 import platform
 import queue
 import re
+import secrets
 import subprocess
 import threading
 import time
@@ -35,8 +36,10 @@ import edge_tts
 from flask import Flask, Response, jsonify, request, send_from_directory
 from werkzeug.exceptions import RequestEntityTooLarge
 
+import bookshelf as SHELF
 import document_import
 import text_nlp as NLP
+import tts_engine as TTS
 import webfetch
 import webagent
 import cookies as LOGIN
@@ -83,9 +86,18 @@ DEFAULT_CONFIG = {
     "browser_fetch": True,          # 规则抓取全军覆没时，让浏览器自己去取
     # 用户偏好：会注入 AI 提示词，让总结/润色越用越像你要的样子
     "prefs": {"style": "", "mode": "none", "model": "", "quality": False},
+    # 监听地址。默认只听回环；想让手机连上来就改成 0.0.0.0（面板上有开关）
+    "host": "127.0.0.1",
+    # 语音引擎：edge=微软神经语音（默认）；local=本机 OpenAI 兼容 TTS
+    "tts_provider": "edge",
+    "tts_local_url": "http://127.0.0.1:8880",
+    "tts_local_model": "",
+    "tts_local_voice": "",
+    "tts_local_key": "",
+    "tts_local_format": "mp3",
 }
 
-ENGINE_VERSION = "1.5.0"
+ENGINE_VERSION = "1.6.0"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -101,6 +113,9 @@ FEATURES = [
     "site-login",           # 登录态：/api/login，从浏览器借 cookie 读知乎这类站
     "browser-fetch",        # 抓不动时让本机浏览器自己去取（含渲染后的 DOM）
     "local-document-import", # /api/import：读取本机 TXT / EPUB / MOBI / PDF
+    "bookshelf",            # /api/books：书留在本机，电脑和手机共用进度
+    "tts-provider",         # /api/tts 支持 provider=edge|local（本机 OpenAI 兼容 TTS）
+    "lan-access",           # /api/lan：手机通过局域网访问本机引擎
 ]
 
 # 页面文件：优先用 docs/（= GitHub Pages 站点目录），本地与线上共用同一份，
@@ -142,12 +157,13 @@ def add_cors(resp):
 
     第 3 类会遇到 Chrome 的 Private Network Access 检查，必须显式回
     Access-Control-Allow-Private-Network，否则预检就被拦掉（表现为"连不上"）。
-    服务只监听 127.0.0.1，本机之外访问不到，所以放开来源是安全的。
+    服务默认只监听 127.0.0.1，本机之外访问不到，所以放开来源是安全的；
+    一旦为了让手机连上来改成 0.0.0.0，就由 _guard_lan 收口（见下）。
     """
     origin = request.headers.get("Origin")
     resp.headers["Access-Control-Allow-Origin"] = origin or "*"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-ReadAloud-Key"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
     resp.headers["Access-Control-Allow-Private-Network"] = "true"
     resp.headers["Access-Control-Max-Age"] = "86400"
     if origin:
@@ -160,6 +176,48 @@ def add_cors(resp):
 def api_preflight(_any):
     """跨源预检直接放行（服务只听本机回环地址，无需再做鉴权）。"""
     return ("", 204)
+
+
+# ---------------------------------------------------------------- 局域网访问
+# 一旦为了手机把 host 改成 0.0.0.0，整套接口就对同一个 WiFi 里所有人都开着：
+# 能读你的书、能用你配的知乎登录态去抓页面、还能烧你的显卡。
+# 所以从本机之外来的请求必须带访问码，页面第一次打开时用 ?k=xxx 带进来并记住。
+
+_PAGE_PATHS = ("/", "/index.html", "/favicon.ico", "/manifest.json",
+               "/apple-touch-icon.png", "/icon-192.png", "/icon-512.png")
+
+
+def lan_token() -> str:
+    token = str(CFG.get("lan_token") or "")
+    if not token:
+        token = secrets.token_hex(4)
+        CFG["lan_token"] = token
+        save_config(CFG)
+    return token
+
+
+def _request_token() -> str:
+    token = request.args.get("k") or request.headers.get("X-ReadAloud-Key") or ""
+    if not token and request.method in ("POST", "DELETE") and request.is_json:
+        token = str((request.get_json(silent=True) or {}).get("k") or "")
+    return token
+
+
+@app.before_request
+def _guard_lan():
+    remote = request.remote_addr or ""
+    if remote in ("127.0.0.1", "::1"):
+        return None
+    if (CFG.get("host") or "127.0.0.1") == "127.0.0.1":
+        return None                      # 没开局域网，本来也连不上
+    if request.method == "OPTIONS" or request.path in _PAGE_PATHS:
+        return None                      # 页面本身可以先给，接口再收口
+    if request.path.startswith(("/minicpm-voice", "/docs/")):
+        return None
+    if _request_token() == lan_token():
+        return None
+    return jsonify({"ok": False, "need_key": True,
+                    "error": "这个地址需要在网址后面带上访问码（?k=…），在工作台「手机访问」里能看到。"}), 401
 
 
 # ---------------------------------------------------------------- 文本预处理
@@ -227,8 +285,37 @@ def _prosody(value, unit: str, fallback: str) -> str:
     return f"{m.group(1) or '+'}{m.group(2)}{unit}"
 
 
-def synth(text: str, voice: str, rate: str, pitch: str, volume: str) -> Path:
-    """合成一段语音，带磁盘缓存。"""
+def synth(text: str, voice: str, rate: str, pitch: str, volume: str,
+          provider: str | None = None, model: str | None = None) -> tuple:
+    """合成一段语音，带磁盘缓存。返回 (文件路径, mimetype)。
+
+    两条路线共用一个缓存目录，但缓存键带上引擎与模型 —— 同一句话在两个
+    引擎下必须是两份音频，否则切了引擎听到的还是老声音（调参也一样）。
+    """
+    provider = (provider or CFG.get("tts_provider") or "edge").strip().lower()
+    if provider == "local":
+        url = CFG.get("tts_local_url") or ""
+        api_key = CFG.get("tts_local_key") or ""
+        fmt = (CFG.get("tts_local_format") or "mp3").lower()
+        fmt = fmt if fmt in TTS.FORMAT_MIME else "mp3"
+        voice = voice or CFG.get("tts_local_voice") or ""
+        model = model or CFG.get("tts_local_model") or ""
+        speed = TTS.speed_from_rate(rate)
+        stamp = f"local|{TTS.normalize_base(url)}|{model}|{voice}|{speed}|{fmt}|{text}"
+        key = hashlib.sha1(stamp.encode("utf-8")).hexdigest()[:24]
+        path = TTS_CACHE / f"{key}.{fmt}"
+        if path.exists() and path.stat().st_size > 0:
+            return path, TTS.FORMAT_MIME[fmt]
+        data, mime = TTS.synthesize_local(text, voice, model, url, api_key, rate, fmt)
+        # 以服务端真实返回的类型为准（有的服务会忽略 response_format）
+        ext = next((e for e, m in TTS.FORMAT_MIME.items() if m == mime), fmt)
+        path = TTS_CACHE / f"{key}.{ext}"
+        tmp = path.with_suffix(".part")
+        tmp.write_bytes(data)
+        tmp.replace(path)
+        _trim_cache()
+        return path, mime
+
     # 先规整韵律参数，避免 "0%" 这类写法让 edge-tts 直接失败
     rate = _prosody(rate, "%", CFG["rate"])
     pitch = _prosody(pitch, "Hz", CFG["pitch"])
@@ -236,19 +323,20 @@ def synth(text: str, voice: str, rate: str, pitch: str, volume: str) -> Path:
     key = hashlib.sha1(f"{voice}|{rate}|{pitch}|{volume}|{text}".encode("utf-8")).hexdigest()[:24]
     path = TTS_CACHE / f"{key}.mp3"
     if path.exists() and path.stat().st_size > 0:
-        return path
+        return path, "audio/mpeg"
     tmp = path.with_suffix(".part")
     asyncio.run(
         edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, volume=volume).save(str(tmp))
     )
     tmp.replace(path)
     _trim_cache()
-    return path
+    return path, "audio/mpeg"
 
 
 def _trim_cache() -> None:
     try:
-        files = sorted(TTS_CACHE.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True)
+        files = sorted((p for p in TTS_CACHE.iterdir() if p.is_file() and p.suffix != ".part"),
+                       key=lambda p: p.stat().st_mtime, reverse=True)
         for f in files[CFG["cache_limit"]:]:
             f.unlink(missing_ok=True)
     except Exception:
@@ -711,6 +799,15 @@ def minicpm_voice_script():
     return send_from_directory(BASE / "docs", request.path[1:], max_age=0)
 
 
+@app.get("/manifest.json")
+@app.get("/icon-192.png")
+@app.get("/icon-512.png")
+@app.get("/apple-touch-icon.png")
+def pwa_assets():
+    """手机"添加到主屏幕"要的几样东西，和页面放一起，改了立刻生效。"""
+    return send_from_directory(BASE / "docs", request.path[1:], max_age=0)
+
+
 @app.get("/favicon.ico")
 def favicon():
     return ("", 204)
@@ -757,7 +854,11 @@ def health():
         "fetch": _fetch_caps(),
         "voices": len(list_voices()),
         "clients": len(_subscribers),
-        "config": CFG,
+        "tts": {"provider": CFG.get("tts_provider") or "edge",
+                "local_url": CFG.get("tts_local_url") or ""},
+        "books": SHELF.stats()["count"],
+        "config": {k: v for k, v in CFG.items()
+                   if k not in ("lan_token", "tts_local_key")},
     })
 
 
@@ -1283,7 +1384,168 @@ def api_import():
         extracted = document_import.extract_document(upload.filename, upload.read())
     except document_import.DocumentImportError as error:
         return jsonify({"ok": False, "error": str(error)}), 400
-    return jsonify({"ok": True, **extracted, "chars": len(extracted["text"])})
+    book = None
+    try:
+        # 导入即入库：手机上最需要的就是"这本书还在，接着听"。
+        book = SHELF.add_book(extracted["title"], extracted["text"],
+                              extracted["type"], source=upload.filename)
+    except SHELF.BookError as error:
+        log.warning("入库失败（不影响本次朗读）: %s", error)
+    return jsonify({"ok": True, **extracted, "chars": len(extracted["text"]),
+                    "book": book})
+
+
+# ---------------------------------------------------------------- 书架
+
+@app.get("/api/books")
+def api_books():
+    return jsonify({"ok": True, "books": SHELF.list_books(), **SHELF.stats()})
+
+
+@app.get("/api/books/<book_id>")
+def api_book(book_id):
+    try:
+        return jsonify({"ok": True, "book": SHELF.get_book(book_id)})
+    except SHELF.BookError as error:
+        return jsonify({"ok": False, "error": str(error)}), 404
+
+
+@app.post("/api/books")
+def api_book_add():
+    body = request.get_json(silent=True) or {}
+    try:
+        book = SHELF.add_book(body.get("title") or "", body.get("text") or "",
+                              body.get("type") or "txt", body.get("source") or "")
+    except SHELF.BookError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True, "book": book})
+
+
+@app.post("/api/books/<book_id>/progress")
+def api_book_progress(book_id):
+    body = request.get_json(silent=True) or {}
+    try:
+        book = SHELF.save_progress(book_id, body.get("next") or 0, body.get("total") or 0)
+    except SHELF.BookError as error:
+        return jsonify({"ok": False, "error": str(error)}), 404
+    return jsonify({"ok": True, "book": book})
+
+
+@app.delete("/api/books/<book_id>")
+def api_book_delete(book_id):
+    try:
+        SHELF.delete_book(book_id)
+    except SHELF.BookError as error:
+        return jsonify({"ok": False, "error": str(error)}), 404
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------- 语音引擎
+
+# 本地 TTS 的探测结果缓存 30 秒 —— 页面每次加载都会问，别每次都去戳端口
+_tts_probe = {"ts": 0.0, "url": "", "data": None}
+
+
+def _tts_local_report(force: bool = False) -> dict:
+    url = CFG.get("tts_local_url") or ""
+    cached = _tts_probe["data"]
+    if (not force and cached is not None and _tts_probe["url"] == url
+            and time.time() - _tts_probe["ts"] < 30):
+        return cached
+    try:
+        data = TTS.probe(url, CFG.get("tts_local_key") or "")
+    except TTS.TTSConfigError as error:
+        data = {"ok": False, "error": str(error), "models": [], "voices": []}
+    _tts_probe.update(ts=time.time(), url=url, data=data)
+    return data
+
+
+@app.get("/api/tts/providers")
+def api_tts_providers():
+    """面板要显示"有哪些引擎、现在用哪个、本地那个通不通"。"""
+    local = _tts_local_report()
+    return jsonify({
+        "ok": True,
+        "provider": CFG.get("tts_provider") or "edge",
+        "providers": [{"id": k, **v} for k, v in TTS.PROVIDERS.items()],
+        "local": {
+            "url": CFG.get("tts_local_url") or "",
+            "model": CFG.get("tts_local_model") or "",
+            "voice": CFG.get("tts_local_voice") or "",
+            "has_key": bool(CFG.get("tts_local_key")),
+            "format": CFG.get("tts_local_format") or "mp3",
+            **{k: local.get(k) for k in ("ok", "error", "models", "voices", "base", "engine")},
+        },
+    })
+
+
+@app.post("/api/tts/providers")
+def api_tts_providers_set():
+    """保存语音引擎选择，并按需探测一次本地服务。"""
+    body = request.get_json(silent=True) or {}
+    provider = (body.get("provider") or "").lower()
+    if provider and provider not in TTS.PROVIDERS:
+        return jsonify({"ok": False, "error": f"不认识的语音引擎：{provider}"}), 400
+    if provider:
+        CFG["tts_provider"] = provider
+    for key in ("tts_local_url", "tts_local_model", "tts_local_voice",
+                "tts_local_key", "tts_local_format"):
+        if key in body:
+            CFG[key] = body[key]
+    save_config(CFG)
+    if body.get("probe") and CFG.get("tts_local_url"):
+        try:
+            TTS.normalize_base(CFG["tts_local_url"])     # 地址写错直接给 400，别让前端猜
+            return jsonify({"ok": True, "probe": _tts_local_report(force=True)})
+        except TTS.TTSConfigError as error:
+            return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------- 手机访问
+
+def _lan_ip() -> str:
+    """猜本机在局域网里的地址。连一下不会真的发包，只是让系统选出口网卡。"""
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except Exception:
+        return ""
+    finally:
+        sock.close()
+
+
+@app.get("/api/lan")
+def api_lan():
+    host = (CFG.get("host") or "127.0.0.1")
+    port = int(CFG["port"])
+    ip = _lan_ip()
+    open_lan = host not in ("127.0.0.1", "localhost", "::1")
+    token = lan_token()
+    return jsonify({
+        "ok": True, "host": host, "port": port, "ip": ip, "open": open_lan,
+        "token": token,
+        "url": f"http://{ip}:{port}/?k={token}" if (open_lan and ip) else "",
+    })
+
+
+@app.post("/api/lan")
+def api_lan_set():
+    """让手机能连上来：把监听地址从回环改成 0.0.0.0（或改回去）。"""
+    body = request.get_json(silent=True) or {}
+    want = str(body.get("host") or "").strip()
+    if want not in ("127.0.0.1", "0.0.0.0"):
+        return jsonify({"ok": False, "error": "host 只能是 127.0.0.1 或 0.0.0.0"}), 400
+    CFG["host"] = want
+    save_config(CFG)
+    ip = _lan_ip()
+    token = lan_token()
+    return jsonify({"ok": True, "host": want, "token": token,
+                    "url": f"http://{ip}:{int(CFG['port'])}/?k={token}"
+                           if want == "0.0.0.0" and ip else "",
+                    "restart_needed": True})
 
 
 @app.errorhandler(RequestEntityTooLarge)
@@ -1304,14 +1566,21 @@ def api_tts():
     rate = body.get("rate") or CFG["rate"]
     pitch = body.get("pitch") or CFG["pitch"]
     volume = body.get("volume") or CFG["volume"]
+    provider = (body.get("provider") or CFG.get("tts_provider") or "edge").lower()
+    model = body.get("model") or ""
+    if provider not in TTS.PROVIDERS:
+        return jsonify({"ok": False, "error": f"不认识的语音引擎：{provider}"}), 400
     try:
-        path = synth(text, voice, rate, pitch, volume)
+        path, mime = synth(text, voice, rate, pitch, volume, provider, model)
+    except TTS.TTSConfigError as e:
+        # 本地 TTS 的配置/连通问题：说清是哪一步，而不是一句"合成失败"
+        return jsonify({"ok": False, "error": str(e), "provider": provider}), 502
     except Exception as e:
         log.error("语音合成失败: %s", e)
         return jsonify({"ok": False, "error": f"语音合成失败：{e}"}), 502
-    resp = send_from_directory(TTS_CACHE, path.name, mimetype="audio/mpeg")
+    resp = send_from_directory(TTS_CACHE, path.name, mimetype=mime)
     if body.get("download"):
-        resp.headers["Content-Disposition"] = f'attachment; filename="readaloud.mp3"'
+        resp.headers["Content-Disposition"] = f'attachment; filename="readaloud.{path.suffix[1:]}"'
     resp.headers["Cache-Control"] = "public, max-age=604800"
     return resp
 
@@ -1360,8 +1629,13 @@ def api_events():
 if __name__ == "__main__":
     # 端口优先级：环境变量 > config.json > 默认 8756
     port = int(os.environ.get("READALOUD_PORT") or CFG["port"])
+    # 监听地址同理：想用手机连，就把 host 设成 0.0.0.0（面板上有开关）
+    bind = os.environ.get("READALOUD_HOST") or CFG.get("host") or "127.0.0.1"
     vs = list_voices()
     log.info("ReadAloud 引擎 v%s", ENGINE_VERSION)
     log.info("音色可用 %d 个；Ollama 模型 %d 个", len(vs), len(ollama_models()))
-    log.info("本机 %s | 已监听 http://127.0.0.1:%s/", platform.node(), port)
-    app.run(host="127.0.0.1", port=port, threaded=True, debug=False)
+    log.info("语音引擎 %s；书架 %d 本", CFG.get("tts_provider"), SHELF.stats()["count"])
+    log.info("本机 %s | 已监听 http://%s:%s/", platform.node(), bind, port)
+    if bind != "127.0.0.1":
+        log.info("局域网可见：手机打开 http://%s:%s/ 即可", _lan_ip() or "<本机IP>", port)
+    app.run(host=bind, port=port, threaded=True, debug=False)

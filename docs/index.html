@@ -2,7 +2,16 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f5f6fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#14161d" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="ReadAloud">
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="./apple-touch-icon.png">
+<link rel="icon" href="./icon-192.png" sizes="192x192">
 <title>ReadAloud · 朗读工作台</title>
 <style>
   :root{
@@ -250,7 +259,105 @@
   .sbar i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s}
   ::-webkit-scrollbar{width:9px;height:9px}
   ::-webkit-scrollbar-thumb{background:var(--btn-bd);border-radius:9px;border:2px solid transparent;background-clip:content-box}
+
+  /* ---------- 书架 ---------- */
+  .shelfWrap{position:fixed;inset:0;z-index:45;display:none}
+  .shelfWrap.show{display:block}
+  .shelfMask{position:absolute;inset:0;background:rgba(18,20,28,.45)}
+  .shelf{
+    position:absolute;top:0;bottom:0;left:0;width:min(430px,100vw);
+    background:var(--panel);border-right:1px solid var(--line);box-shadow:var(--shadow);
+    display:flex;flex-direction:column;
+  }
+  .shelfWrap.show .shelf{animation:shelfIn .18s ease-out}
+  @keyframes shelfIn{from{transform:translateX(-14px);opacity:.5}to{transform:none;opacity:1}}
+  .shelf-head{display:flex;align-items:center;gap:9px;padding:14px 16px;border-bottom:1px solid var(--line)}
+  .shelf-head b{font-size:15px}
+  .shelf-list{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+  .shelf-foot{padding:10px 16px 14px;border-top:1px solid var(--line);color:var(--txt-3);font-size:11.5px;line-height:1.7}
+  .bk{
+    display:flex;gap:11px;padding:11px 12px;border:1px solid var(--line);border-radius:12px;
+    background:var(--panel-2);cursor:pointer;transition:.15s;position:relative;
+  }
+  .bk:hover{border-color:var(--btn-bd);background:var(--panel)}
+  .bk.cur{border-color:var(--accent);background:var(--accent-soft)}
+  .bk .cov{
+    width:38px;height:50px;border-radius:5px;flex:none;display:flex;align-items:center;justify-content:center;
+    font-size:18px;background:var(--panel);border:1px solid var(--line);color:var(--accent);
+  }
+  .bk .body{flex:1;min-width:0}
+  .bk .ttl{font-weight:600;font-size:13.5px;line-height:1.45;word-break:break-all}
+  .bk .meta{font-size:11.5px;color:var(--txt-3);margin-top:3px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .bk .pbar{height:4px;border-radius:9px;background:var(--track);margin-top:7px;overflow:hidden}
+  .bk .pbar i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-2))}
+  .bk .del{
+    position:absolute;right:5px;top:5px;opacity:0;transition:.15s;border:0;background:transparent;
+    color:var(--txt-3);padding:2px 6px;font-size:12px;min-height:0;
+  }
+  .bk:hover .del,.bk.cur .del{opacity:1}
+  .bk .del:hover{color:var(--danger)}
+  .bk .flag{font-size:10.5px;color:var(--accent);border:1px solid var(--line);background:var(--panel);border-radius:99px;padding:0 6px}
+  .bk .flag.done{color:var(--ok)}
+
+  /* ---------- 手机端 ---------- */
+  .mtabs{display:none}
   @media(max-width:900px){main{grid-template-columns:1fr;grid-template-rows:1fr auto;padding-bottom:100px}}
+  @media(max-width:760px){
+    header{padding:9px 12px;gap:9px}
+    header .status{display:none}
+    header .logo{font-size:15px}
+    header .chip{font-size:11.5px;padding:5px 9px}
+    body{font-size:15px}
+    /* 单视图：一次只给一屏，靠顶部分段切换，不再让三张卡挤成一条长页 */
+    main{display:block;padding:10px 12px calc(112px + env(safe-area-inset-bottom))}
+    main > .card{display:none;border-radius:16px;margin-bottom:10px}
+    body.mview-txt .card.txt,body.mview-seg .card.setcard,body.mview-set .card.setcard{display:flex}
+    body.mview-seg .card.setcard > .row,
+    body.mview-seg .card.setcard > details,
+    body.mview-seg .card.setcard > .recrow{display:none}
+    body.mview-seg .card.setcard > .seglist{order:-1}
+    body.mview-set .card.setcard > .seglist{display:none}
+    .mtabs{
+      display:flex;gap:6px;padding:8px 12px 0;position:sticky;top:52px;z-index:19;background:var(--bg);
+    }
+    .mtabs button{
+      flex:1;justify-content:center;font-size:13px;padding:9px 6px;border-radius:11px;
+      background:var(--panel);min-height:40px;
+    }
+    .mtabs button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+    /* 16px 起才能让 iOS 聚焦输入框时不自动放大页面 */
+    textarea,input,select{font-size:16px !important}
+    textarea{min-height:46vh;line-height:1.9}
+    button{padding:9px 14px;min-height:40px}
+    button.tiny{min-height:34px;font-size:12.5px}
+    .row{flex-wrap:wrap;padding:10px 14px}
+    .row label{width:44px}
+    .val{width:46px}
+    .seg{padding:11px 12px;font-size:15px;line-height:1.75}
+    .seglist{height:calc(100vh - 250px);padding:8px 10px}
+    .card.setcard > .row{display:flex}
+    .player{padding:10px 12px calc(10px + env(safe-area-inset-bottom));gap:8px;box-shadow:0 -8px 26px rgba(0,0,0,.12)}
+    .pb{width:40px;height:40px;font-size:15px}
+    .pb.play{width:48px;height:48px;font-size:18px}
+    .pinfo{font-size:11px}
+    .bar{height:8px}
+    .toast{bottom:calc(96px + env(safe-area-inset-bottom));max-width:86vw}
+    .shelf{width:100vw;border-right:0}
+    .bk{padding:13px 12px}
+    .bk .del{opacity:1}
+    .shelf-head{padding:14px}
+    .connect{padding:12px}
+    .ccard{padding:16px;gap:12px}
+    .cbody h3{font-size:15px}
+    .urlbar{flex-wrap:wrap;padding:9px 12px}
+    .urlbar input{flex:1 1 100%;order:2}
+    .urlbar .uicon{display:none}
+    .urlbar button{flex:1 1 auto;justify-content:center}
+  }
+  @media(max-width:760px) and (display-mode:standalone){
+    .mtabs{top:env(safe-area-inset-top)}
+    header{padding-top:calc(9px + env(safe-area-inset-top))}
+  }
 </style>
 </head>
 <body>
@@ -262,6 +369,7 @@
     <span id="stClient"></span>
   </div>
   <div class="grow"></div>
+  <span class="chip gray btnish" id="chipShelf" title="书架：导入过的书都在这儿，进度跟着书走">📚 书架</span>
   <span class="chip gray btnish" id="chipTheme" title="切换深色/浅色（朗读常在夜里用）">🌙 夜间</span>
   <span class="chip gray" id="chipMode" title="当前页面从哪里来 / 引擎在哪里">—</span>
 </header>
@@ -277,9 +385,16 @@
   </div>
 </div>
 
+<nav class="mtabs" id="mtabs">
+  <button data-tab="shelf">📚 书架</button>
+  <button data-tab="txt">📖 文稿</button>
+  <button data-tab="seg">🗣 逐句</button>
+  <button data-tab="set">⚙️ 设置</button>
+</nav>
+
 <main>
   <!-- 左：文稿 -->
-  <section class="card">
+  <section class="card txt">
     <h2>文稿 <span class="sub" id="stCount">0 字</span>
       <span class="grow"></span>
       <button class="ghost tiny" id="btnUndo" title="撤销上一步文本变更">↶ 撤销</button>
@@ -360,10 +475,41 @@
   </section>
 
   <!-- 右：控制 + 逐句 -->
-  <section class="card">
+  <section class="card setcard">
     <h2>音色与节奏 <span class="grow"></span>
       <span class="chip gray" id="chipHost" title="正在为你服务的这台电脑">—</span>
     </h2>
+    <div class="row">
+      <label>引擎</label>
+      <select id="ttsProvider" title="微软神经语音：默认，免费又快；本机大模型 TTS：声音更自然，但要本机跑着服务">
+        <option value="edge">微软神经语音（默认）</option>
+        <option value="local">本机大模型 TTS</option>
+      </select>
+      <span class="hint" id="ttsState" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+    </div>
+    <details class="help" id="ttsLocalBox" style="display:none;border-top:1px solid var(--line)">
+      <summary>本机 TTS 连接设置</summary>
+      <div class="row" style="border:0;padding:6px 0;gap:8px">
+        <label style="width:44px">地址</label>
+        <input type="text" id="ttsUrl" placeholder="http://127.0.0.1:8880" style="flex:1;min-width:0">
+        <button class="tiny" id="btnTtsProbe">探测</button>
+      </div>
+      <div class="row" style="border:0;padding:6px 0;gap:8px">
+        <label style="width:44px">模型</label>
+        <input type="text" id="ttsModel" placeholder="留空则用服务默认" style="flex:1;min-width:0">
+      </div>
+      <div class="row" style="border:0;padding:6px 0;gap:8px">
+        <label style="width:44px">音色</label>
+        <input type="text" id="ttsVoice" placeholder="服务端的音色名，例如 xiaobei" style="flex:1;min-width:0">
+        <button class="tiny" id="btnTtsSave">保存</button>
+      </div>
+      <div class="hint" id="ttsProbeMsg"></div>
+      <div class="hint" style="margin-top:6px">
+        Ollama 本身只出文字、不出音频，所以"用 Ollama 做 TTS"走不通；但同一台机器上再起一个
+        <b>OpenAI 兼容</b>的本地 TTS 就行 —— CosyVoice2、Kokoro、GPT-SoVITS、IndexTTS 都提供
+        <code>/v1/audio/speech</code>。填上它的地址点「探测」，音色会自动列出来。
+      </div>
+    </details>
     <div class="row">
       <label>音色</label>
       <select id="voice"></select>
@@ -426,6 +572,14 @@
         <button id="btnRestart">重启引擎</button>
         <button id="btnStopEngine">停止引擎</button>
       </div>
+      <div style="border-top:1px solid var(--line);margin-top:12px;padding-top:10px">
+        <div class="hint" id="lanMsg">手机想听同一批书？让引擎在局域网里可见，再用手机打开下面这个地址。</div>
+        <div class="cactions" style="padding-top:8px">
+          <button class="tiny" id="btnLanOn">允许手机访问</button>
+          <button class="tiny" id="btnLanOff" hidden>只允许本机</button>
+        </div>
+        <div class="hint" id="lanUrl" style="margin-top:8px;word-break:break-all"></div>
+      </div>
     </details>
     <details class="help" style="border-top:1px solid var(--line)">
       <summary>AI 偏好与自动总结阈值</summary>
@@ -459,6 +613,24 @@
   <button class="pb ghost" id="btnRepeat" title="重读当前句">↻</button>
 </div>
 
+<div class="shelfWrap" id="shelfWrap">
+  <div class="shelfMask" id="shelfMask"></div>
+  <aside class="shelf" role="dialog" aria-label="书架">
+    <div class="shelf-head">
+      <b>📚 书架</b>
+      <span class="hint" id="shelfStat"></span>
+      <span class="grow"></span>
+      <button class="tiny" id="shelfImport" title="导入 TXT / EPUB / MOBI / PDF">＋ 导入</button>
+      <button class="ghost tiny" id="shelfClose" title="关闭">✕</button>
+    </div>
+    <div class="shelf-list" id="shelfList"></div>
+    <div class="shelf-foot">
+      导入的书会留在这台电脑上，手机打开同一个地址看到的就是这一份，读到第几句也跟着走。<br>
+      书只存在你自己的硬盘里，不会上传到任何地方。
+    </div>
+  </aside>
+</div>
+
 <div class="toast" id="toast"></div>
 <div class="overlay" id="overlay"><div class="box"><div class="spin"></div><span id="ovText">AI 正在处理…</span>
   <div class="sbar"><i id="ovBar"></i></div>
@@ -480,7 +652,7 @@ const S = {
   items: [], idx: -1, playing: false, audio: null, base: null, style: null,
   history: [], busy: false, preload: [], quality: false, qualityModel: null,
   pauseTimer: 0, retryTimer: 0, playRequest: 0, tickTimer: 0, stopAt: 0, stopMode: '0', cancelFn: null,
-  voiceBookmark: null,
+  voiceBookmark: null, book: null, pendingResume: null,
   fail: new Set(), tried: 0, lastPlayChars: 0,
 };
 
@@ -504,6 +676,34 @@ const store = {
 };
 const parsePct = s => parseInt(String(s || '0').replace('%', ''), 10) || 0;
 const parseHz = s => parseInt(String(s || '0').replace('Hz', ''), 10) || 0;
+
+/* ---------- 局域网访问码 ----------
+   引擎为了让手机连上来会监听 0.0.0.0，那时它就是"整个 WiFi 都能访问"，
+   所以对非本机来源要求带访问码。码从 ?k= 带进来，存下后自动附加到所有接口。
+   本机访问（127.0.0.1）不需要，所以桌面上的用法一点没变。 */
+const LAN_KEY = (() => {
+  try {
+    const q = new URLSearchParams(location.search);
+    const fromUrl = q.get('k');
+    if (fromUrl) {
+      store.set('lanKey', fromUrl);
+      q.delete('k');
+      const rest = q.toString();
+      history.replaceState(null, '', location.pathname + (rest ? '?' + rest : '') + location.hash);
+      return fromUrl;
+    }
+    return store.get('lanKey', '') || '';
+  } catch (e) { return ''; }
+})();
+const signed = url => (!LAN_KEY || !url ? url
+  : url + (url.indexOf('?') >= 0 ? '&' : '?') + 'k=' + encodeURIComponent(LAN_KEY));
+
+/* 所有打向本机引擎的请求自动带码；Audio.src 走 ttsURL，那里单独加 */
+const _rawFetch = window.fetch.bind(window);
+window.fetch = (input, init) => {
+  if (typeof input === 'string' && API && input.indexOf(API) === 0) input = signed(input);
+  return _rawFetch(input, init);
+};
 
 /* ---------- 提示 / 遮罩 ---------- */
 let toastTimer;
@@ -717,6 +917,10 @@ function installGuide() {
 /* ---------- 连接成功后加载数据 ---------- */
 async function loadAll() {
   await Promise.all([loadHealth(), loadVoices(), loadModels(), loadHost(), loadSettings()]);
+  // 语音引擎要在音色表之后决定用哪一套（edge 的还是本机 TTS 报上来的）
+  await loadTts();
+  await loadShelf();
+  await loadLan();
   subscribeEvents();
   applyUrlParams();
 }
@@ -782,6 +986,88 @@ async function loadVoices() {
       sel.querySelector('option[value="zh-CN-YunxiNeural"]') || sel.querySelector('option');
     if (pref) pref.selected = true;
   } catch (e) { /* 忽略 */ }
+}
+
+/* ---------- 语音引擎：微软神经语音 / 本机大模型 TTS ----------
+   默认走 edge：免费、快、可缓存，长文跟得上翻页。
+   想听更像真人的，就把 provider 切到 local —— 那可以是同一台机器上跑着的
+   任意 OpenAI 兼容 TTS（CosyVoice / Kokoro / GPT-SoVITS / IndexTTS）。
+   注意 Ollama 本身只出文字不出音频，所以它不是 TTS 服务。 */
+let TTS_PROVIDER = 'edge';
+let LOCAL_VOICES = [];
+let TTS_INFO = null;
+
+function fillLocalVoices(names) {
+  const sel = $('#voice');
+  sel.innerHTML = '';
+  if (!names.length) {
+    const o = document.createElement('option');
+    o.value = ''; o.textContent = '（服务没报音色，用默认）';
+    sel.appendChild(o);
+    return;
+  }
+  names.forEach(name => {
+    const o = document.createElement('option');
+    o.value = name; o.textContent = name;
+    sel.appendChild(o);
+  });
+  const saved = store.get('voiceLocal', null);
+  if (saved && names.includes(saved)) sel.value = saved;
+}
+
+function renderTtsState() {
+  const local = (TTS_INFO && TTS_INFO.local) || {};
+  const on = TTS_PROVIDER === 'local';
+  $('#ttsProvider').value = TTS_PROVIDER;
+  $('#ttsLocalBox').style.display = on ? '' : 'none';
+  if (!on) {
+    $('#ttsState').textContent = '默认引擎 · 免费、快、可缓存';
+    $('#ttsState').title = '微软 Edge 神经语音，单句一百毫秒级';
+    return;
+  }
+  if (local.ok) {
+    const bits = [];
+    if (local.engine) bits.push(local.engine);
+    if (local.models && local.models.length) bits.push(local.models[0]);
+    bits.push(`${(local.voices || []).length} 个音色`);
+    $('#ttsState').textContent = '已连上 · ' + bits.join(' · ');
+    $('#ttsState').title = local.base || local.url || '';
+  } else {
+    $('#ttsState').textContent = local.error ? '连不上：' + local.error.slice(0, 40) : '还没连上，填地址后点探测';
+    $('#ttsState').title = local.error || '';
+  }
+}
+
+function applyProvider(provider) {
+  TTS_PROVIDER = provider === 'local' ? 'local' : 'edge';
+  if (TTS_PROVIDER === 'local') fillLocalVoices(LOCAL_VOICES);
+  else loadVoices();                 // 切回去要恢复微软那套音色表
+  renderTtsState();
+  S.base = null;                     // 换引擎后旧的音色参数不再适用
+}
+
+async function loadTts() {
+  try {
+    const d = await (await fetch(API + '/api/tts/providers')).json();
+    if (!d.ok) return;
+    TTS_INFO = d;
+    LOCAL_VOICES = (d.local && d.local.voices) || [];
+    $('#ttsUrl').value = d.local.url || '';
+    $('#ttsModel').value = d.local.model || '';
+    $('#ttsVoice').value = d.local.voice || '';
+    applyProvider(d.provider || 'edge');
+  } catch (e) { /* 引擎老版本没有这个接口，按 edge 走 */ }
+}
+
+async function saveTts(patch = {}) {
+  const body = { provider: TTS_PROVIDER, ...patch };
+  const r = await fetch(API + '/api/tts/providers', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!d.ok) { toast('保存失败：' + (d.error || r.status)); return null; }
+  return d;
 }
 
 /* 模型下拉 = 当前这台电脑上 Ollama 里实际装了什么 */
@@ -999,7 +1285,8 @@ function ttsURL(i) {
     text: S.items[i].text, voice: b.voice,
     rate: segRate(i), pitch: sgn(b.pitch, 'Hz'), volume: sgn(b.volume, '%'),
   });
-  return API + '/api/tts?' + q.toString();
+  if (b.provider && b.provider !== 'edge') { q.set('provider', b.provider); q.set('model', b.model || ''); }
+  return signed(API + '/api/tts?' + q.toString());
 }
 function preload(i) {
   if (i >= S.items.length) return;
@@ -1029,7 +1316,24 @@ function saveResume() {
         n: S.items.length, ts: Date.now(),
       });
     } catch (e) { /* 隐私模式等场景忽略 */ }
+    // 书架里的书，进度要写回服务端 —— 手机和电脑看的才是同一份
+    if (S.book) {
+      fetch(API + '/api/books/' + S.book.id + '/progress', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ next: S.idx + 1, total: S.items.length }),
+      }).catch(() => {});
+    }
   }, 1000);
+}
+
+/* 关页面/切后台时补一刀：正常路径有 1 秒防抖，来不及就丢了 */
+function flushProgress() {
+  if (!S.book || !S.items.length) return;
+  try {
+    navigator.sendBeacon?.(signed(API + '/api/books/' + S.book.id + '/progress'),
+      new Blob([JSON.stringify({ next: S.idx + 1, total: S.items.length })],
+        { type: 'application/json' }));
+  } catch (e) { /* 尽力而为 */ }
 }
 function maybeResume() {
   const r = store.get('resume', null);
@@ -1232,6 +1536,8 @@ async function importLocalFile(file) {
     if (!response.ok || !data.ok) throw new Error(data.error || '导入失败');
     stopPlayback();
     $('#txt').value = data.text;
+    // 导入即入库：书留在本机，手机上也能接着读
+    if (data.book) { S.book = data.book; S.pendingResume = null; loadShelf(); }
     // 书籍通常很长，不能继承下拉框中的“智能”模式，否则会被压缩成摘要。
     _oneShotMode = 'none';
     toast(`已导入《${data.title}》${data.chars.toLocaleString()} 字，按原文开始朗读。`, 4200);
@@ -1250,6 +1556,8 @@ function baseStyle() {
     rate: parseInt($('#rate').value, 10) || 0,
     pitch: parseInt($('#pitch').value, 10) || 0,
     volume: parseInt($('#vol').value, 10) || 0,
+    provider: TTS_PROVIDER,
+    model: ($('#ttsModel').value || '').trim(),
   };
 }
 
@@ -1336,7 +1644,18 @@ function adoptPrepared(d, mode) {
     } else { $('#recRow').style.display = 'none'; }
   }
   S.base = baseStyle();
-  maybeResume();
+  // 从书架打开的书，进度以服务端为准（那是手机和电脑共用的那份）；
+  // 手动粘文字进来的，退回本机 localStorage 的断点。
+  const resume = S.pendingResume;
+  S.pendingResume = null;
+  if (resume && resume.total && resume.next > 0) {
+    const at = Math.min(resume.next, S.items.length);
+    S.idx = at - 1;
+    highlight();
+    if (at < S.items.length) toast(`上次读到第 ${at} / ${S.items.length} 句，接着听`, 4200);
+  } else {
+    maybeResume();
+  }
   if (d.ai_note) toast(esc(d.ai_note), 7000);
 }
 function friendly(name) {
@@ -1805,7 +2124,7 @@ $('#rate').oninput = e => {
 $('#pitch').oninput = e => { $('#pitchV').textContent = fmt(+e.target.value) + 'Hz'; store.set('pitch', +e.target.value); S.base = baseStyle(); liveChange(); };
 $('#vol').oninput = e => { $('#volV').textContent = fmt(+e.target.value) + '%'; store.set('vol', +e.target.value); S.base = baseStyle(); liveChange(); };
 $('#voice').onchange = () => {
-  store.set('voice', $('#voice').value);
+  store.set(TTS_PROVIDER === 'local' ? 'voiceLocal' : 'voice', $('#voice').value);
   store.set('voiceTouched', true);
   S.base = baseStyle(); liveChange();
   toast('已切换音色');
@@ -1821,9 +2140,11 @@ $('#btnTry').onclick = async () => {
   if (!ONLINE) { toast('还没连上本机引擎'); return; }
   const b = baseStyle();
   const demo = '这是朗读试听，音色和语速听起来合适吗？';
-  const url = API + '/api/tts?' + new URLSearchParams({
+  const q = new URLSearchParams({
     text: demo, voice: b.voice, rate: sgn(b.rate, '%'), pitch: sgn(b.pitch, 'Hz'),
-  }).toString();
+  });
+  if (b.provider !== 'edge') { q.set('provider', b.provider); q.set('model', b.model || ''); }
+  const url = signed(API + '/api/tts?' + q.toString());
   const a = new Audio(url);
   a.play().then(() => toast('正在试听…')).catch(() => toast('试听失败，请再点一次'));
 };
@@ -1878,6 +2199,135 @@ async function savePrefs(p) {
     return true;
   } catch (e) { return false; }
 }
+
+/* ---------- 书架 ---------- */
+const SHELF = { books: [], count: 0 };
+
+function shelfOpen(open) {
+  $('#shelfWrap').classList.toggle('show', open);
+  if (open) loadShelf();
+}
+
+function bookAge(ts) {
+  if (!ts) return '';
+  const sec = Date.now() / 1000 - ts;
+  if (sec < 90) return '刚刚';
+  if (sec < 3600) return Math.round(sec / 60) + ' 分钟前';
+  if (sec < 86400) return Math.round(sec / 3600) + ' 小时前';
+  if (sec < 86400 * 30) return Math.round(sec / 86400) + ' 天前';
+  return new Date(ts * 1000).toLocaleDateString('zh-CN');
+}
+
+function bookMetaLine(b) {
+  const bits = [`${b.chars.toLocaleString()} 字`];
+  if (b.finished) bits.push('读完了');
+  else if (b.progress.next) bits.push(`第 ${b.progress.next}/${b.progress.total} 句`);
+  else bits.push('还没开始');
+  bits.push(bookAge(b.updated));
+  return bits.map(t => `<span>${t}</span>`).join('');
+}
+
+function renderShelf() {
+  const box = $('#shelfList');
+  const books = SHELF.books || [];
+  $('#shelfStat').textContent = books.length ? `${books.length} 本` : '';
+  if (!books.length) {
+    box.innerHTML = '<div class="empty">书架还是空的。<br>点右上角「＋ 导入」把 TXT / EPUB / MOBI / PDF 放进来，<br>它会一直在这儿等你。</div>';
+    return;
+  }
+  box.innerHTML = '';
+  books.forEach(b => {
+    const el = document.createElement('div');
+    el.className = 'bk' + (S.book && S.book.id === b.id ? ' cur' : '');
+    el.innerHTML = `
+      <div class="cov">${b.type === 'pdf' ? '📄' : b.type === 'epub' ? '📗' : '📕'}</div>
+      <div class="body">
+        <div class="ttl">${esc(b.title)}</div>
+        <div class="meta">${bookMetaLine(b)}</div>
+        <div class="pbar"><i style="width:${Math.min(100, b.progress.pct || 0)}%"></i></div>
+      </div>
+      <button class="del" title="从书架删除">✕</button>`;
+    el.onclick = e => { if (!e.target.classList.contains('del')) openBook(b.id); };
+    el.querySelector('.del').onclick = async e => {
+      e.stopPropagation();
+      if (!window.confirm(`把《${b.title}》从书架删掉？正文会一起删。`)) return;
+      await fetch(API + '/api/books/' + b.id, { method: 'DELETE' });
+      if (S.book && S.book.id === b.id) S.book = null;
+      toast('已从书架删除');
+      loadShelf();
+    };
+    box.appendChild(el);
+  });
+}
+
+async function loadShelf() {
+  try {
+    const d = await (await fetch(API + '/api/books')).json();
+    if (!d.ok) return;
+    SHELF.books = d.books || [];
+    SHELF.count = d.count || 0;
+    $('#chipShelf').textContent = SHELF.count ? `📚 书架 ${SHELF.count}` : '📚 书架';
+    renderShelf();
+  } catch (e) { /* 旧引擎没有书架接口，静默降级 */ }
+}
+
+async function openBook(id) {
+  try {
+    const d = await (await fetch(API + '/api/books/' + id)).json();
+    if (!d.ok) { toast(d.error || '打不开这本书'); return; }
+    const book = d.book;
+    shelfOpen(false);
+    stopPlayback();
+    S.book = book;
+    S.pendingResume = book.progress;
+    if ($('#txt').value.trim()) pushHistory($('#txt').value);
+    $('#txt').value = book.text;
+    count();
+    setView('seg');
+    await play('none');
+    renderShelf();
+  } catch (e) { toast('打不开这本书：' + e.message); }
+}
+
+/* ---------- 手机访问 ---------- */
+async function loadLan() {
+  try {
+    const d = await (await fetch(API + '/api/lan')).json();
+    if (!d.ok) return;
+    $('#btnLanOn').hidden = !!d.open;
+    $('#btnLanOff').hidden = !d.open;
+    $('#lanMsg').textContent = d.open
+      ? '已允许局域网访问。手机要连同一个 WiFi，用下面这个地址打开。'
+      : '手机想听同一批书？让引擎在局域网里可见，再用手机打开生成的地址。';
+    $('#lanUrl').innerHTML = d.open && d.url
+      ? `手机打开：<b>${esc(d.url)}</b><br>网址里的 <code>k=…</code> 是访问码，同一 WiFi 下别人没这个码就用不了你的书。`
+      : '';
+  } catch (e) { /* 旧引擎 */ }
+}
+
+async function setLan(host) {
+  const r = await fetch(API + '/api/lan', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ host }),
+  });
+  const d = await r.json().catch(() => ({}));
+  if (!d.ok) { toast('设置失败：' + (d.error || r.status)); return; }
+  toast(host === '0.0.0.0'
+    ? '已开启局域网访问，点下面的「重启引擎」手机才能连上'
+    : '已关闭局域网访问，重启引擎后生效', 5200);
+  loadLan();
+}
+
+/* ---------- 手机端视图切换 ----------
+   手机上三张卡挤成一条长页太难用，改成一次只给一屏 + 底部分段。 */
+const MVIEWS = ['txt', 'seg', 'set'];
+function setView(view) {
+  if (view === 'shelf') { shelfOpen(true); return; }
+  MVIEWS.forEach(v => document.body.classList.toggle('mview-' + v, v === view));
+  $$('#mtabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === view));
+  store.set('mview', view);
+}
+const isMobile = () => window.matchMedia('(max-width:760px)').matches;
 
 /* ---------- 本地实时语音 ---------- */
 if (isLocalHost() && typeof createMiniCPMVoice === 'function') {
@@ -1946,6 +2396,79 @@ if (isLocalHost() && typeof createMiniCPMVoice === 'function') {
   });
 }
 
+/* ---------- 书架 / 手机端 / 语音引擎 的交互 ---------- */
+$('#chipShelf').onclick = () => shelfOpen(true);
+$('#shelfClose').onclick = () => shelfOpen(false);
+$('#shelfMask').onclick = () => shelfOpen(false);
+$('#shelfImport').onclick = () => $('#fileIn').click();
+$('#mtabs').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (b) setView(b.dataset.tab);
+});
+
+$('#ttsProvider').onchange = async e => {
+  const provider = e.target.value;
+  applyProvider(provider);
+  await saveTts({ provider });
+  toast(provider === 'local' ? '已切到本机大模型 TTS' : '已切回微软神经语音');
+  if (provider === 'local') {
+    $('#ttsLocalBox').open = true;
+    if (!TTS_INFO || !TTS_INFO.local || !TTS_INFO.local.ok) {
+      toast('本机 TTS 还没连上，先填地址再点「探测」', 4200);
+    }
+  }
+};
+
+function reportProbe(p) {
+  const bits = [];
+  if (p.engine) bits.push(p.engine);
+  if (p.models && p.models.length) bits.push('模型 ' + p.models.slice(0, 3).join(' / '));
+  bits.push(p.voices && p.voices.length ? `${p.voices.length} 个音色` : '没报音色（用默认）');
+  return bits.join(' · ');
+}
+
+$('#btnTtsProbe').onclick = async () => {
+  const url = $('#ttsUrl').value.trim();
+  if (!url) { toast('先填本机 TTS 的地址'); return; }
+  $('#ttsProbeMsg').textContent = '探测中…';
+  const d = await saveTts({
+    provider: 'local', tts_local_url: url,
+    tts_local_model: $('#ttsModel').value.trim(),
+    tts_local_voice: $('#ttsVoice').value.trim(), probe: true,
+  });
+  if (!d) { $('#ttsProbeMsg').textContent = '保存失败'; return; }
+  const p = d.probe || {};
+  if (!p.ok) {
+    $('#ttsProbeMsg').textContent = '连不上：' + (p.error || '没有响应');
+    toast('探测失败：' + (p.error || '没有响应'), 4600);
+    return;
+  }
+  LOCAL_VOICES = p.voices || [];
+  if (TTS_INFO) TTS_INFO.local = { ...(TTS_INFO.local || {}), ...p };
+  fillLocalVoices(LOCAL_VOICES);
+  renderTtsState();
+  $('#ttsProbeMsg').textContent = '已连上：' + reportProbe(p);
+  store.set('voiceTouched', false);
+  toast('已连上本机 TTS，点「试听」听听看', 4000);
+};
+
+$('#btnTtsSave').onclick = async () => {
+  const d = await saveTts({
+    provider: 'local',
+    tts_local_url: $('#ttsUrl').value.trim(),
+    tts_local_model: $('#ttsModel').value.trim(),
+    tts_local_voice: $('#ttsVoice').value.trim(),
+  });
+  if (!d) return;
+  toast('已保存');
+  loadTts();
+};
+
+$('#btnLanOn').onclick = () => setLan('0.0.0.0');
+$('#btnLanOff').onclick = () => setLan('127.0.0.1');
+window.addEventListener('pagehide', flushProgress);
+document.addEventListener('visibilitychange', () => { if (document.hidden) flushProgress(); });
+
 /* ---------- 启动 ---------- */
 async function boot() {
   applyTheme(store.get('theme', 'auto'));
@@ -1959,6 +2482,8 @@ async function boot() {
   restore('#pitch', '#pitchV', store.get('pitch', 0), 'Hz');
   restore('#vol', '#volV', store.get('vol', 0), '%');
   count(); renderHistory();
+  // 手机上先落到上次用的那一屏，别一进来就是一条看不到头的长页
+  if (isMobile()) setView(store.get('mview', '') || ($('#txt').value.trim() ? 'seg' : 'txt'));
   lpRefresh();          // 「登录态」按钮上的小圆点：开局就知道配没配
   const perm = await permissionState();
   if (isLocalHost() || perm.state === 'granted') {

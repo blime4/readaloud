@@ -10,9 +10,33 @@
 | 场景 | 怎么用 |
 | --- | --- |
 | 网页 | 把链接粘进「读网页」输入框 → 自动抓正文开读。也可以直接把链接粘进文稿框再点朗读 |
-| 本地文件 | 点「导入本地文件」，选 TXT / EPUB / MOBI / PDF → 解析出正文后按原文开读 |
+| 本地文件 | 点「导入本地文件」，选 TXT / EPUB / MOBI / PDF → 解析出正文后按原文开读，并自动进书架 |
+| 手机 | 点「允许手机访问」→ 重启引擎 → 手机浏览器打开面板上给出的地址，书架和进度是同一份 |
 | Obsidian | 插件 `readaloud-bridge`：选中文字 `Ctrl+Alt+P` 朗读，`Ctrl+Alt+O` 读整篇，`Ctrl+Alt+S` 总结后朗读 |
 | 任意软件 | `Ctrl+Alt+R` 读剪贴板（**内容是链接就自动抓网页正文**）、`+E` 读当前选中的文字、`+S` 总结后读、`+W` 润色后读、`+X` 开工作台、`+Q` 停止 |
+
+## 手机上听（书架）
+
+- **书架**：导入的书自动留在本机（`books/<id>/`，正文 + 进度），换设备不丢。
+  点一本书 → 从上次那句接着读；读过的位置实时写回书本身，手机和电脑看到的是同一份。
+- **手机访问**：面板「本机引擎信息」里点「允许手机访问」（写入 `host: "0.0.0.0"`），
+  重启引擎后用手机浏览器打开给出的地址，例如
+  `http://192.168.x.x:8759/?k=9a8bd038`。网址里的 `k=` 是**访问码** ——
+  开了局域网之后，同一个 WiFi 里没有这个码的人用不了你的书和登录态。
+  手机上"添加到主屏幕"就是全屏应用（带 manifest 和图标）。
+- 手机端布局是重新做过的：单屏 + 底部分段（书架 / 文稿 / 逐句 / 设置），
+  大按钮、安全区适配，播放条固定在底部。
+
+## 语音引擎：默认微软神经语音，可切本机大模型
+
+- **edge（默认）**：微软 Edge 神经语音，免费、快、可缓存，几十个中文音色，
+  长文逐句朗读唯一跟得上翻页的选择。
+- **local（本机大模型 TTS）**：填一个 **OpenAI 兼容**的 `/v1/audio/speech`
+  服务地址（CosyVoice2 / Kokoro / GPT-SoVITS / IndexTTS 都提供），
+  点「探测」自动列出模型和音色，试听满意再切过去。文字一样不出本机。
+  注意 **Ollama 本身不产出音频**（只有文字/视觉/向量），所以"用 Ollama 做 TTS"
+  走不通 —— 但同一台机器上跑一个本地 TTS 服务是同样的思路，这里就是为它留的口子。
+  本机地址永远直连，系统代理（Clash 之类）不会掺和进来。
 
 ## 边听边问（MiniCPM-o 4.5）
 
@@ -121,7 +145,13 @@ AI 功能额外需要 [Ollama](https://ollama.com)；没有也能正常朗读，
 | `POST /api/prepare` | 一步到位：清洗 →（可选）AI → 规整 → 逐句。返回 `items[{text,kind,pause,rate}]` + 推荐音色 |
 | `POST /api/plan` | 只清洗+规整+逐句，不碰 AI |
 | `GET\|POST /api/fetch?url=` | 抓网页正文。返回 `title/text/chars` 外加 `quality`（0-100 质量分）、`route`（用了哪条提取路线）、`dropped`（清掉多少行网页残留）、`diag`（试过哪些策略） |
-| `POST /api/import` | 上传一个本地文件（`multipart/form-data`，字段名 `file`）解析成正文。返回 `title/type/text/chars`；格式不支持或读不出来回 400 与中文原因，超过 80 MB 回 413 |
+| `POST /api/import` | 上传一个本地文件（`multipart/form-data`，字段名 `file`）解析成正文并自动入库。返回 `title/type/text/chars/book`；格式不支持或读不出来回 400 与中文原因，超过 80 MB 回 413 |
+| `GET /api/books` | 书架列表（按最近动过排序），含进度百分比与本数/占用 |
+| `GET /api/books/<id>` | 读一本书：`book.text` 是全文，`book.progress` 是上次读到的位置 |
+| `POST /api/books/<id>/progress` | 写进度 `{next,total}`（允许倒退），页面关闭时用 sendBeacon 兜底 |
+| `DELETE /api/books/<id>` | 从书架删掉一本书（正文一起删） |
+| `GET\|POST /api/tts/providers` | 语音引擎：查询/切换 `edge` 与 `local`，POST 带 `probe:true` 会探测本地 TTS 并返回模型与音色表 |
+| `GET\|POST /api/lan` | 手机访问：查询局域网地址与访问码；POST `{host:"0.0.0.0"}` 开启（需重启引擎生效） |
 | `POST /api/agent` | 让会调工具的小模型主导取稿。body：`{url, clean, model, retry}`。先走零模型开销的规则抓取（通常 <1 秒）；抓得够干净就直接返回，彻底抓不到就直接报错（`retry:true` 才让模型硬试）；勾 `clean` 时直接深度清理。返回 `trace` 记录模型每一步动作 |
 | `GET\|POST /api/login` | 登录态管理。GET 返回各站配置状态与本机可借用的浏览器；POST 按 `action` 分派：`import`（从浏览器整套搬 cookie，可带 `warmup` 预热）/ `paste`（手工粘贴，支持纯 Cookie 头、Network 整行、Copy as cURL 三种粘法）/ `clear` / `open`（开一个带调试端口的登录窗口）/ `probe` / `test`（用当前登录态试抓一个链接） |
 | `POST /api/ai` | 总结 / 润色（`stream=true` 可流式，结果自动缓存） |
@@ -260,10 +290,13 @@ COM 提权接口 —— 普通进程做不到，所以只能走 CDP 或手工粘
 ```
 docs/index.html     工作台页面（GitHub Pages 发布的就是它，本地引擎也托管同一份）
 docs/minicpm-voice.js  边听边问：麦克风上行 + 网关音频双工
+docs/manifest.json + icon-*.png  手机"添加到主屏幕"的清单和图标
 server.py           引擎：语音合成 + AI 总结润色 + 缓存 + 播放广播 + 对外接口
 webfetch.py         网页取稿：编码探测 / 站点适配 / 段落重排 / 噪声清理 / 质量评分
 webagent.py         取稿 Agent：给会调工具的小模型挂 fetch_page / clean_page / finish
 document_import.py  本地文件取稿：TXT / EPUB / MOBI(PalmDOC) / PDF 解析
+bookshelf.py        书架：每本书一个目录，正文落盘 + 进度，电脑手机共用
+tts_engine.py       语音引擎：edge（默认）与本机 OpenAI 兼容 TTS 的探测/合成
 text_nlp.py         文本智能层：结构解析 / 读音规整 / 逐句切分 / 音色推荐
 launcher.py         readaloud:// 协议的执行端（启动/停止/打开）
 setup_protocol.py   注册/注销自定义协议
@@ -273,6 +306,7 @@ hotkey.py           全局热键守护
 pronounce.json      自定义发音词典（改完立刻生效）
 selftest_fetch.py   网页取稿自检（49 项，含真实站点）
 selftest_import.py  本地导入自检（PalmDOC 解压 / 压缩炸弹 / 超限上传）
+selftest_bookshelf.py  书架与语音引擎自检（20 项，含假本地 TTS 服务）
 install.bat         一键安装
 ```
 

@@ -21,3 +21,6 @@ _probe_*.py
 cookies.json
 # 「打开登录窗口」用的独立浏览器配置目录
 browser-profile/
+
+# 书架里是用户自己的书，只留在本机
+books/
