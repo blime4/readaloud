@@ -2,11 +2,27 @@
 
 import io
 import struct
+import tempfile
 import unittest
 import zipfile
+from pathlib import Path
 
+import bookshelf
 import document_import
 import server
+
+
+class BookshelfIsolated(unittest.TestCase):
+    """凡是走 /api/import 的用例都会自动入库，别把测试书写进真书架。"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._old = bookshelf.BOOKS_DIR
+        bookshelf.BOOKS_DIR = Path(self._tmp.name) / "books"
+
+    def tearDown(self):
+        bookshelf.BOOKS_DIR = self._old
+        self._tmp.cleanup()
 
 
 def make_mobi(text, *, compression=1, encryption=0, extra=b"", record_size=4096):
@@ -49,7 +65,7 @@ def palmdoc_pair(distance, count):
     return bytes([pair >> 8, pair & 0xFF])
 
 
-class DocumentImportTests(unittest.TestCase):
+class DocumentImportTests(BookshelfIsolated):
     def test_extracts_utf8_txt(self):
         result = document_import.extract_document("notes.txt", "第一行\n第二行".encode())
         self.assertEqual(result["text"], "第一行\n第二行")
