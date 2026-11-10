@@ -106,6 +106,10 @@ RE_DATE = re.compile(r"(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)")
 RE_DATE_CN = re.compile(r"(?<!\d)(\d{4})年(\d{1,2})月(\d{1,2})日")
 RE_TIME = re.compile(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?(?!\d)")
 RE_RANGE = re.compile(r"(?<=[\d.])\s*[–—~～]+\s*(?=[\d.])|(?<=\d)\s*-\s*(?=[\d.])")
+RE_UNCERTAIN_YEARS = re.compile(
+    r"(?<![\w.])(\d{2,4})[?？]\s*[–—-]\s*(\d{2,4})([?？])?(?:\s*(B\.\s*C\.))?"
+    r"(?![\w?？]|\.\d)", re.I)
+RE_TEXT_AFTER_YEARS = re.compile(r"\s+\w")
 RE_THOUSAND = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
 RE_MONEY = [("US$", "美元"), ("USD", "美元"), ("￥", "元"), ("¥", "元"), ("$", "美元"),
             ("€", "欧元"), ("£", "英镑")]
@@ -315,6 +319,15 @@ def normalize(text: str, enabled: bool = True) -> str:
         lambda m: f"{int(m.group(1))}点{m.group(2)}分" + (f"{m.group(3)}秒" if m.group(3) else ""), s)
 
     # 3) 数字区间：3.5–4.2 / 1280-1500 -> 「到」
+    # 生卒年内的问号表示约数，括号展开后也不能当作句末。
+    def spoken_years(m):
+        # 直接接下一句时，区间末尾的问号或 B.C. 的句点也可能是句末标点。
+        terminal = m[0][-1] if RE_TEXT_AFTER_YEARS.match(s, m.end()) else ""
+        terminal = terminal if terminal in ".?？" else ""
+        approx_end = "约" if m[3] and terminal not in ("?", "？") else ""
+        return f"{'公元前' if m[4] else ''}约{m[1]}到{approx_end}{m[2]}{terminal}"
+
+    s = RE_UNCERTAIN_YEARS.sub(spoken_years, s)
     s = RE_RANGE.sub("到", s)
 
     # 4) 千分位去掉（否则可能被读成断句）
@@ -378,6 +391,8 @@ def normalize(text: str, enabled: bool = True) -> str:
 def split_sentences(text: str) -> list:
     """切句，并保护引号/括号内部不被截断。"""
     out, buf, stack = [], "", []
+    year_positions = {i for match in RE_UNCERTAIN_YEARS.finditer(text)
+                      for i in range(match.start(), match.end() - bool(RE_TEXT_AFTER_YEARS.match(text, match.end())))}
     i, n = 0, len(text)
     while i < n:
         ch = text[i]
@@ -386,7 +401,7 @@ def split_sentences(text: str) -> list:
             stack.append(OPEN_PAIRS[ch])
         elif stack and ch == stack[-1]:
             stack.pop()
-        elif not stack and ch in SENT_END:
+        elif not stack and ch in SENT_END and i not in year_positions:
             j = i + 1
             while j < n and (text[j] in SENT_END or text[j] in CLOSERS or text[j] in "”’\"'"):
                 buf += text[j]
@@ -394,7 +409,7 @@ def split_sentences(text: str) -> list:
             out.append(buf.strip())
             buf, i = "", j
             continue
-        elif not stack and ch == ".":
+        elif not stack and ch == "." and i not in year_positions:
             prev = buf[-2] if len(buf) >= 2 else ""
             nxt = text[i + 1] if i + 1 < n else ""
             if prev.isdigit() and nxt.isdigit():

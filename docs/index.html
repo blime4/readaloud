@@ -289,6 +289,8 @@
       <input id="urlIn" type="url" spellcheck="false" autocomplete="off"
              placeholder="粘贴网页链接，自动抓正文来读（微信 / 知乎 / 博客都行）">
       <button class="primary tiny" id="btnUrlGo" title="抓取正文并开始朗读">抓取朗读</button>
+      <input id="fileIn" type="file" accept=".txt,.epub,.mobi,.pdf,text/plain,application/pdf,application/epub+zip" hidden>
+      <button class="ghost tiny" id="btnImport" title="导入 TXT、EPUB、MOBI 或 PDF 后开始朗读">导入本地文件</button>
     </div>
     <div class="urlopts">
       <label class="uopt" title="让本机小模型把关：抓不到时换策略重抓，并清掉头尾混进来的导航、推广语、相关文章。会慢一些（模型要思考）。">
@@ -404,6 +406,16 @@
     <div class="seglist" id="seglist">
       <div class="empty">点「朗读」后，这里会显示逐句稿，跟着声音逐句高亮。<br>点任意一句可跳读，也可用 ←/→ 切换。</div>
     </div>
+    <details class="help" id="minicpmPanel" style="border-top:1px solid var(--line)" hidden>
+      <summary>边听边问 · MiniCPM-o 4.5</summary>
+      <div class="hint">开启麦克风后，朗读时直接开口提问。回答播完会从原处继续。会话以开启时的文稿片段为参考，读到其他段落时可以在问题里说出词头或引用原句。</div>
+      <div class="cactions" style="padding-top:8px">
+        <label class="hint">Comni 端口 <input id="minicpmPort" type="number" min="1" max="65535" value="8040" style="width:75px"></label>
+        <button id="btnMiniCPMAsk" class="tiny">开启边听边问</button>
+        <button id="btnMiniCPMStop" class="tiny" hidden>关闭边听边问</button>
+      </div>
+      <div class="hint" id="minicpmStatus" role="status"></div>
+    </details>
     <details class="help" style="border-top:1px solid var(--line)">
       <summary>本机引擎信息与开关</summary>
       <div class="kv" id="hostKv"></div>
@@ -452,6 +464,7 @@
   <div class="sbar"><i id="ovBar"></i></div>
   <div style="margin-top:12px"><button class="tiny" id="btnCancel">取消</button></div></div></div>
 
+<script src="./minicpm-voice.js"></script>
 <script>
 /* ============================================================================
    ReadAloud 工作台
@@ -466,7 +479,8 @@ const $$ = s => Array.from(document.querySelectorAll(s));
 const S = {
   items: [], idx: -1, playing: false, audio: null, base: null, style: null,
   history: [], busy: false, preload: [], quality: false, qualityModel: null,
-  pauseTimer: 0, tickTimer: 0, stopAt: 0, stopMode: '0', cancelFn: null,
+  pauseTimer: 0, retryTimer: 0, playRequest: 0, tickTimer: 0, stopAt: 0, stopMode: '0', cancelFn: null,
+  voiceBookmark: null,
   fail: new Set(), tried: 0, lastPlayChars: 0,
 };
 
@@ -478,6 +492,9 @@ let ONLINE = false;
 let HOST_INFO = null;
 let VOICES = [];
 let MODELS = [];
+let stopMiniCPMVoice = () => {};
+let stopMiniCPMTurn = () => {};
+let setMiniCPMReaderAudio = () => {};
 
 const fmt = n => (n > 0 ? '+' : '') + n;
 const port = () => localStorage.getItem('ra.port') || DEFAULT_PORT;
@@ -717,7 +734,7 @@ async function loadHealth() {
 
 /* 引擎跑的是旧代码就明确提示：改完 server.py 进程不会自己换代码，
    不提示的话会出现「页面是新的、引擎还是两天前的旧版」却没人察觉。 */
-const REQUIRED_FEATURES = ['structured-items', 'prosody-normalize'];
+const REQUIRED_FEATURES = ['structured-items', 'prosody-normalize', 'local-document-import'];
 const MIN_ENGINE = '1.3.1';   // 页面用到的引擎能力下限，升一次改一次
 
 function cmpVer(a, b) {
@@ -887,6 +904,10 @@ function pushHistory(v) {
   if (S.history.length > 30) S.history.shift();
 }
 function count() {
+  if (S.voiceBookmark && S.voiceBookmark.text !== $('#txt').value) {
+    S.voiceBookmark = null;
+    updateBar();
+  }
   const n = $('#txt').value.replace(/\s/g, '').length;
   const spd = 4.6 * (1 + (parseInt($('#rate').value, 10) || 0) / 100);
   const sec = Math.round(n / spd);
@@ -932,7 +953,7 @@ function renderItems() {
   box.querySelectorAll('.seg').forEach(el => el.onclick = () => {
     const i = +el.dataset.i;
     S.fail.delete(i);
-    playAt(i, true);
+    seekReader(i);
   });
   highlight();
 }
@@ -953,12 +974,12 @@ function updateBar() {
   const pos = S.idx < 0 ? 0 : S.idx + (S.playing ? 1 : 1);
   $('#pIdx').textContent = `${Math.max(S.idx + 1, 0)} / ${n}`;
   $('#barI').style.width = n ? (pos / n * 100) + '%' : '0';
+  $('#btnToggle').textContent = S.playing || S.voiceBookmark ? '⏸' : '▶';
   const left = S.items.slice(Math.max(S.idx, 0)).reduce((a, b) => a + b.text.length, 0);
   if (!n) { $('#pRemain').textContent = '—'; return; }
   const spd = 4.6 * (1 + ((S.base ? S.base.rate : 8)) / 100);
   const sec = Math.round(left / spd);
   $('#pRemain').textContent = S.idx < 0 ? '—' : `剩 ${Math.floor(sec / 60)}分${sec % 60}秒`;
-  $('#btnToggle').textContent = S.playing ? '⏸' : '▶';
 }
 
 /* ---------- 播放 ---------- */
@@ -1023,23 +1044,39 @@ function maybeResume() {
 
 function playAt(i, force) {
   clearTimeout(S.pauseTimer);
+  clearTimeout(S.retryTimer);
+  S.retryTimer = 0;
+  const request = ++S.playRequest;
   if (i >= S.items.length) { finish(); return; }
   if (i < 0) i = 0;
   S.idx = i;
   highlight();
   saveResume();
-  const a = S.audio || (S.audio = new Audio());
+  if (!S.audio) {
+    S.audio = new Audio();
+    setMiniCPMReaderAudio(S.audio);
+  }
+  const a = S.audio;
   a.onended = null;
   a.onerror = null;
   a.src = ttsURL(i);
   a.onended = () => { if (S.playing) gapThenNext(); };
   a.onerror = () => {
+    if (S.audio !== a || S.idx !== i || (!S.playing && (!force || S.playRequest !== request))) return;
     // 以前这里静默"跳过"，用户只听到缺了一句。现在标红可点重试。
     if (!S.fail.has(i) && S.tried < 3) {
       S.tried++;
       S.fail.add(i); highlight();
       if (S.tried <= 1) toast('这句合成失败了，正在重试…');
-      setTimeout(() => { if (S.playing || force) { a.src = ttsURL(i) + '&r=' + S.tried; a.play().catch(() => {}); } }, 700);
+      const retryRequest = S.playRequest;
+      S.retryTimer = setTimeout(() => {
+        S.retryTimer = 0;
+        if (S.playRequest !== retryRequest || S.audio !== a || S.idx !== i || (!S.playing && !force)) return;
+        a.src = ttsURL(i) + '&r=' + S.tried;
+        a.play().then(() => {
+          if (S.playRequest === retryRequest) { S.playing = true; updateBar(); }
+        }).catch(() => {});
+      }, 700);
       return;
     }
     S.fail.add(i); highlight();
@@ -1048,8 +1085,10 @@ function playAt(i, force) {
   };
   S.tried = 0;
   a.play().then(() => {
+    if (S.playRequest !== request) return;
     S.playing = true; updateBar();
   }).catch(e => {
+    if (S.playRequest !== request) return;
     S.playing = false; updateBar();
     toast('播放被浏览器拦住了，请再点一次「▶」', 3000);
   });
@@ -1079,27 +1118,58 @@ function finish() {
   highlight(); updateBar();
   toast('朗读完成 ✓');
 }
-function stopPlayback() {
-  S.playing = false;
+function pauseReader() {
+  ++S.playRequest;
   clearTimeout(S.pauseTimer);
-  if (S.audio) { S.audio.pause(); S.audio.removeAttribute('src'); }
+  clearTimeout(S.retryTimer);
+  S.retryTimer = 0;
+  S.playing = false;
+  S.audio?.pause();
+}
+function stopPlayback() {
+  S.voiceBookmark = null;
+  stopMiniCPMVoice();
+  pauseReader();
+  S.audio?.removeAttribute('src');
   S.preload.forEach(a => { try { a.removeAttribute('src'); } catch (e) {} });
   S.preload = [];
   S.idx = -1;
   highlight();
 }
+function seekReader(index) {
+  S.voiceBookmark = null;
+  stopMiniCPMTurn();
+  playAt(index, true);
+}
 function nextSeg() {
   if (!S.items.length) return;
-  playAt(Math.min((S.idx < 0 ? 0 : S.idx + 1), S.items.length - 1), true);
+  seekReader(Math.min((S.idx < 0 ? 0 : S.idx + 1), S.items.length - 1));
 }
 function prevSeg() {
   if (!S.items.length) return;
-  playAt(Math.max((S.idx <= 0 ? 0 : S.idx - 1), 0), true);
+  seekReader(Math.max((S.idx <= 0 ? 0 : S.idx - 1), 0));
+}
+function resumeReader() {
+  const request = ++S.playRequest;
+  S.playing = true;
+  S.audio.play().catch(() => {
+    if (S.playRequest === request) {
+      S.playing = false;
+      updateBar();
+    }
+  });
 }
 function togglePlay() {
-  if (!S.items.length || S.idx < 0) { play(); return; }
-  if (S.playing) { S.audio.pause(); S.playing = false; clearTimeout(S.pauseTimer); toast('已暂停'); }
-  else { S.playing = true; S.audio.play().catch(() => { S.playing = false; }); toast('继续'); }
+  if (!S.items.length || S.idx < 0 || !S.audio) { play(); return; }
+  if (S.playing || !S.audio.paused || S.voiceBookmark) {
+    S.voiceBookmark = null;
+    pauseReader();
+    toast('已暂停');
+  } else {
+    stopMiniCPMTurn();
+    resumeReader();
+    toast('继续');
+  }
   updateBar();
 }
 
@@ -1116,6 +1186,9 @@ function liveChange() {
 /* ---------- 主流程 ---------- */
 async function play(requestedMode) {
   if (S.busy) return;
+  if (!requestedMode && S.voiceBookmark) { togglePlay(); return; }
+  S.voiceBookmark = null;
+  stopMiniCPMTurn();
   const text = $('#txt').value.trim();
   if (!text) return;
   // 稿子里只放了一条链接？那用户的意思显然是"把这篇读给我"，不是"念这串网址"。
@@ -1146,6 +1219,29 @@ async function play(requestedMode) {
   } catch (e) {
     toast('出错了：' + e.message, 3600);
   } finally { S.busy = false; overlay(false); }
+}
+
+async function importLocalFile(file) {
+  if (!file) return;
+  const form = new FormData();
+  form.append('file', file, file.name);
+  overlay(true, '正在读取 ' + file.name + '…');
+  try {
+    const response = await fetch(API + '/api/import', { method: 'POST', body: form });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) throw new Error(data.error || '导入失败');
+    stopPlayback();
+    $('#txt').value = data.text;
+    // 书籍通常很长，不能继承下拉框中的“智能”模式，否则会被压缩成摘要。
+    _oneShotMode = 'none';
+    toast(`已导入《${data.title}》${data.chars.toLocaleString()} 字，按原文开始朗读。`, 4200);
+    await play('none');
+  } catch (error) {
+    toast('导入失败：' + error.message, 4200);
+  } finally {
+    $('#fileIn').value = '';
+    overlay(false);
+  }
 }
 
 function baseStyle() {
@@ -1443,7 +1539,7 @@ function setupTimer(v) {
     const left = Math.max(0, S.stopAt - Date.now());
     const m = Math.floor(left / 60000), s = Math.floor(left % 60000 / 1000);
     $('#timerV').textContent = `${m}:${String(s).padStart(2, '0')}`;
-    if (left <= 0) { resetTimer(); if (S.playing) { stopPlayback(); toast('定时时间到，已停止'); } }
+    if (left <= 0) { resetTimer(); if (S.playing || S.voiceBookmark) { stopPlayback(); toast('定时时间到，已停止'); } }
   };
   tick();
   S.tickTimer = setInterval(tick, 1000);
@@ -1680,6 +1776,8 @@ $('#lpPasteToggle').onclick = () => {
 /* ---------- 链接抓取 ---------- */
 $('#btnUrlGo').onclick = () => fetchUrl(null, true);
 $('#btnUrlFetch').onclick = () => fetchUrl(null, false);
+$('#btnImport').onclick = () => $('#fileIn').click();
+$('#fileIn').addEventListener('change', event => importLocalFile(event.target.files[0]));
 // 用户自己动了模式选择，就丢掉"抓链接读原文"那个一次性覆盖
 $('#mode').onchange = () => { _oneShotMode = ''; savePrefs({ mode: $('#mode').value }); };
 $('#urlIn').addEventListener('keydown', e => {
@@ -1739,12 +1837,12 @@ $('#btnToggle').onclick = togglePlay;
 $('#btnPrev').onclick = prevSeg;
 $('#btnNext').onclick = nextSeg;
 $('#btnStopB').onclick = () => { stopPlayback(); toast('已停止'); };
-$('#btnRepeat').onclick = () => { if (S.idx >= 0) playAt(S.idx, true); };
+$('#btnRepeat').onclick = () => { if (S.idx >= 0) seekReader(S.idx); };
 $('#bar').onclick = e => {
   if (!S.items.length) return;
   const r = e.currentTarget.getBoundingClientRect();
   const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
-  playAt(Math.min(S.items.length - 1, Math.floor(ratio * S.items.length)), true);
+  seekReader(Math.min(S.items.length - 1, Math.floor(ratio * S.items.length)));
 };
 $('#txt').addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); $('#btnPlay').click(); }
@@ -1752,7 +1850,7 @@ $('#txt').addEventListener('keydown', e => {
 document.addEventListener('keydown', e => {
   const tag = (e.target.tagName || '').toUpperCase();
   if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') return;
-  if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+  if (e.code === 'Space' && tag !== 'BUTTON' && tag !== 'SUMMARY') { e.preventDefault(); togglePlay(); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); nextSeg(); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); prevSeg(); }
   else if (e.key === 'Escape') { stopPlayback(); }
@@ -1779,6 +1877,73 @@ async function savePrefs(p) {
     });
     return true;
   } catch (e) { return false; }
+}
+
+/* ---------- 本地实时语音 ---------- */
+if (isLocalHost() && typeof createMiniCPMVoice === 'function') {
+  const ask = $('#btnMiniCPMAsk');
+  const stop = $('#btnMiniCPMStop');
+  const input = $('#minicpmPort');
+  let voiceTurn = false;
+
+  function resumeAfterVoice() {
+    voiceTurn = false;
+    const bookmark = S.voiceBookmark;
+    S.voiceBookmark = null;
+    if (!bookmark || bookmark.items !== S.items || bookmark.index !== S.idx ||
+        bookmark.request !== S.playRequest || bookmark.audio !== S.audio) return;
+    if (bookmark.retry) playAt(S.idx, true);
+    else if (S.audio.ended) playAt(S.idx + 1, true);
+    else resumeReader();
+    updateBar();
+  }
+
+  const voice = createMiniCPMVoice((message, active) => {
+    $('#minicpmStatus').textContent = message;
+    ask.disabled = input.disabled = active;
+    stop.hidden = !active;
+    if (!active) resumeAfterVoice();
+  }, {
+    onSpeechStart() {
+      voiceTurn = true;
+      if (S.voiceBookmark || S.idx < 0 || !S.audio ||
+          !(S.playing || !S.audio.paused || S.retryTimer)) return;
+      const retry = Boolean(S.retryTimer || S.audio.error);
+      pauseReader();
+      S.voiceBookmark = {
+        items: S.items, index: S.idx, audio: S.audio, request: S.playRequest,
+        text: $('#txt').value, retry,
+      };
+      updateBar();
+    },
+    onTurnEnd: resumeAfterVoice,
+  });
+  $('#minicpmPanel').hidden = false;
+  input.value = store.get('minicpmPort', 8040);
+  ask.onclick = () => {
+    const voicePort = input.valueAsNumber;
+    if (!input.reportValidity() || !Number.isInteger(voicePort)) return;
+    if (S.busy) { toast('请等当前文稿处理完成。'); return; }
+    store.set('minicpmPort', voicePort);
+    const index = S.idx;
+    const first = Math.max(0, index - 2);
+    const excerpt = index < 0 ? $('#txt').value.slice(0, 1000) :
+      S.items.slice(first, index + 3)
+        .map((item, offset) => (first + offset === index ? '当前句：' : '') + item.text)
+        .join('\n').slice(0, 1000);
+    setMiniCPMReaderAudio(S.audio);
+    voice.start(voicePort, excerpt);
+  };
+  stop.onclick = () => voice.stop();
+  stopMiniCPMVoice = () => voice.stop();
+  setMiniCPMReaderAudio = audio => voice.setReaderAudio?.(audio);
+  stopMiniCPMTurn = () => {
+    if (voiceTurn) voice.stop();
+  };
+  window.addEventListener('pagehide', () => {
+    S.voiceBookmark = null;
+    voice.stop();
+  });
 }
 
 /* ---------- 启动 ---------- */

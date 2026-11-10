@@ -33,7 +33,9 @@ from pathlib import Path
 import requests
 import edge_tts
 from flask import Flask, Response, jsonify, request, send_from_directory
+from werkzeug.exceptions import RequestEntityTooLarge
 
+import document_import
 import text_nlp as NLP
 import webfetch
 import webagent
@@ -83,7 +85,7 @@ DEFAULT_CONFIG = {
     "prefs": {"style": "", "mode": "none", "model": "", "quality": False},
 }
 
-ENGINE_VERSION = "1.4.0"
+ENGINE_VERSION = "1.5.0"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -98,6 +100,7 @@ FEATURES = [
     "fail-fast",            # 抓不到就不叫模型空转，直接如实报错
     "site-login",           # 登录态：/api/login，从浏览器借 cookie 读知乎这类站
     "browser-fetch",        # 抓不动时让本机浏览器自己去取（含渲染后的 DOM）
+    "local-document-import", # /api/import：读取本机 TXT / EPUB / MOBI / PDF
 ]
 
 # 页面文件：优先用 docs/（= GitHub Pages 站点目录），本地与线上共用同一份，
@@ -127,6 +130,7 @@ log = logging.getLogger("readaloud")
 
 CFG = load_config()
 app = Flask(__name__, static_folder=None)
+app.config["MAX_CONTENT_LENGTH"] = document_import.MAX_IMPORT_BYTES
 
 
 @app.after_request
@@ -701,6 +705,12 @@ def index():
     return ("页面文件缺失：docs/index.html", 500)
 
 
+@app.get("/minicpm-voice.js")
+@app.get("/minicpm-voice-worklet.js")
+def minicpm_voice_script():
+    return send_from_directory(BASE / "docs", request.path[1:], max_age=0)
+
+
 @app.get("/favicon.ico")
 def favicon():
     return ("", 204)
@@ -1261,6 +1271,24 @@ def api_prepare():
         "voice_reason": rec.get("reason"),
         "normalized": do_norm,
     })
+
+
+@app.post("/api/import")
+def api_import():
+    """Extract a locally selected document without retaining its contents."""
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify({"ok": False, "error": "请选择要导入的文件。"}), 400
+    try:
+        extracted = document_import.extract_document(upload.filename, upload.read())
+    except document_import.DocumentImportError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True, **extracted, "chars": len(extracted["text"])})
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def import_too_large(_error):
+    return jsonify({"ok": False, "error": "文件不能超过 80 MB。"}), 413
 
 
 @app.route("/api/tts", methods=["GET", "POST"])

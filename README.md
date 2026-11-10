@@ -10,8 +10,19 @@
 | 场景 | 怎么用 |
 | --- | --- |
 | 网页 | 把链接粘进「读网页」输入框 → 自动抓正文开读。也可以直接把链接粘进文稿框再点朗读 |
+| 本地文件 | 点「导入本地文件」，选 TXT / EPUB / MOBI / PDF → 解析出正文后按原文开读 |
 | Obsidian | 插件 `readaloud-bridge`：选中文字 `Ctrl+Alt+P` 朗读，`Ctrl+Alt+O` 读整篇，`Ctrl+Alt+S` 总结后朗读 |
 | 任意软件 | `Ctrl+Alt+R` 读剪贴板（**内容是链接就自动抓网页正文**）、`+E` 读当前选中的文字、`+S` 总结后读、`+W` 润色后读、`+X` 开工作台、`+Q` 停止 |
+
+## 边听边问（MiniCPM-o 4.5）
+
+使用 [Comni](https://github.com/tc-mb/llama.cpp-omni#-recommended-companion-demo--minicpm-o-demo-comni) 的 MiniCPM-o 4.5 量化模型启动本机推理 Worker 和网关。ReadAloud 连接网关的音频双工接口。网关需使用 HTTP 并仅监听 `127.0.0.1`，默认端口为 `8040`。从源码启动网关时，可使用 `python gateway.py --http --host 127.0.0.1 --port 8040`，Worker 的启动方式见 Comni 的部署说明。
+
+打开本机 ReadAloud 工作台，展开「边听边问」，点击开启并允许使用麦克风。朗读时直接开口，播放器会暂停，等回答播完后从原处继续。每次最多播放 10 秒回答，等待回答超时也会恢复朗读。会话开启期间可以多次提问，点击「关闭边听边问」会关闭麦克风。浏览器会尝试过滤朗读和回答的回声，实际效果取决于麦克风和房间环境。
+
+ReadAloud 在会话开启时发送当前句和附近文稿。读到其他段落时，可以在问题里直接说出词头或引用原句。麦克风音频和文稿片段在本机浏览器与 Comni 之间传输。
+
+16 GB 显卡建议先选 `Q4_K_M`，并为 Comni 留出显存。如果 Ollama 仍驻留其他模型，先停止闲置模型再开启会话。Comni 默认保存会话录音，可在它的配置中设置 `recording.enabled` 为 `false`。
 
 ## 贴个链接就能听
 
@@ -35,6 +46,24 @@
 
 > 深度清理走的是**单步**调用（直接 `clean_page`），不绕工具回路 ——
 > 清理本来就是一个动作，让模型先"决定去抓"再"决定去清"纯属浪费一轮。
+
+## 导入本地的书
+
+点「导入本地文件」选一本书，解析出正文后直接开读，支持 **TXT / EPUB / MOBI / PDF**。
+文件只在导入的一瞬间发给你自己的本机引擎（`127.0.0.1:8759`），落在内存里解析，
+**不存盘、不上传、不经过任何第三方**。
+
+- **导入后强制按原文朗读。** 书籍动辄十几万字，如果继承下拉框里的「智能」模式，
+  点一下朗读会被"长文自动总结"压成几千字——你以为在听书，其实在听梗概。
+- **MOBI 自己解。** 支持未加密的 PalmDOC（压缩类型 1 / 2），不引入 GPL 依赖。
+  带 DRM 的、以及 HUFF/CDIC 压缩的会明确告诉你原因，而不是吐出几万字乱码。
+  PalmDOC 每条记录常带几个尾字节填充，解析时按声明长度截断——
+  不截断的话 UTF-8 会在每个 4 KB 边界错位，中文整章变乱码。
+- **PDF 靠 PyMuPDF**（`requirements.txt` 已含）。扫描件没有文字层，会提示
+  "没有从文件中提取到可朗读的文本"，不会假装读出来了。
+- **上限**：文件 80 MB（`MAX_CONTENT_LENGTH` 在解析之前就挡住，超了回 413）；
+  EPUB 解压后 200 MB、最多 2000 个条目，防止 zip 炸弹。
+- 只想读一段的话，直接往文稿框里粘文字仍然是最快的路径。
 
 ## 它比"能出声"多做了什么
 
@@ -92,6 +121,7 @@ AI 功能额外需要 [Ollama](https://ollama.com)；没有也能正常朗读，
 | `POST /api/prepare` | 一步到位：清洗 →（可选）AI → 规整 → 逐句。返回 `items[{text,kind,pause,rate}]` + 推荐音色 |
 | `POST /api/plan` | 只清洗+规整+逐句，不碰 AI |
 | `GET\|POST /api/fetch?url=` | 抓网页正文。返回 `title/text/chars` 外加 `quality`（0-100 质量分）、`route`（用了哪条提取路线）、`dropped`（清掉多少行网页残留）、`diag`（试过哪些策略） |
+| `POST /api/import` | 上传一个本地文件（`multipart/form-data`，字段名 `file`）解析成正文。返回 `title/type/text/chars`；格式不支持或读不出来回 400 与中文原因，超过 80 MB 回 413 |
 | `POST /api/agent` | 让会调工具的小模型主导取稿。body：`{url, clean, model, retry}`。先走零模型开销的规则抓取（通常 <1 秒）；抓得够干净就直接返回，彻底抓不到就直接报错（`retry:true` 才让模型硬试）；勾 `clean` 时直接深度清理。返回 `trace` 记录模型每一步动作 |
 | `GET\|POST /api/login` | 登录态管理。GET 返回各站配置状态与本机可借用的浏览器；POST 按 `action` 分派：`import`（从浏览器整套搬 cookie，可带 `warmup` 预热）/ `paste`（手工粘贴，支持纯 Cookie 头、Network 整行、Copy as cURL 三种粘法）/ `clear` / `open`（开一个带调试端口的登录窗口）/ `probe` / `test`（用当前登录态试抓一个链接） |
 | `POST /api/ai` | 总结 / 润色（`stream=true` 可流式，结果自动缓存） |
@@ -229,9 +259,11 @@ COM 提权接口 —— 普通进程做不到，所以只能走 CDP 或手工粘
 
 ```
 docs/index.html     工作台页面（GitHub Pages 发布的就是它，本地引擎也托管同一份）
+docs/minicpm-voice.js  边听边问：麦克风上行 + 网关音频双工
 server.py           引擎：语音合成 + AI 总结润色 + 缓存 + 播放广播 + 对外接口
 webfetch.py         网页取稿：编码探测 / 站点适配 / 段落重排 / 噪声清理 / 质量评分
 webagent.py         取稿 Agent：给会调工具的小模型挂 fetch_page / clean_page / finish
+document_import.py  本地文件取稿：TXT / EPUB / MOBI(PalmDOC) / PDF 解析
 text_nlp.py         文本智能层：结构解析 / 读音规整 / 逐句切分 / 音色推荐
 launcher.py         readaloud:// 协议的执行端（启动/停止/打开）
 setup_protocol.py   注册/注销自定义协议
@@ -240,6 +272,7 @@ clip_read.py        剪贴板朗读
 hotkey.py           全局热键守护
 pronounce.json      自定义发音词典（改完立刻生效）
 selftest_fetch.py   网页取稿自检（49 项，含真实站点）
+selftest_import.py  本地导入自检（PalmDOC 解压 / 压缩炸弹 / 超限上传）
 install.bat         一键安装
 ```
 

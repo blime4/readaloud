@@ -115,6 +115,41 @@ t = "他停顿了一下，说：“这样做是对的。”然后转身就走了
 items = N.split_items("", blocks=[{"kind": "para", "text": t}])
 check("引号内句号不被截断", [i["text"] for i in items], [t])
 
+date_intro = "该词源于一本书的书名,作者是公元6世纪拜占庭史学家普罗科匹厄斯"
+date_next = "他曾在君士坦丁堡为官多年而且身居要职。"
+date_sentence = date_intro + "，Procopius, 约490到约562。"
+check("生卒年中的两个问号不会把一句拆开",
+      N.prepare(date_intro + "（Procopius, 490? —562?）。" + date_next)["segments"],
+      [date_sentence, date_next])
+check("已经展开的括号内生卒年仍然连读",
+      N.prepare(date_intro + "，Procopius, 490? —562?。" + date_next)["segments"],
+      [date_sentence, date_next])
+date_unmodified = date_intro + "，Procopius, 490? —562?。"
+check("关闭读音规整仍然连读已展开的生卒年",
+      N.prepare(date_unmodified + date_next, do_normalize=False)["segments"],
+      [date_unmodified, date_next])
+check("保留公元前年代及两位数年份",
+      N.prepare("昆图斯（82？ —30B. C.）曾经担任此职。")["segments"],
+      ["昆图斯，公元前约82到30，曾经担任此职。"])
+check("关闭读音规整仍然连读公元前年代",
+      N.prepare("昆图斯，82？ —30B. C.，曾经担任此职。", do_normalize=False)["segments"],
+      ["昆图斯，82？ —30B. C.，曾经担任此职。"])
+check("普通问句和破折号后回答仍然分句",
+      N.prepare("是编号490? —没错。预算是100—200? 对。 ")["segments"],
+      ["是编号490?", "—没错。", "预算是100到200?", "对。"])
+check("问句里的产品型号不会转为约数范围",
+      N.prepare("产品是AB12? - 34CD是另一个型号。")["segments"],
+      ["产品是 AB12?", "- 34CD 是另一个型号。"])
+check("回答以年份开头时仍保留问题边界",
+      N.prepare("编号是42? — 2024年才开始编号。")["segments"],
+      ["编号是42?", "— 2024年才开始编号。"])
+check("公元前缩写末尾句号可同时结束整句",
+      N.prepare("他生活于 500?—300 B.C. 他写了这本书。")["segments"],
+      ["他生活于 公元前约500到300.", "他写了这本书。"])
+check("区间末尾真正的问号仍可结束英文问句",
+      N.prepare("Who was active around 490?—562? I don't know.", do_normalize=False)["segments"],
+      ["Who was active around 490?—562?", "I don't know."])
+
 t2 = "第一句话在这里。第二句话稍微长一点点。第三句话结束了。"
 items2 = N.split_items("", blocks=[{"kind": "para", "text": t2}])
 check("真逐句：3 句 -> 3 段", len(items2), 3)
