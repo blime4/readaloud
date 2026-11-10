@@ -657,7 +657,14 @@ const S = {
 };
 
 const GH = 'https://github.com/blime4/readaloud';
+/* 引擎的真实端口只有它自己知道。页面如果是引擎托管出来的（http + 带端口），
+   就直接用页面自己的端口 —— 别再拿一个硬编码默认值去猜，猜错就会连到
+   上次留下的旧引擎上（表现是"引擎在跑，页面却说连不上"）。
+   GitHub Pages 是 https 无端口、file:// 打开更没有，那时才退回默认值。 */
 const DEFAULT_PORT = '8756';
+const PAGE_PORT = (location.port && location.port !== '80' && location.port !== '443')
+  ? location.port : '';
+const servedByEngine = () => location.protocol === 'http:' && !!PAGE_PORT;
 const LONG_AI_CHARS_DEFAULT = 1200;
 let API = '';              // 空串 = 与页面同源；否则是 http://127.0.0.1:<port>
 let ONLINE = false;
@@ -669,7 +676,7 @@ let stopMiniCPMTurn = () => {};
 let setMiniCPMReaderAudio = () => {};
 
 const fmt = n => (n > 0 ? '+' : '') + n;
-const port = () => localStorage.getItem('ra.port') || DEFAULT_PORT;
+const port = () => PAGE_PORT || localStorage.getItem('ra.port') || DEFAULT_PORT;
 const store = {
   get(k, d) { try { const v = localStorage.getItem('ra.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem('ra.' + k, JSON.stringify(v)); } catch (e) {} },
@@ -746,7 +753,7 @@ $('#chipTheme').onclick = () => {
 const isLocalHost = () => location.hostname === '127.0.0.1' || location.hostname === 'localhost' || location.hostname === '[::1]';
 
 function candidateBases() {
-  if (isLocalHost()) return [''];                       // 引擎自己托管的页面，同源最省事
+  if (servedByEngine() || isLocalHost()) return [''];   // 引擎自己托管的页面，同源最省事
   const p = port();
   return [`http://127.0.0.1:${p}`, `http://localhost:${p}`];
 }
@@ -802,7 +809,7 @@ async function connect({ manual = false } = {}) {
   ONLINE = true;
   $('#connect').classList.remove('show');
   setDot('on');
-  $('#chipMode').textContent = isLocalHost() ? '本地引擎模式' : 'GitHub Pages · 已连本机';
+  $('#chipMode').textContent = (servedByEngine() || isLocalHost()) ? '本地引擎模式' : 'GitHub Pages · 已连本机';
   $('#chipMode').className = 'chip ok';
   await loadAll();
   return true;
@@ -813,7 +820,7 @@ async function showOffline() {
   const perm = await permissionState();
   setDot('off');
   $('#stServer').textContent = '未连接本机引擎';
-  $('#chipMode').textContent = isLocalHost() ? '本地引擎未启动' : 'GitHub Pages · 未连本机';
+  $('#chipMode').textContent = (servedByEngine() || isLocalHost()) ? '本地引擎未启动' : 'GitHub Pages · 未连本机';
   $('#chipMode').className = 'chip gray';
   $('#connect').classList.add('show');
   $('#cxActions').innerHTML = '';
