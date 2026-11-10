@@ -38,6 +38,38 @@
   走不通 —— 但同一台机器上跑一个本地 TTS 服务是同样的思路，这里就是为它留的口子。
   本机地址永远直连，系统代理（Clash 之类）不会掺和进来。
 
+### 自带一份 Qwen3-TTS（可选）
+
+`install-tts.bat` → `start-tts.bat`，服务在 `http://127.0.0.1:8890`，
+把面板里的地址填成它、点「探测」，音色就会列出来。
+
+- 模型 `Qwen3-TTS-12Hz-1.7B-CustomVoice`：10 种语言，中文音色 5 个
+  （`Serena` 温和女声 / `Uncle_Fu` 醇厚男声 / `Vivian` 明亮女声 /
+  `Dylan` 京腔男声 / `Eric` 川腔男声），另有 `Ryan` `Aiden` 英文、
+  `Ono_Anna` 日文、`Sohee` 韩文。权重在 `models/`，不进仓库。
+- 显存约 4.3 GB，加载 7～30 秒，之后常驻。
+
+**实测性能（RTX 4060 Ti 16 GB，很重要）**：RTF 3～7 —— 生成 1 秒音频要算
+3～7 秒，而且短句有固定开销（10 字也要 20 秒）。**它不能做逐句实时朗读**，
+逐句播会在每句之间卡十几秒。适合的是"质量优先、可以等"的离线合成
+（导出整段/整章音频），或者试听音色。
+
+原因是架构：12 Hz 的自回归 talker + 每帧逐码本的 sub-talker，序列长、
+串行步数多。这不是配置问题 —— 换 SGLang-Omni 也解决不了，它优化的是
+吞吐（并发很多句），不是单句首字节延迟。
+
+所以默认引擎仍然是 `edge`。要"实时 + 本地大模型"，需要非自回归的模型
+（CosyVoice2 的 flow matching、GPT-SoVITS 的 VITS），这条路本仓库还没接。
+
+### 为什么没上 SGLang
+
+SGLang-Omni 确实原生支持 Qwen3-TTS / Higgs Audio v3 / MOSS-TTS / Voxtral，
+接口同样是 `/v1/audio/speech`，吞吐比原生 transformers 高得多。但它只支持
+Linux（NVIDIA 走 Docker，Apple Silicon 走 `install.sh`）：Windows 上
+`pip install sglang-omni` 直接 `ResolutionImpossible`（triton / flashinfer
+没有 Windows wheel）。所以这里用官方 `qwen-tts` 原生推理，接口保持一致 ——
+哪天把模型挪到有卡的 Linux 机器上跑 `sgl-omni serve`，这边只改地址。
+
 ## 边听边问（MiniCPM-o 4.5）
 
 使用 [Comni](https://github.com/tc-mb/llama.cpp-omni#-recommended-companion-demo--minicpm-o-demo-comni) 的 MiniCPM-o 4.5 量化模型启动本机推理 Worker 和网关。ReadAloud 连接网关的音频双工接口。网关需使用 HTTP 并仅监听 `127.0.0.1`，默认端口为 `8040`。从源码启动网关时，可使用 `python gateway.py --http --host 127.0.0.1 --port 8040`，Worker 的启动方式见 Comni 的部署说明。
@@ -297,6 +329,7 @@ webagent.py         取稿 Agent：给会调工具的小模型挂 fetch_page / c
 document_import.py  本地文件取稿：TXT / EPUB / MOBI(PalmDOC) / PDF 解析
 bookshelf.py        书架：每本书一个目录，正文落盘 + 进度，电脑手机共用
 tts_engine.py       语音引擎：edge（默认）与本机 OpenAI 兼容 TTS 的探测/合成
+tts_qwen_server.py  本机大模型 TTS：把 Qwen3-TTS 包成 OpenAI 兼容的 /v1/audio/speech
 text_nlp.py         文本智能层：结构解析 / 读音规整 / 逐句切分 / 音色推荐
 launcher.py         readaloud:// 协议的执行端（启动/停止/打开）
 setup_protocol.py   注册/注销自定义协议
@@ -308,6 +341,8 @@ selftest_fetch.py   网页取稿自检（49 项，含真实站点）
 selftest_import.py  本地导入自检（PalmDOC 解压 / 压缩炸弹 / 超限上传）
 selftest_bookshelf.py  书架与语音引擎自检（20 项，含假本地 TTS 服务）
 install.bat         一键安装
+install-tts.bat     装本机大模型 TTS（建独立环境 + 下 4.5GB 权重，只需一次）
+start-tts.bat       启动 Qwen3-TTS 服务（127.0.0.1:8890）
 ```
 
 ## 卸载

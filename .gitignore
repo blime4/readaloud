@@ -24,3 +24,7 @@ browser-profile/
 
 # 书架里是用户自己的书，只留在本机
 books/
+
+# 本地大模型 TTS：权重和虚拟环境都是本机资产，不进仓库
+models/
+.tts-venv/

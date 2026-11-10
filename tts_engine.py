@@ -35,7 +35,7 @@ PROVIDERS = {
     },
     "local": {
         "label": "本机大模型 TTS",
-        "note": "指向本机任意 OpenAI 兼容 TTS（CosyVoice / Kokoro / GPT-SoVITS / IndexTTS）。文字不出本机。",
+        "note": "指向本机任意 OpenAI 兼容 TTS（Qwen3-TTS / CosyVoice / Kokoro / GPT-SoVITS）。文字不出本机。",
         "needs_url": True,
     },
 }
