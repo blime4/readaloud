@@ -97,7 +97,7 @@ DEFAULT_CONFIG = {
     "tts_local_format": "mp3",
 }
 
-ENGINE_VERSION = "1.6.0"
+ENGINE_VERSION = "1.7.0"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -337,7 +337,7 @@ def _trim_cache() -> None:
     try:
         files = sorted((p for p in TTS_CACHE.iterdir() if p.is_file() and p.suffix != ".part"),
                        key=lambda p: p.stat().st_mtime, reverse=True)
-        for f in files[CFG["cache_limit"]:]:
+        for f in files[_cache_limit_now():]:
             f.unlink(missing_ok=True)
     except Exception:
         pass
@@ -1440,6 +1440,143 @@ def api_book_delete(book_id):
     return jsonify({"ok": True})
 
 
+# ---------------------------------------------------------------- 后台预合成全文
+# 本地大模型 RTF≈1：听一句合成一句是贴着极限走的，逐句预取只有 3 句的缓冲。
+# 干脆在后台把整本书提前合成进 TTS_CACHE —— 播放时 /api/tts 全部命中缓存，
+# 句与句之间零等待。缓存键和前台 synth() 完全同源，所以"预合成过"等于"播过"。
+
+_presynth = {
+    "running": False, "job": 0, "total": 0, "done": 0,
+    "fail": 0, "book": "", "label": "", "started": 0.0, "finished": 0.0,
+    "error": "",
+}
+_presynth_lock = threading.Lock()
+_play_touch = {"ts": 0.0}       # 最近一次前台合成的时间；预合成见了要让路
+PRESYNTH_MAX_SEGS = 6000        # 一本书的合理上限，防误传整站文章
+
+
+def _cache_limit_now() -> int:
+    """预合成期间临时抬高缓存上限：书比上限长，会边合成边把自己挤掉。"""
+    with _presynth_lock:
+        if _presynth["running"]:
+            return max(int(CFG["cache_limit"]), _presynth["total"] + 100)
+    return int(CFG["cache_limit"])
+
+
+def _seg_rate(base_rate: int, offset) -> str:
+    """复刻前端 segRate()：全局语速 + 该句偏移，夹在 [-40, 50]。
+    缓存键里是字符串，差一个字符就是两份音频，必须一模一样。"""
+    try:
+        off = int(offset or 0)
+    except (TypeError, ValueError):
+        off = 0
+    v = max(-40, min(50, int(base_rate or 0) + off))
+    return (f"+{v}%" if v >= 0 else f"{v}%")
+
+
+def _presynth_worker(my_job: int, jobs: list, args: dict) -> None:
+    """job 号就是停止信号：开始新任务时号数 +1，旧 worker 立刻作废。
+    以前用布尔 cancel —— 旧线程还没退出时新任务把它复位了，旧线程
+    永远不退，两个线程抢着写进度，统计出过 4/2 这种鬼数字。"""
+    voice = args["voice"]
+    base_rate = int(args.get("rate") or 0)
+    pitch = args["pitch"]
+    volume = args["volume"]
+    provider = args["provider"]
+    model = args["model"]
+
+    def stale() -> bool:
+        with _presynth_lock:
+            return _presynth["job"] != my_job
+
+    done = fail = 0
+    for text, off in jobs:
+        if stale():
+            return
+        # 前台正在合成（= 用户正在听，但这一句还没缓存）就先让路，别抢 GPU
+        while not stale() and time.time() - _play_touch["ts"] < 5:
+            time.sleep(2)
+        if stale():
+            return
+        try:
+            synth(text, voice, _seg_rate(base_rate, off), pitch, volume,
+                  provider, model)
+            done += 1
+        except Exception as e:              # 单句失败不停整本书
+            fail += 1
+            log.warning("预合成第 %d/%d 句失败: %s", done + fail,
+                        len(jobs), e)
+        with _presynth_lock:
+            if _presynth["job"] == my_job:
+                _presynth["done"], _presynth["fail"] = done, fail
+    with _presynth_lock:
+        if _presynth["job"] == my_job:
+            _presynth["running"] = False
+            _presynth["finished"] = time.time()
+            log.info("预合成结束：%s —— 完成 %d / 失败 %d / 共 %d",
+                     _presynth["label"], done, fail, len(jobs))
+
+
+def _start_presynth(jobs: list, args: dict) -> None:
+    with _presynth_lock:
+        _presynth["job"] += 1               # 号数一变，旧 worker 自动作废
+        _presynth.update(running=True, total=len(jobs),
+                         done=0, fail=0, started=time.time(),
+                         finished=0.0, error="",
+                         book=args.get("book") or "",
+                         label=args.get("label") or "全文")
+        my_job = _presynth["job"]
+    threading.Thread(target=_presynth_worker, args=(my_job, jobs, args),
+                     daemon=True, name="presynth").start()
+
+
+@app.post("/api/presynth")
+def api_presynth_start():
+    body = request.get_json(silent=True) or {}
+    items = body.get("items") or []
+    jobs = []
+    for it in items[:PRESYNTH_MAX_SEGS]:
+        text = (it.get("text") or "").strip() if isinstance(it, dict) else str(it).strip()
+        if text:
+            jobs.append((text, (it.get("rate") if isinstance(it, dict) else 0) or 0))
+    if not jobs:
+        return jsonify({"ok": False, "error": "没有可预合成的句子"}), 400
+    args = {
+        "voice": body.get("voice") or CFG["default_voice"],
+        "rate": body.get("rate") or 0,
+        "pitch": body.get("pitch") or "+0Hz",
+        "volume": body.get("volume") or "+0%",
+        "provider": (body.get("provider") or CFG.get("tts_provider") or "edge").lower(),
+        "model": body.get("model") or "",
+        "book": body.get("book") or "",
+        "label": body.get("label") or "全文",
+    }
+    if args["provider"] not in TTS.PROVIDERS:
+        return jsonify({"ok": False, "error": f"不认识的语音引擎：{args['provider']}"}), 400
+    _start_presynth(jobs, args)
+    return jsonify({"ok": True, "total": len(jobs)})
+
+
+@app.get("/api/presynth")
+def api_presynth_status():
+    with _presynth_lock:
+        st = {k: _presynth[k] for k in
+              ("running", "total", "done", "fail", "book", "label",
+               "started", "finished", "error")}
+    return jsonify({"ok": True, **st})
+
+
+@app.post("/api/presynth/cancel")
+def api_presynth_cancel():
+    with _presynth_lock:
+        if _presynth["running"]:
+            _presynth["job"] += 1           # 旧 worker 见号数变了自动退出
+            _presynth["running"] = False
+            _presynth["finished"] = time.time()
+            _presynth["error"] = "已取消"
+    return jsonify({"ok": True})
+
+
 # ---------------------------------------------------------------- 语音引擎
 
 # 本地 TTS 的探测结果缓存 30 秒 —— 页面每次加载都会问，别每次都去戳端口
@@ -1570,6 +1707,7 @@ def api_tts():
     model = body.get("model") or ""
     if provider not in TTS.PROVIDERS:
         return jsonify({"ok": False, "error": f"不认识的语音引擎：{provider}"}), 400
+    _play_touch["ts"] = time.time()     # 前台要音频了：后台预合成先让路
     try:
         path, mime = synth(text, voice, rate, pitch, volume, provider, model)
     except TTS.TTSConfigError as e:

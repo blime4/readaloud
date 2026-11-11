@@ -372,6 +372,7 @@
   <span class="chip gray btnish" id="chipShelf" title="书架：导入过的书都在这儿，进度跟着书走">📚 书架</span>
   <span class="chip gray btnish" id="chipTheme" title="切换深色/浅色（朗读常在夜里用）">🌙 夜间</span>
   <span class="chip gray" id="chipMode" title="当前页面从哪里来 / 引擎在哪里">—</span>
+  <span class="chip ok btnish" id="chipPre" hidden title="后台正在把全文提前合成进缓存，听到的每句都会秒出；点一下可停止">预合成…</span>
 </header>
 
 <div class="connect" id="connect">
@@ -1304,6 +1305,72 @@ function preload(i) {
 }
 function warmup(from, n) { for (let k = 0; k < n; k++) preload(from + k); }
 
+/* ---------- 后台预合成全文 ----------
+   本地大模型 RTF≈1，听一句合成一句是贴着极限走的。开书后让引擎在
+   后台把整本提前合成进缓存，播放时句句秒出。缓存键里带着音色/语速，
+   所以参数一变旧音频全作废 —— 这里自动用新参数重开预合成。 */
+const PRE = { on: false, key: '', timer: null };
+
+function presynthKey() {
+  const b = S.base || baseStyle();
+  return JSON.stringify([b.voice, b.rate, b.pitch, b.volume,
+                         b.provider, b.model, S.book && S.book.id]);
+}
+
+async function startPresynth() {
+  if (!ONLINE || !S.items.length) return;
+  const key = presynthKey();
+  if (PRE.on && PRE.key === key) return;    // 同一本书同一套参数，别重开
+  PRE.key = key;
+  const b = S.base || baseStyle();
+  try {
+    const r = await fetch(API + '/api/presynth', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        items: S.items.map(it => ({ text: it.text, rate: it.rate || 0 })),
+        voice: b.voice, rate: b.rate, pitch: sgn(b.pitch, 'Hz'),
+        volume: sgn(b.volume, '%'), provider: b.provider, model: b.model || '',
+        book: (S.book && S.book.id) || '',
+        label: (S.book && S.book.title) || '当前文稿',
+      }),
+    });
+    const d = await r.json();
+    if (d.ok && d.total > 1) {
+      PRE.on = true;
+      pollPresynth();
+      toast(`后台预合成已开始：${d.total} 句，边听边备，听到的都秒出`, 3600);
+    }
+  } catch (e) { /* 预合成是锦上添花，失败不打扰朗读 */ }
+}
+
+async function pollPresynth() {
+  clearTimeout(PRE.timer);
+  const el = $('#chipPre');
+  let running = false;
+  try {
+    const d = await (await fetch(API + '/api/presynth')).json();
+    if (d && d.ok && d.running) {
+      running = true;
+      PRE.on = true;
+      // 听着听着换了音色/语速：旧缓存作废，自动用新参数重开
+      if (PRE.key && presynthKey() !== PRE.key) {
+        fetch(API + '/api/presynth/cancel', { method: 'POST' }).catch(() => {});
+        setTimeout(() => { PRE.key = ''; startPresynth(); }, 400);
+        return;
+      }
+      el.hidden = false;
+      const pct = d.total ? Math.round(d.done / d.total * 100) : 0;
+      el.textContent = `预合成 ${d.done}/${d.total}（${pct}%）`;
+    }
+  } catch (e) { /* 引擎没这个接口（旧版本），静默 */ }
+  if (!running) {
+    PRE.on = false;
+    el.hidden = true;
+  } else {
+    PRE.timer = setTimeout(pollPresynth, 2000);
+  }
+}
+
 /* ---------- 断点续读 ----------
    长文听到一半难免要关页面/刷新，以前回来只能从头再听一遍。
    这里把"下一句该读第几句"连同文本指纹一起记着，内容没变就自动定位回去。 */
@@ -1532,6 +1599,7 @@ async function play(requestedMode) {
     warmup(start, 3);
     S.playing = true;
     playAt(start, true);
+    if (S.items.length >= 15) startPresynth();   // 长文开后台预合成
   } catch (e) {
     toast('出错了：' + e.message, 3600);
   } finally { S.busy = false; overlay(false); }
@@ -2416,6 +2484,12 @@ if (isLocalHost() && typeof createMiniCPMVoice === 'function') {
 
 /* ---------- 书架 / 手机端 / 语音引擎 的交互 ---------- */
 $('#chipShelf').onclick = () => shelfOpen(true);
+$('#chipPre').onclick = async () => {
+  try { await fetch(API + '/api/presynth/cancel', { method: 'POST' }); } catch (e) {}
+  PRE.on = false; PRE.key = '';
+  $('#chipPre').hidden = true;
+  toast('已停止后台预合成');
+};
 $('#shelfClose').onclick = () => shelfOpen(false);
 $('#shelfMask').onclick = () => shelfOpen(false);
 $('#shelfImport').onclick = () => $('#fileIn').click();
@@ -2507,6 +2581,7 @@ async function boot() {
   if (isLocalHost() || perm.state === 'granted') {
     const ok = await connect();
     if (!ok) await showOffline();
+    else pollPresynth();      // 引擎可能还留着上一次页面的预合成任务，接管进度
   } else {
     await showOffline();
   }

@@ -38,6 +38,19 @@
   走不通 —— 但同一台机器上跑一个本地 TTS 服务是同样的思路，这里就是为它留的口子。
   本机地址永远直连，系统代理（Clash 之类）不会掺和进来。
 
+### 后台预合成全文（1.7.0）
+
+本地大模型 RTF≈1，听一句合成一句是贴着极限走的，逐句预取只有 3 句的缓冲。
+v1.7.0 起打开 15 句以上的稿子会自动开**后台预合成**：引擎用后台线程把全文
+按播放参数逐句合成进缓存，播放时句句秒出（实测缓存命中 0.00s，未命中 1.5s+）。
+
+- 顶栏会出现「预合成 N/M」进度 chip，点一下即停。
+- 音色/语速/引擎一变，缓存键就变了 —— 前端自动用新参数重开预合成。
+- 你正在听的那句永远优先：前台合成会让后台暂停 5 秒再继续，不抢 GPU。
+- 缓存上限在预合成期间自动抬到「句数 + 100」，整本书不会边合成边把自己挤掉。
+- 接口：`POST /api/presynth`（启动）、`GET /api/presynth`（进度）、
+  `POST /api/presynth/cancel`（停止）。
+
 ### 自带一份 Qwen3-TTS（可选）
 
 `install-tts.bat` → `start-tts.bat`，服务在 `http://127.0.0.1:8890`，
@@ -270,6 +283,7 @@ AI 功能额外需要 [Ollama](https://ollama.com)；没有也能正常朗读，
 | `GET\|POST /api/login` | 登录态管理。GET 返回各站配置状态与本机可借用的浏览器；POST 按 `action` 分派：`import`（从浏览器整套搬 cookie，可带 `warmup` 预热）/ `paste`（手工粘贴，支持纯 Cookie 头、Network 整行、Copy as cURL 三种粘法）/ `clear` / `open`（开一个带调试端口的登录窗口）/ `probe` / `test`（用当前登录态试抓一个链接） |
 | `POST /api/ai` | 总结 / 润色（`stream=true` 可流式，结果自动缓存） |
 | `GET /api/tts?text=&voice=&rate=&pitch=&volume=` | 直接返回 MP3 |
+| `POST /api/presynth` · `GET` · `POST /api/presynth/cancel` | 后台预合成全文：启动（`items` + 播放参数）/ 查进度 / 停止。缓存键与 `/api/tts` 完全同源，预合成过即秒回 |
 | `GET /api/recommend` | 按内容推荐音色 |
 | `GET\|POST /api/settings` | 记住 AI 偏好（会注入提示词）与朗读选项 |
 | `POST /api/broadcast` · `GET /api/events` | 剪贴板/热键 → 已打开的播放页（SSE） |
