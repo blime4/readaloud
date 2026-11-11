@@ -3369,8 +3369,16 @@ $('#btnTtsBench').onclick = async () => {
     else if (d.rtf < 1.4) line += ' —— 略慢于播放，起播会先备两句、本机会多备到九句，之后基本不断；'
       + '把朗读语速调到 +10% 左右就跟得上了，显卡开「优先最高性能」还能再快一截。';
     else line += ' —— 比播放慢不少，建议先让它后台备一会儿；赶时间就切回「微软语音」。';
+    // 显卡频率是这类"慢得离谱"的真凶：待机/熄屏时只有 500MHz，比满速慢一倍多
+    const g = d.gpu || {};
+    const clk = g.clk_avg || g.clk;
+    if (clk) {
+      line += `　显卡平均 ${clk}/${g.clk_max}MHz`;
+      if (g.power_avg) line += ` · ${g.power_avg}W/${g.power_max}W`;
+    }
+    if (d.tip) line += '。' + d.tip;
     if (msg) msg.textContent = line;
-    toast(line, 8000);
+    toast(line, 10000);
   } catch (e) {
     if (msg) msg.textContent = '测速失败：' + e.message;
   } finally {

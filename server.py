@@ -109,13 +109,17 @@ DEFAULT_CONFIG = {
     "tts_local_python": "",         # 留空自动探测（见 _tts_python）
     "tts_local_script": "",         # 留空按端口猜：8891=tts_cosy_server，8890=tts_qwen_server
     "tts_local_args": "",           # 额外启动参数，例如 "--fp16"（半精度，显存吃紧时可试）
+    "tts_local_env": "",            # 额外环境变量，写法 "K=V;K2=V2"（见 start_local_tts）
+    # 播放时按住电源请求，别让系统进待机：待机状态下显卡只有 500MHz，
+    # 合成时间直接翻倍（实测 RTF 1.07 → 2.2）。见 _awake_hold。
+    "keep_display_awake": True,
     # 引擎自身：静默升级（git pull + 空闲时自动重启）
     "auto_update": True,
     # 兼容监听端口：老书签 127.0.0.1:8756 也指向本引擎，避免又打开一份旧副本
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.10.1"
+ENGINE_VERSION = "1.10.2"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -1521,6 +1525,74 @@ PRESYNTH_MAX_SEGS = 6000        # 一本书的合理上限，防误传整站文�
 PRESYNTH_IDLE = 25.0            # 前台安静这么久，预合成才动手（短暂停不打扰）
 
 
+# --------------------------------------------------------------------------
+# 播放期间别让系统睡
+#
+# 这条是实测出来的大头：机器一进入低功耗待机（屏幕熄灭 / Modern Standby），
+# 显卡就会被压在 400～800MHz、功耗 28W（满负载能到 2775MHz / 165W），
+# 同一句话的合成时间直接从 9.9 秒变成 22 秒，RTF 1.07 → 2.2 —— 长文必然卡。
+#
+# 而「躺着听书」恰恰是最常见的使用方式，听众根本不看屏幕。所以只要在播
+# （前端 POST /api/presynth/hold {on:true}），就在这里替系统按住一个电源请求：
+# SetThreadExecutionState 是**按线程**生效的，必须由一条活着的线程持续声明，
+# 线程一退就失效，所以专门起一条常驻线程。恢复用 ES_CONTINUOUS 收尾。
+# --------------------------------------------------------------------------
+_awake = {"on": False, "thread": None, "lock": threading.Lock(), "last": 0.0}
+AWAKE_IDLE = 900.0     # 一直没合成请求就认为人走了，自动松开（页面被关掉的情况）
+
+
+def _awake_touch() -> None:
+    """记一笔"还在用"。页面关掉后前端不会再发 hold，靠这个超时兜底。"""
+    _awake["last"] = time.time()
+
+
+def _awake_loop() -> None:
+    try:
+        kernel32 = ctypes.windll.kernel32
+    except Exception:                                        # noqa: BLE001
+        return
+    ES_CONTINUOUS, ES_SYSTEM_REQUIRED, ES_DISPLAY_REQUIRED = 0x80000000, 0x1, 0x2
+    flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+    if CFG.get("keep_display_awake", True):
+        flags |= ES_DISPLAY_REQUIRED        # 屏幕也留着，GPU 才不会掉到最低档
+    try:
+        while _awake["on"]:
+            kernel32.SetThreadExecutionState(flags)
+            for _ in range(30):             # 30 秒补一次，旗标有超时
+                if not _awake["on"]:
+                    break
+                time.sleep(1)
+            # 一直没人来合成，多半是页面被关掉了，自己松开，别让机器整夜不睡
+            if _awake["last"] and time.time() - _awake["last"] > AWAKE_IDLE:
+                log.info("已 %.0f 分钟没有合成请求，自动松开电源请求", AWAKE_IDLE / 60)
+                _awake["on"] = False
+                break
+    finally:
+        try:
+            kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+        except Exception:                                    # noqa: BLE001
+            pass
+
+
+def _awake_hold(on: bool) -> None:
+    """播放时按住电源请求，停下就放开。重复调用无副作用。"""
+    if os.name != "nt":
+        return
+    with _awake["lock"]:
+        if on == _awake["on"]:
+            return
+        _awake["on"] = on
+        if on:
+            if not (_awake["thread"] and _awake["thread"].is_alive()):
+                _awake["thread"] = threading.Thread(
+                    target=_awake_loop, daemon=True, name="keep-awake")
+                _awake["thread"].start()
+            _awake_touch()
+            log.info("播放中：先不让系统睡（否则显卡掉到 500MHz，合成慢一倍）")
+        else:
+            log.info("停止播放：恢复系统的睡眠策略")
+
+
 def _cache_limit_now() -> int:
     """当前这本书整本的音频都留着。
 
@@ -1711,6 +1783,7 @@ def api_presynth_hold():
     with _synth_gate:
         _presynth["hold"] = on
         _synth_gate.notify_all()
+    _awake_hold(on)
     if new_at is not None:
         _presynth_seek(new_at)
     with _presynth_lock:
@@ -2136,6 +2209,13 @@ def start_local_tts() -> dict:
     py = _tts_python()
     env = dict(os.environ)
     env.setdefault("PYTHONIOENCODING", "utf-8")
+    # 额外环境变量，写法 "K=V;K2=V2"。留给 TTS 服务自己的开关用，
+    # 例如 COSY_FLOW_STEPS=6（余弦流匹配积分步数）、COSY_TTS_CONCURRENCY=2。
+    for pair in str(CFG.get("tts_local_env") or "").replace(",", ";").split(";"):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            if k.strip():
+                env[k.strip()] = v.strip()
     flags = (0x00000008 | 0x00000200 | 0x08000000) if os.name == "nt" else 0
     try:
         out = open(BASE / "tts.log", "ab")
@@ -2334,6 +2414,84 @@ def import_too_large(_error):
     return jsonify({"ok": False, "error": "文件不能超过 80 MB。"}), 413
 
 
+_gpu_clk = {"ts": 0.0, "val": {}}
+
+
+def _gpu_clocks() -> dict:
+    """当前 SM 频率与功耗（MHz / W）。拿不到就返回空，别让测速跟着失败。
+
+    为什么值得单独报：同样的代码，显卡跑到 2600MHz 时一句 8 秒音频要 8.3 秒，
+    掉到 500MHz 时要 22 秒 —— 差一倍多。而掉频最常见的诱因根本不是温度，
+    是系统进待机/屏幕熄灭（见 _awake_hold）。把频率摆到界面上，用户一眼
+    就能分辨"是机器在睡觉"还是"引擎有问题"。
+    """
+    now = time.time()
+    if _gpu_clk["val"] and now - _gpu_clk["ts"] < 5:
+        return dict(_gpu_clk["val"])
+    info = {}
+    try:
+        flags = 0x08000000 if os.name == "nt" else 0
+        done = subprocess.run(
+            ["nvidia-smi", "--query-gpu=clocks.sm,clocks.max.sm,power.draw,power.limit",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=3, creationflags=flags)
+        first = (done.stdout or "").strip().splitlines()
+        parts = [p.strip() for p in first[0].split(",")] if first else []
+        if len(parts) >= 4:
+            info = {"clk": int(float(parts[0])), "clk_max": int(float(parts[1])),
+                    "power": round(float(parts[2]), 1),
+                    "power_max": round(float(parts[3]), 1)}
+    except Exception:                                        # noqa: BLE001
+        info = {}
+    _gpu_clk.update(ts=now, val=info)
+    return dict(info)
+
+
+def _gpu_watch_start():
+    """开一个每秒采样的 nvidia-smi 观察进程。
+
+    为什么不能只在测速结束后查一次：显卡是"干完活才升频"的，结束后那一瞬
+    经常正好是 2595MHz 的尖峰，而整个合成过程其实压在 500MHz —— 只看一眼
+    会把结论完全带反。所以要边合成边采样，取平均。
+    """
+    try:
+        flags = 0x08000000 if os.name == "nt" else 0
+        return subprocess.Popen(
+            ["nvidia-smi", "--query-gpu=clocks.sm,power.draw",
+             "--format=csv,noheader,nounits", "-l", "1"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            creationflags=flags)
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+def _gpu_watch_stop(proc, base: dict) -> dict:
+    """收掉观察进程，把这段时间的采样平均出来。"""
+    info = dict(base or {})
+    if proc is None:
+        return info
+    try:
+        proc.terminate()
+        out = (proc.communicate(timeout=4)[0] or "")
+    except Exception:                                        # noqa: BLE001
+        return info
+    clks, pws = [], []
+    for line in out.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 2:
+            try:
+                clks.append(float(parts[0]))
+                pws.append(float(parts[1]))
+            except ValueError:
+                continue
+    if clks:
+        info["clk_avg"] = int(round(sum(clks) / len(clks)))
+        info["clk_peak"] = int(max(clks))
+        info["power_avg"] = round(sum(pws) / len(pws), 1)
+        info["samples"] = len(clks)
+    return info
+
+
 def _media_seconds(path: Path, mime: str) -> float:
     """估一段音频有多长（秒）。测速要拿它当分母，所以别依赖第三方库。
 
@@ -2382,6 +2540,8 @@ def api_tts_bench():
     text = "测一句速度，看看这台机器合成一秒语音到底要花多久。" + f"（{int(time.time())}）"
     voice = ((CFG.get("tts_local_voice") or CFG["default_voice"])
              if provider == "local" else CFG["default_voice"])
+    base_gpu = _gpu_clocks() if provider == "local" else {}
+    watch = _gpu_watch_start() if provider == "local" else None
     started = time.time()
     with _synth_gate:
         _fg_busy["n"] += 1
@@ -2391,12 +2551,14 @@ def api_tts_bench():
         path, mime = synth(text, voice, CFG["rate"], CFG["pitch"], CFG["volume"],
                            provider, CFG.get("tts_local_model") or "")
     except Exception as e:                                   # noqa: BLE001
+        _gpu_watch_stop(watch, base_gpu)
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 502
     finally:
         with _synth_gate:
             _fg_busy["n"] = max(0, _fg_busy["n"] - 1)
             _play_touch["ts"] = time.time()
             _synth_gate.notify_all()
+        _awake_touch()      # 还在合成 = 人还在听，别让保活线程以为人走了
     took = time.time() - started
     audio = _media_seconds(path, mime)
     rtf = round(took / audio, 2) if audio > 0 else 0.0
@@ -2410,9 +2572,20 @@ def api_tts_bench():
         verdict = "偏慢"
     else:
         verdict = "跟不上"
+    gpu = _gpu_watch_stop(watch, base_gpu)
+    tip = ""
+    clk, cap = gpu.get("clk_avg"), gpu.get("clk_max")
+    if clk and cap and rtf >= 1.3:
+        if clk < cap * 0.6:
+            tip = (f"合成期间显卡平均只有 {clk}MHz（上限 {cap}MHz，峰 {gpu.get('clk_peak')}MHz），"
+                   "系统多半在待机/熄屏。播放时会自动按住电源请求，但已经睡下去就拉不回来——"
+                   "亮屏再测一次会快一倍多；想彻底解决跑一次 lock-gpu-clock.bat（管理员）。")
+        else:
+            tip = (f"显卡是满速跑着的（平均 {clk}MHz），慢在模型本身——"
+                   "把朗读语速调到 +10% 就能让合成追上播放。")
     return jsonify({"ok": True, "provider": provider, "voice": voice,
                     "seconds": round(took, 2), "audio": round(audio, 2),
-                    "rtf": rtf, "verdict": verdict})
+                    "rtf": rtf, "verdict": verdict, "gpu": gpu, "tip": tip})
 
 
 @app.route("/api/tts", methods=["GET", "POST"])
@@ -2456,6 +2629,7 @@ def api_tts():
             _fg_busy["n"] = max(0, _fg_busy["n"] - 1)
             _play_touch["ts"] = time.time()
             _synth_gate.notify_all()
+        _awake_touch()      # 还在合成 = 人还在听，别让保活线程以为人走了
     resp = send_from_directory(TTS_CACHE, path.name, mimetype=mime)
     if body.get("download"):
         resp.headers["Content-Disposition"] = f'attachment; filename="readaloud.{path.suffix[1:]}"'

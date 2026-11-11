@@ -40,6 +40,8 @@
   "tts_local_python": "",
   "tts_local_script": "",
   "tts_local_args": "--fp16 --preload",
+  "tts_local_env": "",
+  "keep_display_awake": true,
   "auto_update": true,
   "extra_ports": [
     8756
