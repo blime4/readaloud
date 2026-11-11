@@ -35,5 +35,12 @@
   "tts_local_voice": "默认女声",
   "tts_local_key": "",
   "tts_local_format": "mp3",
+  "tts_local_autostart": true,
+  "tts_local_python": "",
+  "tts_local_script": "",
+  "auto_update": true,
+  "extra_ports": [
+    8756
+  ],
   "lan_token": "9a8bd038"
 }

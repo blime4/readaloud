@@ -98,13 +98,15 @@ v1.7.0 起打开 15 句以上的稿子会自动开**后台预合成**：引擎�
 
 ### 自带一份 CosyVoice2（推荐，音质明显好于 edge）
 
-**一键启动（1.8.0）**：面板 → 语音引擎选「本机大模型 TTS」→ 点「▶ 一键启动本机 TTS」，
-或者直接点「CosyVoice2 预设」。不用管环境、脚本、端口 —— 引擎自己按脚本挑解释器
-（CosyVoice 用 conda env `cosyvoice`，Qwen 用 `.tts-venv`），拉起服务，然后轮询到
-它真能出声为止。切引擎时如果服务没起来，也会自动拉起。
+**一键启动（1.8.0，1.8.1 起连配置都不用填）**：面板 → 语音引擎选「本机大模型 TTS」，
+它就会自己把服务拉起来，轮询到真能出声，然后把**实测的地址、模型、音色写回 `config.json`**
+并填进面板 —— 8891 是什么端口、模型名该怎么拼，都不需要你知道。
+手动点也是同一个按钮：「▶ 一键启动本机 TTS」。
+
+等超过 20 秒还没起来，面板会直接摊开 `tts.log` 的尾巴（缺包、显存不够、解释器选错
+一眼就能看见），不用再自己去翻日志文件。
 
 手动启动还是老样子：`start-cosy.bat`，服务在 `http://127.0.0.1:8891`。
-地址、模型、音色都已经写进 `config.json`，面板里把引擎切到「本机大模型」就能听。
 
 - 自定义路径：`tts_local_python`（解释器）、`tts_local_script`（启动脚本），
   留空就自动探测；`tts_local_autostart` 设 false 可关掉自动拉起。
@@ -308,6 +310,10 @@ AI 功能额外需要 [Ollama](https://ollama.com)；没有也能正常朗读，
 | `POST /api/books/<id>/progress` | 写进度 `{next,total}`（允许倒退），页面关闭时用 sendBeacon 兜底 |
 | `DELETE /api/books/<id>` | 从书架删掉一本书（正文一起删） |
 | `GET\|POST /api/tts/providers` | 语音引擎：查询/切换 `edge` 与 `local`，POST 带 `probe:true` 会探测本地 TTS 并返回模型与音色表 |
+| `POST /api/tts/local/start` | 一键拉起本机大模型 TTS：按脚本挑解释器（cosy→conda env，qwen→`.tts-venv`），状态机立即返回，就绪看下面的 status |
+| `GET /api/tts/local/status` | 本地 TTS 状态：`up`/`probe`（引擎名、模型、音色）/`starting`/`python`/`script`，以及 `config`（已自动写回的地址与音色）和 `log`（没起来时的 `tts.log` 尾巴） |
+| `GET /api/version` · `POST /api/restart` | 引擎版本与能力清单 / 原地热重启（进程号不变，先确认新代码能编译再关旧监听） |
+| `GET /api/update` · `POST /api/update` | 查有没有新版本（`behind` 落后几个提交）/ 升级（`git pull --ff-only` + 重启；工作区脏时拒绝，回 409） |
 | `GET\|POST /api/lan` | 手机访问：查询局域网地址与访问码；POST `{host:"0.0.0.0"}` 开启（需重启引擎生效） |
 | `POST /api/agent` | 让会调工具的小模型主导取稿。body：`{url, clean, model, retry}`。先走零模型开销的规则抓取（通常 <1 秒）；抓得够干净就直接返回，彻底抓不到就直接报错（`retry:true` 才让模型硬试）；勾 `clean` 时直接深度清理。返回 `trace` 记录模型每一步动作 |
 | `GET\|POST /api/login` | 登录态管理。GET 返回各站配置状态与本机可借用的浏览器；POST 按 `action` 分派：`import`（从浏览器整套搬 cookie，可带 `warmup` 预热）/ `paste`（手工粘贴，支持纯 Cookie 头、Network 整行、Copy as cURL 三种粘法）/ `clear` / `open`（开一个带调试端口的登录窗口）/ `probe` / `test`（用当前登录态试抓一个链接） |
@@ -442,6 +448,10 @@ COM 提权接口 —— 普通进程做不到，所以只能走 CDP 或手工粘
 
 `config.json` 里值得动的几项：`max_len`（单句长度上限，默认 62）、`normalize`（读音规整开关）、
 `auto_voice`（按内容推荐音色）、`long_doc_chars`（超过就分块总结）、`prefs.style`（AI 偏好）。
+
+**兼容端口**（`extra_ports`，默认 `[8756]`）：同一个引擎顺便监听几个老书签地址，
+免得那个端口上躺着一份几周前的旧副本 —— 现象是"页面是新的、点导入没反应"。
+热重启时这些兼容端口会被一起收掉再重绑（1.8.2），不会留下"8759 新版 / 8756 旧版"。
 
 ## 目录结构
 

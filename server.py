@@ -30,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 import requests
@@ -91,7 +92,8 @@ DEFAULT_CONFIG = {
     "host": "127.0.0.1",
     # 语音引擎：edge=微软神经语音（默认）；local=本机 OpenAI 兼容 TTS
     "tts_provider": "edge",
-    "tts_local_url": "http://127.0.0.1:8880",
+    # 默认指向 CosyVoice2 的端口；用户不用知道这个数字，连通后引擎会自己写回
+    "tts_local_url": "http://127.0.0.1:8891",
     "tts_local_model": "",
     "tts_local_voice": "",
     "tts_local_key": "",
@@ -106,7 +108,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.8.0"
+ENGINE_VERSION = "1.8.2"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -125,6 +127,9 @@ FEATURES = [
     "bookshelf",            # /api/books：书留在本机，电脑和手机共用进度
     "tts-provider",         # /api/tts 支持 provider=edge|local（本机 OpenAI 兼容 TTS）
     "lan-access",           # /api/lan：手机通过局域网访问本机引擎
+    "presynth",             # /api/presynth：整本后台预合成，播放句句命中缓存
+    "tts-autostart",        # /api/tts/local：一键拉起本机大模型 TTS 并自动写回配置
+    "engine-upgrade",       # /api/restart + /api/update：原地热重启、git pull 自升级
 ]
 
 # 页面文件：优先用 docs/（= GitHub Pages 站点目录），本地与线上共用同一份，
@@ -1599,6 +1604,86 @@ def _active_clients() -> int:
 
 _srv_ref = {"srv": None, "bind": "", "port": 0}
 _STOPPED = {"v": False}
+_extra_srvs = []          # 兼容端口（8756 等）的服务器，热重启时要一起收掉
+
+
+def _stop_extra_servers() -> None:
+    """热重启前必须关掉兼容端口。
+
+    否则旧模块里那个 serve_forever 线程还抱着旧 app 对象继续跑，
+    8759 已经换成新代码、8756 还是上一版 —— 老书签打开就是"新页面旧接口"，
+    正是当初"导入点了没反应"的根。"""
+    while _extra_srvs:
+        s = _extra_srvs.pop()
+        try:
+            s.shutdown()
+            s.server_close()
+        except Exception as e:
+            log.warning("关停兼容端口出错（继续）: %s", e)
+
+
+def _extra_port_list() -> list:
+    out = []
+    for x in (CFG.get("extra_ports") or []):
+        try:
+            out.append(int(x))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _reclaim_extra_ports() -> None:
+    """收掉"上一次热重启"留下的兼容端口监听。
+
+    以前 8756 上会越叠越多：Windows 的 SO_REUSEADDR 允许同一端口被重复绑定，
+    每次热重启新模块都"绑成功"，但旧模块的线程还抱着旧 app 在那儿收请求，
+    于是老书签打开时灵时不灵，版本还一阵一阵地旧 —— 用户看到的正是
+    "手机导入完全没反应"那一类怪事。
+
+    同一个进程里线程栈是可查的：顺着 serve_forever 的栈把 BaseServer 找出来
+    逐个关掉（可能不止一个）。找不到就说明端口被别的程序占着，什么也不做。
+    """
+    import sys
+    import threading
+    from socketserver import BaseServer
+
+    want = set(_extra_port_list()) - {int(_srv_ref.get("port") or 0)}
+    if not want:
+        return
+    frames = sys._current_frames()
+    me = threading.current_thread().ident
+    killed = 0
+    for t in threading.enumerate():
+        if t.ident is None or t.ident == me or not t.is_alive():
+            continue
+        frame = frames.get(t.ident)
+        depth = 0
+        found = None
+        while frame is not None and depth < 16 and found is None:
+            for key in ("srv", "self", "server"):
+                cand = frame.f_locals.get(key)
+                if not isinstance(cand, BaseServer):
+                    continue
+                try:
+                    if int(cand.server_address[1]) in want:
+                        found = cand
+                except Exception:
+                    pass
+                break
+            frame = frame.f_back
+            depth += 1
+        if found is None:
+            continue
+        try:
+            found.shutdown()
+            found.server_close()
+            killed += 1
+        except Exception as e:
+            log.warning("收掉兼容端口失败（继续）: %s", e)
+    if killed:
+        log.info("收掉 %d 个上次热重启遗留的兼容端口监听", killed)
+        _rlog(f"收掉 {killed} 个遗留的兼容端口监听")
+        time.sleep(0.3)   # 给 socket 一点时间真正关闭
 
 
 def _can_load_new_code() -> tuple:
@@ -1627,10 +1712,26 @@ def _restart_engine(delay: float = 0.4) -> bool:
     return True
 
 
+def _rlog(msg: str) -> None:
+    """热重启的日志单独落一份文件。
+
+    重启后原来的 stdout 可能已经跟着旧窗口/终端走了，出问题时"为什么重启没生效"
+    在控制台里根本看不到。restart.log 就是给这个场景留的。"""
+    try:
+        p = BASE / "restart.log"
+        if p.exists() and p.stat().st_size > 256 * 1024:
+            p.write_text("", encoding="utf-8")
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [pid {os.getpid()}] {msg}\n")
+    except Exception:
+        pass
+
+
 def _soft_restart() -> None:
     global _STOPPED
     srv = _srv_ref.get("srv")
     log.info("开始热重启（pid %s）", os.getpid())
+    _rlog(f"开始热重启，旧监听 {_srv_ref.get('bind')}:{_srv_ref.get('port')}")
     _STOPPED["v"] = True          # 旧副本的后台线程（自动升级）别再起作用
     time.sleep(0.2)               # 让当前请求先把响应发出去
     try:
@@ -1640,21 +1741,27 @@ def _soft_restart() -> None:
     except Exception as e:
         log.warning("关停旧监听时出错（继续）: %s", e)
     _srv_ref["srv"] = None
+    _stop_extra_servers()
     try:
         import runpy
+        _rlog("旧监听已关，开始跑新代码")
         runpy.run_path(str(BASE / "server.py"), run_name="__main__")
+        _rlog("新代码已接管")
     except SystemExit:
-        pass
+        _rlog("新代码 SystemExit")
     except Exception:
         log.exception("热重启失败")
+        _rlog("热重启失败：\n" + traceback.format_exc())
         try:                       # 兜底：至少把当前代码重新服务起来
             from werkzeug.serving import make_server
             srv2 = make_server(_srv_ref["bind"] or "127.0.0.1",
                                int(_srv_ref["port"] or CFG["port"]), app, threaded=True)
             _srv_ref["srv"] = srv2
             threading.Thread(target=srv2.serve_forever, daemon=True).start()
+            _rlog("已用旧代码兜底重启")
         except Exception as e:
             log.error("兜底重启也失败，请手动启动引擎: %s", e)
+            _rlog(f"兜底重启失败：{e}")
 
 
 def _git(*args, timeout: float = 25) -> tuple:
@@ -1857,19 +1964,73 @@ def _tts_maybe_autostart() -> dict | None:
     return start_local_tts()
 
 
+def _tts_log_tail(lines: int = 12) -> str:
+    """启动失败时把 tts.log 尾巴给前端 —— 少一行 ModuleNotFoundError，
+    用户就得多花半小时猜"为什么点了没反应"。"""
+    try:
+        text = (BASE / "tts.log").read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+    rows = [r for r in text.strip().splitlines() if r.strip()]
+    return "\n".join(rows[-lines:])[-1500:]
+
+
+def _tts_config_snapshot() -> dict:
+    return {"url": CFG.get("tts_local_url") or "",
+            "model": CFG.get("tts_local_model") or "",
+            "voice": CFG.get("tts_local_voice") or ""}
+
+
+def _adopt_local_tts(report: dict | None = None) -> dict:
+    """服务一旦通了，就把真实地址/模型/音色写回 config。
+
+    用户只需要点"一键启动"，不该再去问自己 8891 是什么、模型名该填哪个。
+    只在字段为空或与实测不符时覆盖，不抢用户手动填的值。"""
+    r = report if report is not None else _tts_local_report(force=True)
+    if not r or not r.get("ok"):
+        return {"adopted": False, "config": _tts_config_snapshot()}
+    changed = {}
+    base = (r.get("base") or "").rstrip("/")
+    if base and (CFG.get("tts_local_url") or "").rstrip("/") != base:
+        CFG["tts_local_url"] = base
+        changed["tts_local_url"] = base
+    models = [m for m in (r.get("models") or []) if m]
+    if not CFG.get("tts_local_model") and models:
+        CFG["tts_local_model"] = models[0]
+        changed["tts_local_model"] = models[0]
+    voices = [v for v in (r.get("voices") or []) if v]
+    if not CFG.get("tts_local_voice") and voices:
+        CFG["tts_local_voice"] = voices[0]
+        changed["tts_local_voice"] = voices[0]
+    if changed:
+        save_config(CFG)
+        log.info("本机 TTS 已接通，自动写回配置：%s", changed)
+    return {"adopted": bool(changed), "changed": changed,
+            "config": _tts_config_snapshot()}
+
+
 @app.post("/api/tts/local/start")
 def api_tts_local_start():
-    return jsonify(start_local_tts())
+    result = start_local_tts()
+    if result.get("already"):
+        # 已经在跑：顺手把地址/模型/音色对齐到实际端口
+        result.update(_adopt_local_tts())
+    return jsonify(result)
 
 
 @app.get("/api/tts/local/status")
 def api_tts_local_status():
     report = _tts_local_report(force=True)
     proc = _tts_proc.get("popen")
-    return jsonify({"ok": True, "up": bool(report.get("ok")), "probe": report,
+    up = bool(report.get("ok"))
+    adopt = _adopt_local_tts(report) if up else {"adopted": False,
+                                                 "config": _tts_config_snapshot()}
+    return jsonify({"ok": True, "up": up, "probe": report,
                     "starting": bool(proc and proc.poll() is None),
                     "python": _tts_python(), "script": _tts_script().name,
-                    "port": _tts_port()})
+                    "port": _tts_port(), "adopted": adopt.get("adopted", False),
+                    "config": adopt.get("config", {}),
+                    "log": "" if up else _tts_log_tail()})
 
 
 @app.get("/api/tts/providers")
@@ -2071,6 +2232,8 @@ if __name__ == "__main__":
     # 兼容端口：老书签（默认 8756）也指向这同一个引擎。
     # 以前这些端口上躺着几周前启动的旧副本，页面是新的、接口是老的，
     # 用户看到的就是"导入点了没反应" —— 现在抢回来自己听。
+    # 先清掉上一次热重启遗留的同进程监听，否则这里会 EADDRINUSE 然后一直是旧版。
+    _reclaim_extra_ports()
     for extra in (CFG.get("extra_ports") or []):
         try:
             extra_port = int(extra)
@@ -2083,6 +2246,7 @@ if __name__ == "__main__":
             try:
                 from werkzeug.serving import make_server
                 srv = make_server(bind, p, app, threaded=True)
+                _extra_srvs.append(srv)
                 log.info("兼容端口已监听 http://%s:%s/", bind, p)
                 srv.serve_forever()
             except Exception as e:
