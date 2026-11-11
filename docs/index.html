@@ -1606,25 +1606,33 @@ function ttsURL(i) {
   return signed(API + '/api/tts?' + q.toString());
 }
 /* ---------- 音频流水线 ----------
-   本机大模型合成一句大约要 1.1 倍于它自己的时长（RTF 0.9），余量薄得像纸：
+   本机大模型合成一句大约要 1.1 倍于它自己的时长（RTF 1.1），余量薄得像纸：
    请求顺序错一次、或者换 src 时又走一遍网络，听感就是一句一卡。
-   所以这里是一条「单飞 + 有序」的预取队列：
-   · 永远按播放顺序逐句取，一次只发一个请求 —— 合成端本来就是串行的
-     （CosyVoice 单卡一把锁），并发发三个只会让真正要听的那句排到队尾；
+   所以这里是一条「有序 + 少量并发」的预取队列：
+   · 永远按播放顺序取，播放也按顺序 —— 但本机允许两条同时在路上。
+     实测单条并发度下 GPU 只有三成多利用率（自回归逐 token，大半时间在等取样
+     和 kernel 启动），两条并飞后总吞吐从 1.0 倍实时升到 1.17 倍，正好够把
+     缓冲一点点攒厚；再往上加就不涨了。系统语音没这个必要，仍然一条。
    · 取回来存成 Blob URL，播放时 src 直接指向内存，切换零等待；
    · 只留播放位置附近的几段，手机上不吃内存。 */
 const PF = {
   blobs: new Map(),   // 下标 -> {url, size}
   order: [],          // 待取的下标（有序）
-  inflight: -1,       // 正在取的下标，-1 表示空闲
+  busy: new Set(),    // 正在取的下标（本机 2 条、系统语音 1 条）
+  ctls: new Map(),    // 下标 -> AbortController
   token: 0,           // 换书/换音色时自增：旧请求回来直接丢弃
-  abort: null,
   bad: new Set(),     // 合成失败过的下标，别无限重试
 };
 
 function pfDepth() {
   const p = S.base && S.base.provider;
-  return p && p !== 'edge' ? 6 : 3;
+  // 本机大模型备 9 句（约一分半音频）：它的合成速度只在 1.1 倍实时上下，
+  // 听久了必然慢慢落后，蓄得深一点，才不至于每句都补一次"等语音"。
+  return p && p !== 'edge' ? 9 : 3;
+}
+function pfParallel() {
+  const p = S.base && S.base.provider;
+  return p && p !== 'edge' ? 2 : 1;
 }
 /* 本机大模型合成一句 ≈ 播放一句（实测 0.9～1.1 倍），所以不能"边听边等"——
    起播前先备好前两句，给流水线一个二十来秒的缓冲，后面才接得顺。
@@ -1666,10 +1674,10 @@ function bufChip(text) {
 }
 function pfClear() {
   PF.token++;
-  try { if (PF.abort) PF.abort.abort(); } catch (e) {}
-  PF.abort = null;
+  for (const c of PF.ctls.values()) { try { c.abort(); } catch (e) {} }
+  PF.ctls.clear();
+  PF.busy.clear();
   PF.order = [];
-  PF.inflight = -1;
   PF.bad.clear();
   for (const b of PF.blobs.values()) { try { URL.revokeObjectURL(b.url); } catch (e) {} }
   PF.blobs.clear();
@@ -1695,19 +1703,18 @@ function pfSeed(from) {
   pfPump();
 }
 function pfPump() {
-  if (PF.inflight >= 0) return;
-  while (PF.order.length) {
+  const par = pfParallel();
+  while (PF.busy.size < par && PF.order.length) {
     const i = PF.order.shift();
-    if (PF.blobs.has(i) || PF.bad.has(i) || i >= S.items.length) continue;
+    if (PF.blobs.has(i) || PF.bad.has(i) || PF.busy.has(i) || i >= S.items.length) continue;
     pfFetch(i);
-    return;
   }
 }
 async function pfFetch(i) {
   const token = PF.token;
-  PF.inflight = i;
   const ctl = new AbortController();
-  PF.abort = ctl;
+  PF.busy.add(i);
+  PF.ctls.set(i, ctl);
   try {
     const r = await fetch(ttsURL(i), { signal: ctl.signal, cache: 'force-cache' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -1720,8 +1727,8 @@ async function pfFetch(i) {
     if (token === PF.token && e.name !== 'AbortError') PF.bad.add(i);
   } finally {
     if (token === PF.token) {
-      PF.inflight = -1;
-      PF.abort = null;
+      PF.busy.delete(i);
+      PF.ctls.delete(i);
       pfTrim();
       pfPump();
     }
@@ -3359,7 +3366,8 @@ $('#btnTtsBench').onclick = async () => {
     if (!d.ok) { if (msg) msg.textContent = '测速失败：' + (d.error || ''); return; }
     let line = `速度：合成 1 秒语音要 ${d.rtf} 秒（${d.verdict}）`;
     if (d.rtf <= 1) line += ' —— 跟得上播放，长文可以直接听。';
-    else if (d.rtf < 1.4) line += ' —— 略慢于播放，起播会先备两句，之后基本不断。';
+    else if (d.rtf < 1.4) line += ' —— 略慢于播放，起播会先备两句、本机会多备到九句，之后基本不断；'
+      + '把朗读语速调到 +10% 左右就跟得上了，显卡开「优先最高性能」还能再快一截。';
     else line += ' —— 比播放慢不少，建议先让它后台备一会儿；赶时间就切回「微软语音」。';
     if (msg) msg.textContent = line;
     toast(line, 8000);

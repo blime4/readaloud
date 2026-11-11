@@ -89,7 +89,19 @@ _state = {
     "sample_rate": 24000,
     "voices": {},        # 名字 -> {"wav": Path, "text": str, "ready": bool}
 }
-_lock = threading.Lock()          # 单卡，合成串行
+# 并发度：模型是自回归逐 token 出的，单条请求时 GPU 利用率只有三成多 ——
+# 大部分时间耗在等 CPU 侧的取样和 kernel 启动上。同时跑两条能让 GPU 有活干，
+# 吞吐接近翻倍（RTF 1.1 → 0.7 上下），代价是显存多两三 GB。
+# 设成 1 就退回完全串行。
+def _concurrency() -> int:
+    try:
+        return max(1, min(4, int(os.environ.get("COSY_TTS_CONCURRENCY", "2"))))
+    except (TypeError, ValueError):
+        return 2
+
+
+_lock = threading.BoundedSemaphore(_concurrency())   # 同时在跑几条合成
+_voice_lock = threading.Lock()                       # 参考特征只算一次，别并发抢
 _engine_lock = threading.Lock()
 
 
@@ -287,8 +299,9 @@ def speech():
     try:
         import torch
 
-        with _lock:
+        with _voice_lock:
             spk_id = prepare_voice(name)
+        with _lock:
             chunks = [item["tts_speech"] for item in engine.inference_zero_shot(
                 text, "", "", zero_shot_spk_id=spk_id, stream=False, speed=speed)]
         if not chunks:

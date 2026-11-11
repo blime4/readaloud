@@ -26,6 +26,7 @@ import platform
 import queue
 import re
 import secrets
+import struct
 import subprocess
 import sys
 import threading
@@ -98,7 +99,11 @@ DEFAULT_CONFIG = {
     "tts_local_model": "",
     "tts_local_voice": "",
     "tts_local_key": "",
-    "tts_local_format": "mp3",
+    # 默认 WAV，不要 MP3：本机服务转 MP3 要起一个 ffmpeg 进程，实测每句多花
+    # 1.0~1.8 秒（短句 1.0 秒是进程启动，长句还要加编码时间）。8 秒音频因此
+    # 从 8.3 秒变成 10.2 秒，RTF 从 1.06 涨到 1.23 —— 本来刚好跟得上，一转码
+    # 就跟不上了。WAV 体积大 5 倍，但走的是本机回环、又落在缓存里，不值一提。
+    "tts_local_format": "wav",
     # 本机 TTS 一键启动：切到 local 但服务没起来时，引擎帮忙拉起脚本
     "tts_local_autostart": True,
     "tts_local_python": "",         # 留空自动探测（见 _tts_python）
@@ -110,7 +115,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.10.0"
+ENGINE_VERSION = "1.10.1"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -314,8 +319,8 @@ def synth(text: str, voice: str, rate: str, pitch: str, volume: str,
     if provider == "local":
         url = CFG.get("tts_local_url") or ""
         api_key = CFG.get("tts_local_key") or ""
-        fmt = (CFG.get("tts_local_format") or "mp3").lower()
-        fmt = fmt if fmt in TTS.FORMAT_MIME else "mp3"
+        fmt = (CFG.get("tts_local_format") or "wav").lower()
+        fmt = fmt if fmt in TTS.FORMAT_MIME else "wav"
         voice = voice or CFG.get("tts_local_voice") or ""
         model = model or CFG.get("tts_local_model") or ""
         speed = TTS.speed_from_rate(rate)
@@ -2329,6 +2334,39 @@ def import_too_large(_error):
     return jsonify({"ok": False, "error": "文件不能超过 80 MB。"}), 413
 
 
+def _media_seconds(path: Path, mime: str) -> float:
+    """估一段音频有多长（秒）。测速要拿它当分母，所以别依赖第三方库。
+
+    WAV 读 RIFF 头里的 byte_rate 和 data 块大小；MP3 按 72kbps 反推
+    （本机服务固定 72k，偏差很小）；其它容器给 0，让调用方自己降级。
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0.0
+    if mime == "audio/wav":
+        try:
+            head = path.read_bytes()[:8192]
+        except OSError:
+            return 0.0
+        if len(head) < 44 or head[:4] != b"RIFF" or head[8:12] != b"WAVE":
+            return 0.0
+        byte_rate = struct.unpack_from("<I", head, 28)[0]
+        if not byte_rate:
+            return 0.0
+        pos = 12
+        while pos + 8 <= len(head):
+            cid = head[pos:pos + 4]
+            csz = struct.unpack_from("<I", head, pos + 4)[0]
+            if cid == b"data":
+                return (csz or max(0, size - pos - 8)) / byte_rate
+            pos += 8 + csz + (csz & 1)      # 块按偶数字节对齐
+        return 0.0
+    if mime == "audio/mpeg":
+        return size / 9216.0                # 72kbps mp3 ≈ 9KB/s
+    return 0.0
+
+
 @app.get("/api/tts/bench")
 def api_tts_bench():
     """合成一句真的，量出「每秒音频要花几秒合成」（RTF）。
@@ -2360,8 +2398,7 @@ def api_tts_bench():
             _play_touch["ts"] = time.time()
             _synth_gate.notify_all()
     took = time.time() - started
-    size = path.stat().st_size if path.exists() else 0
-    audio = size / 9216.0 if mime == "audio/mpeg" else 0.0     # 72kbps mp3 ≈ 9KB/s
+    audio = _media_seconds(path, mime)
     rtf = round(took / audio, 2) if audio > 0 else 0.0
     if not audio:
         verdict = "未知"
