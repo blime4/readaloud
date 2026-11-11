@@ -27,6 +27,7 @@ import queue
 import re
 import secrets
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -95,9 +96,17 @@ DEFAULT_CONFIG = {
     "tts_local_voice": "",
     "tts_local_key": "",
     "tts_local_format": "mp3",
+    # 本机 TTS 一键启动：切到 local 但服务没起来时，引擎帮忙拉起脚本
+    "tts_local_autostart": True,
+    "tts_local_python": "",         # 留空自动探测（见 _tts_python）
+    "tts_local_script": "",         # 留空按端口猜：8891=tts_cosy_server，8890=tts_qwen_server
+    # 引擎自身：静默升级（git pull + 空闲时自动重启）
+    "auto_update": True,
+    # 兼容监听端口：老书签 127.0.0.1:8756 也指向本引擎，避免又打开一份旧副本
+    "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.7.1"
+ENGINE_VERSION = "1.8.0"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -1577,6 +1586,176 @@ def api_presynth_cancel():
     return jsonify({"ok": True})
 
 
+# ---------------------------------------------------------------- 版本 / 重启 / 升级
+# 旧版把「重启引擎」交给 readaloud:// 协议，没装协议处理器时点了毫无反应；
+# 现在引擎自己重启自己，不依赖任何外部安装。
+
+def _active_clients() -> int:
+    try:
+        return len(_subscribers)
+    except Exception:
+        return 0
+
+
+_srv_ref = {"srv": None, "bind": "", "port": 0}
+_STOPPED = {"v": False}
+
+
+def _can_load_new_code() -> tuple:
+    """重启前先确认磁盘上的代码能编译 —— 语法错就别把现有服务关掉。"""
+    try:
+        src = (BASE / "server.py").read_text(encoding="utf-8")
+        compile(src, str(BASE / "server.py"), "exec")
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def _restart_engine(delay: float = 0.4) -> bool:
+    """同进程热重启：关掉监听 → 用 runpy 重新执行磁盘上的整份脚本。
+
+    为什么不在新进程里重启自己：从 IDE / 终端 / 计划任务里启动时，父进程
+    常在一个 Windows Job 里，父进程一退出子进程跟着被回收 —— 表现就是
+    "点了重启，引擎直接没了"。同进程重新执行没有这个前提，进程号都不变，
+    端口也能立刻重绑。
+    """
+    ok, err = _can_load_new_code()
+    if not ok:
+        log.error("新代码编译不过，保持当前进程继续服务: %s", err)
+        return False
+    threading.Thread(target=_soft_restart, daemon=True).start()
+    return True
+
+
+def _soft_restart() -> None:
+    global _STOPPED
+    srv = _srv_ref.get("srv")
+    log.info("开始热重启（pid %s）", os.getpid())
+    _STOPPED["v"] = True          # 旧副本的后台线程（自动升级）别再起作用
+    time.sleep(0.2)               # 让当前请求先把响应发出去
+    try:
+        if srv:
+            srv.shutdown()
+            srv.server_close()
+    except Exception as e:
+        log.warning("关停旧监听时出错（继续）: %s", e)
+    _srv_ref["srv"] = None
+    try:
+        import runpy
+        runpy.run_path(str(BASE / "server.py"), run_name="__main__")
+    except SystemExit:
+        pass
+    except Exception:
+        log.exception("热重启失败")
+        try:                       # 兜底：至少把当前代码重新服务起来
+            from werkzeug.serving import make_server
+            srv2 = make_server(_srv_ref["bind"] or "127.0.0.1",
+                               int(_srv_ref["port"] or CFG["port"]), app, threaded=True)
+            _srv_ref["srv"] = srv2
+            threading.Thread(target=srv2.serve_forever, daemon=True).start()
+        except Exception as e:
+            log.error("兜底重启也失败，请手动启动引擎: %s", e)
+
+
+def _git(*args, timeout: float = 25) -> tuple:
+    try:
+        r = subprocess.run(["git", *args], cwd=str(BASE), capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+    except subprocess.TimeoutExpired:
+        return 124, "", "git 超时（网络？）"
+    except Exception as e:
+        return 127, "", str(e)
+
+
+def _repo_state() -> dict:
+    if not (BASE / ".git").exists():
+        return {"repo": False}
+    rc, branch, _ = _git("rev-parse", "--abbrev-ref", "HEAD", timeout=8)
+    rc2, head, _ = _git("rev-parse", "--short", "HEAD", timeout=8)
+    rc3, dirty, _ = _git("status", "--porcelain", timeout=15)
+    return {"repo": rc == 0, "branch": branch if rc == 0 else "",
+            "head": head if rc2 == 0 else "",
+            "dirty": bool(dirty.strip()) if rc3 == 0 else True}
+
+
+def _check_update() -> dict:
+    st = _repo_state()
+    if not st.get("repo"):
+        return {"ok": False, "error": "这个目录不是 git 仓库，没法自动升级。", **st}
+    branch = st["branch"] or "main"
+    rc, _, err = _git("fetch", "--quiet", "origin", branch, timeout=20)
+    behind, latest = 0, ""
+    if rc == 0:
+        rc2, out, _ = _git("rev-list", "--count", f"HEAD..origin/{branch}", timeout=15)
+        if rc2 == 0 and out.isdigit():
+            behind = int(out)
+        rc3, subj, _ = _git("log", "-1", "--format=%s", f"origin/{branch}", timeout=10)
+        latest = subj if rc3 == 0 else ""
+    return {"ok": True, "version": ENGINE_VERSION, "behind": behind, "latest": latest,
+            "error": "" if rc == 0 else ("拉取失败：" + err[-160:]), **st}
+
+
+@app.get("/api/version")
+def api_version():
+    return jsonify({"ok": True, "version": ENGINE_VERSION,
+                    "python": sys.version.split()[0], "pid": os.getpid()})
+
+
+@app.post("/api/restart")
+def api_restart():
+    if not _restart_engine(1.2):
+        return jsonify({"ok": False, "error": "拉起新进程失败，看 engine.log"}), 500
+    return jsonify({"ok": True, "restarting": True})
+
+
+@app.get("/api/update")
+def api_update_check():
+    return jsonify(_check_update())
+
+
+@app.post("/api/update")
+def api_update_apply():
+    st = _repo_state()
+    if not st.get("repo"):
+        return jsonify({"ok": False, "error": "不是 git 仓库，只能手动更新。"}), 400
+    if st.get("dirty"):
+        return jsonify({"ok": False, "error": "工作区有未提交的改动，先提交或还原再升级。"}), 409
+    branch = st["branch"] or "main"
+    rc, out, err = _git("pull", "--ff-only", "origin", branch, timeout=90)
+    if rc != 0:
+        return jsonify({"ok": False, "error": (err or out or "git pull 失败")[-300:]}), 502
+    _restart_engine(1.6)
+    return jsonify({"ok": True, "restarted": True, "output": out[-400:]})
+
+
+def _auto_update_worker() -> None:
+    """静默升级：查到新版本就拉下来，等没人听（也没有预合成）时自动重启。
+    宁可晚一点生效，也不要在用户听着书的时候把引擎掐了。"""
+    if not CFG.get("auto_update", True):
+        return
+    time.sleep(20)
+    while not _STOPPED["v"]:
+        try:
+            info = _check_update()
+            if info.get("ok") and info.get("behind", 0) > 0:
+                if info.get("dirty"):
+                    log.info("有新版本，但工作区有改动，跳过自动升级")
+                elif _active_clients() == 0 and not _presynth["running"]:
+                    branch = info.get("branch") or "main"
+                    rc, out, err = _git("pull", "--ff-only", "origin", branch, timeout=90)
+                    if rc == 0:
+                        log.info("静默升级完成（%s 个提交），重启引擎", info["behind"])
+                        _restart_engine(1.2)
+                        return
+                    log.warning("静默升级失败: %s", (err or out)[-200:])
+                else:
+                    log.info("有新版本，等当前会话结束再升级")
+        except Exception as e:
+            log.debug("自动升级检查失败: %s", e)
+        time.sleep(600)
+
+
 # ---------------------------------------------------------------- 语音引擎
 
 # 本地 TTS 的探测结果缓存 30 秒 —— 页面每次加载都会问，别每次都去戳端口
@@ -1595,6 +1774,102 @@ def _tts_local_report(force: bool = False) -> dict:
         data = {"ok": False, "error": str(error), "models": [], "voices": []}
     _tts_probe.update(ts=time.time(), url=url, data=data)
     return data
+
+
+# --- 本机 TTS：一键拉起 ---------------------------------------------------
+# 用户不该知道"要在哪个 conda 环境里跑哪个脚本"。切到本机大模型时服务没起来，
+# 引擎自己把它拉起来 —— 解释器按优先级探，脚本按端口猜，都可以在 config 里改。
+
+_tts_proc = {"popen": None, "ts": 0.0}
+
+
+def _tts_port() -> int:
+    try:
+        from urllib.parse import urlparse
+        return int(urlparse(CFG.get("tts_local_url") or "").port or 0)
+    except Exception:
+        return 0
+
+
+def _tts_python() -> str:
+    """挑一个真能跑起这个脚本的解释器。
+    两个服务用的是两套环境：CosyVoice2 要 conda env cosyvoice（pynini 只能 conda 装），
+    Qwen3-TTS 用 .tts-venv。按脚本名选，否则拉起来第一行就 ModuleNotFoundError。"""
+    explicit = CFG.get("tts_local_python") or os.environ.get("READALOUD_TTS_PYTHON") or ""
+    if explicit and Path(explicit).exists():
+        return explicit
+    cosy_envs = [Path.home() / "miniconda3" / "envs" / "cosyvoice" / "python.exe",
+                 Path.home() / "anaconda3" / "envs" / "cosyvoice" / "python.exe"]
+    venv = BASE / ".tts-venv" / "Scripts" / "python.exe"
+    is_cosy = "cosy" in _tts_script().name.lower()
+    cands = (cosy_envs + [venv]) if is_cosy else ([venv] + cosy_envs)
+    for c in cands:
+        if Path(c).exists():
+            return str(c)
+    return sys.executable
+
+
+def _tts_script() -> Path:
+    if CFG.get("tts_local_script"):
+        p = Path(CFG["tts_local_script"])
+        return p if p.is_absolute() else BASE / p
+    return BASE / ("tts_qwen_server.py" if _tts_port() == 8890 else "tts_cosy_server.py")
+
+
+def start_local_tts() -> dict:
+    """后台拉起本机 TTS，立刻返回。真正就绪要看 /health（模型要加载十几秒）。"""
+    if _tts_local_report(force=True).get("ok"):
+        return {"ok": True, "already": True, "msg": "本机 TTS 已经在跑了"}
+    proc = _tts_proc.get("popen")
+    if proc and proc.poll() is None:
+        return {"ok": True, "starting": True, "pid": proc.pid, "msg": "正在启动中…"}
+    script = _tts_script()
+    if not script.exists():
+        return {"ok": False, "error": f"找不到启动脚本 {script.name}"}
+    port = _tts_port() or 8891
+    py = _tts_python()
+    env = dict(os.environ)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    flags = (0x00000008 | 0x00000200 | 0x08000000) if os.name == "nt" else 0
+    try:
+        out = open(BASE / "tts.log", "ab")
+        popen = subprocess.Popen([py, str(script), "--port", str(port)], cwd=str(BASE),
+                                 env=env, stdout=out, stderr=subprocess.STDOUT,
+                                 stdin=subprocess.DEVNULL, creationflags=flags,
+                                 close_fds=True)
+    except Exception as e:
+        log.error("拉起本机 TTS 失败: %s", e)
+        return {"ok": False, "error": f"启动失败：{e}"}
+    _tts_proc.update(popen=popen, ts=time.time())
+    log.info("已拉起本机 TTS：%s（pid %s，端口 %s，解释器 %s）",
+             script.name, popen.pid, port, py)
+    return {"ok": True, "starting": True, "pid": popen.pid, "python": py,
+            "script": script.name, "port": port,
+            "msg": f"正在启动 {script.stem}，第一次加载模型约 10～60 秒"}
+
+
+def _tts_maybe_autostart() -> dict | None:
+    """切到 local / 生成语音时顺手兜一下：没起来就拉起来。"""
+    if not CFG.get("tts_local_autostart", True):
+        return None
+    if _tts_local_report(force=True).get("ok"):
+        return None
+    return start_local_tts()
+
+
+@app.post("/api/tts/local/start")
+def api_tts_local_start():
+    return jsonify(start_local_tts())
+
+
+@app.get("/api/tts/local/status")
+def api_tts_local_status():
+    report = _tts_local_report(force=True)
+    proc = _tts_proc.get("popen")
+    return jsonify({"ok": True, "up": bool(report.get("ok")), "probe": report,
+                    "starting": bool(proc and proc.poll() is None),
+                    "python": _tts_python(), "script": _tts_script().name,
+                    "port": _tts_port()})
 
 
 @app.get("/api/tts/providers")
@@ -1630,13 +1905,18 @@ def api_tts_providers_set():
         if key in body:
             CFG[key] = body[key]
     save_config(CFG)
-    if body.get("probe") and CFG.get("tts_local_url"):
+    started = None
+    if (CFG.get("tts_provider") == "local" or body.get("probe")) and CFG.get("tts_local_url"):
         try:
             TTS.normalize_base(CFG["tts_local_url"])     # 地址写错直接给 400，别让前端猜
-            return jsonify({"ok": True, "probe": _tts_local_report(force=True)})
         except TTS.TTSConfigError as error:
             return jsonify({"ok": False, "error": str(error)}), 400
-    return jsonify({"ok": True})
+        report = _tts_local_report(force=True)
+        if not report.get("ok"):
+            started = _tts_maybe_autostart()   # 没起来就顺手拉起，别让用户去配环境
+        if body.get("probe"):
+            return jsonify({"ok": True, "probe": report, "autostart": started})
+    return jsonify({"ok": True, "autostart": started})
 
 
 # ---------------------------------------------------------------- 手机访问
@@ -1711,8 +1991,14 @@ def api_tts():
     try:
         path, mime = synth(text, voice, rate, pitch, volume, provider, model)
     except TTS.TTSConfigError as e:
-        # 本地 TTS 的配置/连通问题：说清是哪一步，而不是一句"合成失败"
-        return jsonify({"ok": False, "error": str(e), "provider": provider}), 502
+        # 本地 TTS 没起来：顺手拉起一个，并把"正在启动"这个事实告诉前端，
+        # 而不是甩一句"连不上 127.0.0.1:8891"让用户自己去配环境。
+        started = _tts_maybe_autostart() if provider == "local" else None
+        msg = str(e)
+        if started and started.get("ok"):
+            msg = "本机 TTS 刚刚启动，模型加载约 10～60 秒；稍等一下会自动重试。"
+        return jsonify({"ok": False, "error": msg, "provider": provider,
+                        "autostart": started}), 502
     except Exception as e:
         log.error("语音合成失败: %s", e)
         return jsonify({"ok": False, "error": f"语音合成失败：{e}"}), 502
@@ -1769,6 +2055,11 @@ if __name__ == "__main__":
     port = int(os.environ.get("READALOUD_PORT") or CFG["port"])
     # 监听地址同理：想用手机连，就把 host 设成 0.0.0.0（面板上有开关）
     bind = os.environ.get("READALOUD_HOST") or CFG.get("host") or "127.0.0.1"
+    # 自我重启时先等一下：旧进程还没释放 socket，抢着绑就是 EADDRINUSE
+    delay = float(os.environ.get("READALOUD_RESTART_DELAY") or 0)
+    if delay > 0:
+        log.info("重启中：等 %.1f 秒再绑端口", delay)
+        time.sleep(delay)
     vs = list_voices()
     log.info("ReadAloud 引擎 v%s", ENGINE_VERSION)
     log.info("音色可用 %d 个；Ollama 模型 %d 个", len(vs), len(ollama_models()))
@@ -1776,4 +2067,54 @@ if __name__ == "__main__":
     log.info("本机 %s | 已监听 http://%s:%s/", platform.node(), bind, port)
     if bind != "127.0.0.1":
         log.info("局域网可见：手机打开 http://%s:%s/ 即可", _lan_ip() or "<本机IP>", port)
-    app.run(host=bind, port=port, threaded=True, debug=False)
+
+    # 兼容端口：老书签（默认 8756）也指向这同一个引擎。
+    # 以前这些端口上躺着几周前启动的旧副本，页面是新的、接口是老的，
+    # 用户看到的就是"导入点了没反应" —— 现在抢回来自己听。
+    for extra in (CFG.get("extra_ports") or []):
+        try:
+            extra_port = int(extra)
+        except (TypeError, ValueError):
+            continue
+        if extra_port == port:
+            continue
+
+        def _serve_extra(p=extra_port):
+            try:
+                from werkzeug.serving import make_server
+                srv = make_server(bind, p, app, threaded=True)
+                log.info("兼容端口已监听 http://%s:%s/", bind, p)
+                srv.serve_forever()
+            except Exception as e:
+                log.warning("兼容端口 %s 没绑上（被别的程序占着？）: %s", p, e)
+
+        threading.Thread(target=_serve_extra, daemon=True).start()
+
+    threading.Thread(target=_auto_update_worker, daemon=True).start()
+
+    # 用 make_server 而不是 app.run：自我重启时子进程要能重试绑定端口。
+    # 旧进程退出后 socket 释放有延迟（Windows 上尤其明显），一次失败就退出
+    # 的表现就是"点了重启，引擎没了"。
+    from werkzeug.serving import make_server
+    srv = None
+    for attempt in range(1, 21):
+        try:
+            srv = make_server(bind, port, app, threaded=True)
+            break
+        except OSError as e:
+            log.warning("绑定 %s:%s 失败（第 %d 次，2 秒后重试）: %s", bind, port, attempt, e)
+            time.sleep(2)
+    if srv is None:
+        log.error("端口 %s 一直绑不上，退出", port)
+        sys.exit(1)
+    log.info("已开始服务 http://%s:%s/（pid %s）", bind, port, os.getpid())
+    _srv_ref.update(srv=srv, bind=bind, port=port)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        log.info("收到中断，退出")
+        sys.exit(0)
+    # serve_forever 返回 = 有人在热重启（新副本会在线程里接手）。
+    # 主线程这时候绝不能退出，否则整个进程跟着结束，热重启就成了自杀。
+    while True:
+        time.sleep(3600)

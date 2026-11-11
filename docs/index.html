@@ -170,6 +170,7 @@
   .chip{padding:5px 11px; border-radius:999px; font-size:12px; background:var(--accent-soft); color:var(--accent); border:1px solid var(--accent-soft);white-space:nowrap}
   .chip.gray{background:var(--panel-2);color:var(--txt-3);border-color:var(--line)}
   .chip.ok{background:var(--accent-soft);color:var(--ok);border-color:var(--line)}
+  .chip.warn{background:var(--accent-soft);color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--line))}
   .chip.btnish{cursor:pointer}
   .row{display:flex; align-items:center; gap:9px; padding:9px 16px; border-bottom:1px solid var(--line)}
   .row:last-child{border-bottom:0}
@@ -263,41 +264,84 @@
   /* ---------- 书架 ---------- */
   .shelfWrap{position:fixed;inset:0;z-index:45;display:none}
   .shelfWrap.show{display:block}
-  .shelfMask{position:absolute;inset:0;background:rgba(18,20,28,.45)}
+  .shelfMask{position:absolute;inset:0;background:rgba(10,12,18,.5)}
   .shelf{
-    position:absolute;top:0;bottom:0;left:0;width:min(430px,100vw);
-    background:var(--panel);border-right:1px solid var(--line);box-shadow:var(--shadow);
+    position:absolute;top:0;bottom:0;left:0;width:min(560px,100vw);
+    background:var(--bg);border-right:1px solid var(--line);box-shadow:var(--shadow);
     display:flex;flex-direction:column;
   }
-  .shelfWrap.show .shelf{animation:shelfIn .18s ease-out}
-  @keyframes shelfIn{from{transform:translateX(-14px);opacity:.5}to{transform:none;opacity:1}}
-  .shelf-head{display:flex;align-items:center;gap:9px;padding:14px 16px;border-bottom:1px solid var(--line)}
-  .shelf-head b{font-size:15px}
-  .shelf-list{flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
-  .shelf-foot{padding:10px 16px 14px;border-top:1px solid var(--line);color:var(--txt-3);font-size:11.5px;line-height:1.7}
+  .shelfWrap.show .shelf{animation:shelfIn .2s cubic-bezier(.2,.7,.3,1)}
+  @keyframes shelfIn{from{transform:translateX(-20px);opacity:.35}to{transform:none;opacity:1}}
+
+  .shelf-head{display:flex;flex-direction:column;gap:11px;padding:16px 16px 12px;border-bottom:1px solid var(--line);background:var(--bg)}
+  .sh-top{display:flex;align-items:center;gap:10px}
+  .sh-top h3{margin:0;font-size:17px;letter-spacing:.2px;display:flex;align-items:center;gap:7px}
+  .sh-top .hint{font-size:12px;color:var(--txt-3);font-variant-numeric:tabular-nums}
+  .sh-tools{display:flex;gap:8px;align-items:center}
+  .sh-search{flex:1;display:flex;align-items:center;gap:7px;height:38px;padding:0 11px;
+    background:var(--panel);border:1px solid var(--line);border-radius:11px;color:var(--txt-3)}
+  .sh-search input{flex:1;min-width:0;border:0;background:transparent;padding:0;height:100%;font-size:14px;color:var(--txt)}
+  .sh-search input:focus{outline:0}
+  .sh-import{height:38px;padding:0 14px;border-radius:11px;display:inline-flex;align-items:center;gap:6px;
+    background:var(--accent);border:1px solid var(--accent);color:#fff;font-weight:600;font-size:13px;white-space:nowrap}
+  .sh-import:hover{filter:brightness(1.06)}
+
+  .shelf-list{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:10px;overscroll-behavior:contain}
+  .shelf-list.drag{outline:2px dashed var(--accent);outline-offset:-8px;border-radius:16px;background:var(--accent-soft)}
+  .shelf-foot{padding:10px 16px calc(14px + env(safe-area-inset-bottom));border-top:1px solid var(--line);
+    color:var(--txt-3);font-size:11.5px;line-height:1.7;background:var(--bg)}
+
+  /* 书卡：左边一块渐变书脊，右边标题 + 进度 */
   .bk{
-    display:flex;gap:11px;padding:11px 12px;border:1px solid var(--line);border-radius:12px;
-    background:var(--panel-2);cursor:pointer;transition:.15s;position:relative;
+    display:flex;gap:12px;padding:11px;border:1px solid var(--line);border-radius:16px;
+    background:var(--panel);cursor:pointer;position:relative;
+    transition:transform .16s ease,border-color .16s,box-shadow .16s;
   }
-  .bk:hover{border-color:var(--btn-bd);background:var(--panel)}
+  .bk:hover{transform:translateY(-1px);border-color:var(--btn-bd);box-shadow:0 10px 22px rgba(18,22,38,.09)}
+  .bk:active{transform:scale(.994)}
   .bk.cur{border-color:var(--accent);background:var(--accent-soft)}
   .bk .cov{
-    width:38px;height:50px;border-radius:5px;flex:none;display:flex;align-items:center;justify-content:center;
-    font-size:18px;background:var(--panel);border:1px solid var(--line);color:var(--accent);
+    width:52px;height:70px;border-radius:7px 5px 5px 7px;flex:none;position:relative;overflow:hidden;
+    display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:21px;
+    box-shadow:0 3px 10px rgba(12,16,28,.2);letter-spacing:0;
   }
-  .bk .body{flex:1;min-width:0}
-  .bk .ttl{font-weight:600;font-size:13.5px;line-height:1.45;word-break:break-all}
-  .bk .meta{font-size:11.5px;color:var(--txt-3);margin-top:3px;display:flex;gap:8px;flex-wrap:wrap;align-items:center}
-  .bk .pbar{height:4px;border-radius:9px;background:var(--track);margin-top:7px;overflow:hidden}
-  .bk .pbar i{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--accent-2))}
+  .bk .cov::before{content:"";position:absolute;inset:0;background:linear-gradient(155deg,rgba(255,255,255,.3),rgba(255,255,255,0) 46%)}
+  .bk .cov::after{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:rgba(0,0,0,.16)}
+  .bk .cov span{position:relative;z-index:1;text-shadow:0 1px 3px rgba(0,0,0,.22)}
+  .bk .body{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:5px}
+  .bk .ttl{font-weight:600;font-size:14px;line-height:1.42;word-break:break-word;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .bk .meta{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:11.5px;color:var(--txt-3)}
+  .bk .meta .dot{width:3px;height:3px;border-radius:50%;background:currentColor;opacity:.55}
+  .bk .flag{font-size:10.5px;border-radius:99px;padding:1px 7px;border:1px solid var(--line);background:var(--panel-2);color:var(--txt-2)}
+  .bk .flag.on{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 35%,var(--line))}
+  .bk .flag.done{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 35%,var(--line))}
+  .bk .row2{display:flex;align-items:center;gap:8px}
+  .bk .pbar{flex:1;height:5px;border-radius:9px;background:var(--track);overflow:hidden}
+  .bk .pbar i{display:block;height:100%;border-radius:9px;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .3s}
+  .bk .pct{font-size:11px;color:var(--txt-2);font-variant-numeric:tabular-nums;min-width:30px;text-align:right}
   .bk .del{
-    position:absolute;right:5px;top:5px;opacity:0;transition:.15s;border:0;background:transparent;
-    color:var(--txt-3);padding:2px 6px;font-size:12px;min-height:0;
+    position:absolute;right:6px;top:6px;width:27px;height:27px;min-height:0;padding:0;
+    border:0;border-radius:8px;background:transparent;color:var(--txt-3);
+    opacity:0;transition:.15s;font-size:12px;line-height:1;
   }
   .bk:hover .del,.bk.cur .del{opacity:1}
-  .bk .del:hover{color:var(--danger)}
-  .bk .flag{font-size:10.5px;color:var(--accent);border:1px solid var(--line);background:var(--panel);border-radius:99px;padding:0 6px}
-  .bk .flag.done{color:var(--ok)}
+  .bk .del:hover{color:var(--danger);background:var(--code)}
+  .bk.drop-in{border-color:var(--accent)}
+
+  /* 空状态 */
+  .shelf-list .empty{display:flex;flex-direction:column;align-items:center;gap:9px;
+    padding:52px 22px 40px;text-align:center;color:var(--txt-3)}
+  .shelf-list .empty .ico{font-size:42px;line-height:1;filter:saturate(.9)}
+  .shelf-list .empty b{font-size:15px;color:var(--txt-2);font-weight:600}
+  .shelf-list .empty .hint{font-size:12.5px;line-height:1.8;max-width:280px}
+  .shelf-list .empty button{margin-top:6px}
+  .sh-tip{font-size:11.5px;color:var(--txt-3);padding:2px 4px 0;display:none}
+  .shelf-list.drag .sh-tip{display:block;text-align:center;color:var(--accent)}
+
+  /* 文件选择框放屏幕外而不是 display:none —— iOS 上 hidden 的 input
+     点 click() 会被拦掉，选文件框根本不弹出来 */
+  .fileoff{position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:.01;pointer-events:none}
 
   /* ---------- 手机端 ---------- */
   .mtabs{display:none}
@@ -345,9 +389,15 @@
     .bar{height:8px}
     .toast{bottom:calc(96px + env(safe-area-inset-bottom));max-width:86vw}
     .shelf{width:100vw;border-right:0}
-    .bk{padding:13px 12px}
+    .shelf-head{padding:14px 14px 10px;gap:10px}
+    .sh-top h3{font-size:16px}
+    .sh-search{height:40px}
+    .sh-import{height:40px;padding:0 12px}
+    .shelf-list{padding:10px}
+    .bk{padding:10px;border-radius:14px}
+    .bk .cov{width:46px;height:62px;font-size:19px}
     .bk .del{opacity:1}
-    .shelf-head{padding:14px}
+    .shelf-foot{font-size:11px;padding-bottom:calc(12px + env(safe-area-inset-bottom))}
     .connect{padding:12px}
     .ccard{padding:16px;gap:12px}
     .cbody h3{font-size:15px}
@@ -375,6 +425,7 @@
   <span class="chip gray btnish" id="chipTheme" title="切换深色/浅色（朗读常在夜里用）">🌙 夜间</span>
   <span class="chip gray" id="chipMode" title="当前页面从哪里来 / 引擎在哪里">—</span>
   <span class="chip ok btnish" id="chipPre" hidden title="后台正在把全文提前合成进缓存，听到的每句都会秒出；点一下可停止">预合成…</span>
+  <span class="chip warn btnish" id="chipUpdate" hidden title="引擎有新版本，点这里升级并重启">⬆ 可升级</span>
 </header>
 
 <div class="connect" id="connect">
@@ -407,7 +458,8 @@
       <input id="urlIn" type="url" spellcheck="false" autocomplete="off"
              placeholder="粘贴网页链接，自动抓正文来读（微信 / 知乎 / 博客都行）">
       <button class="primary tiny" id="btnUrlGo" title="抓取正文并开始朗读">抓取朗读</button>
-      <input id="fileIn" type="file" accept=".txt,.epub,.mobi,.pdf,text/plain,application/pdf,application/epub+zip" hidden>
+      <input id="fileIn" type="file" class="fileoff"
+             accept=".txt,.text,.epub,.mobi,.azw3,.pdf,text/plain,application/pdf,application/epub+zip">
       <button class="ghost tiny" id="btnImport" title="导入 TXT、EPUB、MOBI 或 PDF 后开始朗读">导入本地文件</button>
     </div>
     <div class="urlopts">
@@ -492,6 +544,11 @@
     </div>
     <details class="help" id="ttsLocalBox" style="display:none;border-top:1px solid var(--line)">
       <summary>本机 TTS 连接设置</summary>
+      <div class="cactions" style="padding:6px 0 8px;gap:8px">
+        <button class="primary tiny" id="btnTtsStart" title="引擎会自己挑选环境并拉起本机 TTS 服务">▶ 一键启动本机 TTS</button>
+        <button class="ghost tiny" id="btnPresetCosy" title="填入 CosyVoice2 的默认地址与音色">CosyVoice2 预设</button>
+      </div>
+      <div class="hint" id="ttsStartMsg"></div>
       <div class="row" style="border:0;padding:6px 0;gap:8px">
         <label style="width:44px">地址</label>
         <input type="text" id="ttsUrl" placeholder="http://127.0.0.1:8880" style="flex:1;min-width:0">
@@ -570,6 +627,17 @@
       <div class="kv" id="hostKv"></div>
       <div class="mlist" id="modelList"></div>
       <div class="hint" id="engineHint"></div>
+      <div style="border-top:1px solid var(--line);margin:10px 0 0;padding-top:10px">
+        <div class="cactions" style="padding:0;gap:8px;align-items:center">
+          <span class="hint" id="verNow">版本 —</span>
+          <span class="grow"></span>
+          <button class="ghost tiny" id="btnCheckUpdate">检查更新</button>
+          <button class="tiny" id="btnUpgrade" hidden>⬆ 升级并重启</button>
+        </div>
+        <div class="hint" id="verMsg" style="margin-top:6px">
+          引擎会自己检查新版本；没人听书时会静默升级并重启，也可以在这里手动升。
+        </div>
+      </div>
       <div class="cactions" style="padding-top:10px">
         <button id="btnLocalPage" title="用引擎自己的地址打开，不需要浏览器授权">在本地打开</button>
         <button id="btnRestart">重启引擎</button>
@@ -620,11 +688,19 @@
   <div class="shelfMask" id="shelfMask"></div>
   <aside class="shelf" role="dialog" aria-label="书架">
     <div class="shelf-head">
-      <b>📚 书架</b>
-      <span class="hint" id="shelfStat"></span>
-      <span class="grow"></span>
-      <button class="tiny" id="shelfImport" title="导入 TXT / EPUB / MOBI / PDF">＋ 导入</button>
-      <button class="ghost tiny" id="shelfClose" title="关闭">✕</button>
+      <div class="sh-top">
+        <h3>📚 书架</h3>
+        <span class="hint" id="shelfStat"></span>
+        <span class="grow"></span>
+        <button class="ghost tiny" id="shelfClose" title="关闭">✕</button>
+      </div>
+      <div class="sh-tools">
+        <label class="sh-search">
+          <span>🔍</span>
+          <input id="shelfSearch" type="search" placeholder="搜索书名" autocomplete="off" spellcheck="false">
+        </label>
+        <button class="sh-import" id="shelfImport" title="导入 TXT / EPUB / MOBI / PDF">＋ 导入</button>
+      </div>
     </div>
     <div class="shelf-list" id="shelfList"></div>
     <div class="shelf-foot">
@@ -1666,15 +1742,78 @@ async function play(requestedMode) {
   } finally { S.busy = false; overlay(false); }
 }
 
-async function importLocalFile(file) {
+/* 导入本地文件。
+   手机上最容易踩的两个坑，这里都绕开了：
+   1) accept 里的 .epub/.mobi 在 iOS 没有对应 UTI，Files 里整个文件是灰的
+      —— 移动端干脆不设过滤，选完再按扩展名校验；
+   2) 上传没有进度时，几十兆的 PDF 传半分钟，看起来就像"点了没反应"
+      —— 用 XHR 拿真实上传百分比，能取消。
+   顺带用 X-ReadAloud-Key 补访问码：fetch 有全局包装，XHR 没有。 */
+const IMPORT_MAX = 80 * 1024 * 1024;
+const EXT_OK = /\.(txt|text|epub|mobi|azw3?|pdf)$/i;
+
+function humanSize(n) {
+  if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
+  if (n >= 1024) return Math.round(n / 1024) + ' KB';
+  return n + ' B';
+}
+
+function importLocalFile(file) {
   if (!file) return;
+  if (!EXT_OK.test(file.name)) {
+    toast(`「${file.name}」不是支持的格式，只收 TXT / EPUB / MOBI / AZW3 / PDF`, 5000);
+    $('#fileIn').value = '';
+    return;
+  }
+  if (file.size > IMPORT_MAX) {
+    toast(`文件有 ${humanSize(file.size)}，超过 80 MB 上限 —— PDF 建议先用工具压一下`, 5200);
+    $('#fileIn').value = '';
+    return;
+  }
   const form = new FormData();
   form.append('file', file, file.name);
-  overlay(true, '正在读取 ' + file.name + '…');
-  try {
-    const response = await fetch(API + '/api/import', { method: 'POST', body: form });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok || !data.ok) throw new Error(data.error || '导入失败');
+  overlay(true, `正在上传 ${file.name}（${humanSize(file.size)}）0%`);
+  progress(0);
+
+  const xhr = new XMLHttpRequest();
+  S.cancelFn = () => { try { xhr.abort(); } catch (e) {} };
+  xhr.open('POST', API + '/api/import');
+  if (LAN_KEY) xhr.setRequestHeader('X-ReadAloud-Key', LAN_KEY);
+  xhr.upload.onprogress = e => {
+    if (!e.lengthComputable) return;
+    const pct = Math.round(e.loaded / e.total * 100);
+    $('#ovText').textContent = pct < 100
+      ? `正在上传 ${file.name}（${humanSize(e.total)}）${pct}%`
+      : `正在解析 ${file.name}…`;
+    progress(pct < 100 ? pct * 0.85 : 88);
+  };
+  xhr.onerror = () => {
+    overlay(false); S.cancelFn = null;
+    toast('连不上引擎 —— 手机要先用引擎给的局域网地址打开本页', 5200);
+    $('#fileIn').value = '';
+  };
+  xhr.onabort = () => {
+    overlay(false); S.cancelFn = null;
+    toast('已取消上传');
+    $('#fileIn').value = '';
+  };
+  xhr.onload = async () => {
+    S.cancelFn = null;
+    let data = {};
+    try { data = JSON.parse(xhr.responseText || '{}'); } catch (e) {}
+    if (xhr.status === 401) {
+      overlay(false);
+      toast(data.error || '需要访问码：请用引擎给的带 ?k= 的地址重新打开本页', 6000);
+      $('#fileIn').value = '';
+      return;
+    }
+    if (xhr.status !== 200 || !data.ok) {
+      overlay(false);
+      toast('导入失败：' + (data.error || `服务返回 ${xhr.status}`), 5200);
+      $('#fileIn').value = '';
+      return;
+    }
+    progress(100);
     stopPlayback();
     $('#txt').value = data.text;
     // 导入即入库：书留在本机，手机上也能接着读
@@ -1686,14 +1825,12 @@ async function importLocalFile(file) {
     }
     // 书籍通常很长，不能继承下拉框中的“智能”模式，否则会被压缩成摘要。
     _oneShotMode = 'none';
-    toast(`已导入《${data.title}》${data.chars.toLocaleString()} 字，按原文开始朗读。`, 4200);
-    await play('none');
-  } catch (error) {
-    toast('导入失败：' + error.message, 4200);
-  } finally {
-    $('#fileIn').value = '';
     overlay(false);
-  }
+    toast(`已导入《${data.title}》${data.chars.toLocaleString()} 字，按原文开始朗读。`, 4200);
+    try { await play('none'); } catch (e) { toast('已入库，点「朗读」开始听', 4200); }
+    $('#fileIn').value = '';
+  };
+  xhr.send(form);
 }
 
 function baseStyle() {
@@ -2325,10 +2462,17 @@ document.addEventListener('keydown', e => {
 
 /* ---------- 引擎开关（同样通过 readaloud:// 协议，不用碰命令行） ---------- */
 $('#btnLocalPage').onclick = () => window.open(`http://127.0.0.1:${port()}/`, '_blank');
-$('#btnRestart').onclick = () => {
-  location.href = 'readaloud://restart';
+$('#btnRestart').onclick = async () => {
   toast('正在重启本机引擎…', 4000);
-  setTimeout(() => connect({ manual: true }), 5000);
+  try {
+    const r = await fetch(API + '/api/restart', { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || '重启失败');
+  } catch (e) {
+    // 老引擎没有这个接口：退回协议通道（装了协议处理器时仍然有效）
+    location.href = 'readaloud://restart';
+  }
+  setTimeout(() => connect({ manual: true }), 4200);
 };
 $('#btnStopEngine').onclick = () => {
   location.href = 'readaloud://stop';
@@ -2347,11 +2491,14 @@ async function savePrefs(p) {
 }
 
 /* ---------- 书架 ---------- */
-const SHELF = { books: [], count: 0 };
+const SHELF = { books: [], count: 0, q: '' };
 
 function shelfOpen(open) {
   $('#shelfWrap').classList.toggle('show', open);
-  if (open) loadShelf();
+  if (open) {
+    loadShelf();
+    setTimeout(() => { if (!isMobile()) $('#shelfSearch').focus(); }, 60);
+  }
 }
 
 function bookAge(ts) {
@@ -2364,36 +2511,85 @@ function bookAge(ts) {
   return new Date(ts * 1000).toLocaleDateString('zh-CN');
 }
 
-function bookMetaLine(b) {
-  const bits = [`${b.chars.toLocaleString()} 字`];
-  if (b.finished) bits.push('读完了');
-  else if (b.progress.next) bits.push(`第 ${b.progress.next}/${b.progress.total} 句`);
-  else bits.push('还没开始');
-  bits.push(bookAge(b.updated));
-  return bits.map(t => `<span>${t}</span>`).join('');
+/* 书封：拿书名生成一组稳定的渐变色。没有真封面也不该是一排灰方块 */
+const COVERS = [
+  ['#5B8DEF', '#3358C6'], ['#E8758F', '#B83E5E'], ['#3FBFA3', '#1C8A72'],
+  ['#F0A85E', '#C9792A'], ['#8E7CF0', '#5B47C9'], ['#45B3DA', '#1B7CA6'],
+  ['#D96B62', '#9E3A33'], ['#7C9A63', '#4C6B37'], ['#B07CD9', '#7A45A8'],
+];
+function coverOf(b) {
+  let h = 0;
+  const s = String(b.title || '') + String(b.id || '');
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  const c = COVERS[Math.abs(h) % COVERS.length];
+  return `background:linear-gradient(155deg,${c[0]},${c[1]})`;
+}
+function coverText(b) {
+  const t = String(b.title || '').trim();
+  const ch = t ? Array.from(t)[0] : '书';
+  return /[a-z]/i.test(ch) ? ch.toUpperCase() : ch;
+}
+
+function bookCard(b) {
+  const pct = Math.min(100, Math.round(b.progress.pct || 0));
+  const flag = b.finished ? '<span class="flag done">已读完</span>'
+    : b.progress.next ? `<span class="flag on">${pct}%</span>` : '<span class="flag">未开始</span>';
+  const typeLabel = (b.type || 'txt').toUpperCase();
+  return `
+    <div class="cov" style="${coverOf(b)}"><span>${esc(coverText(b))}</span></div>
+    <div class="body">
+      <div class="ttl">${esc(b.title)}</div>
+      <div class="meta">
+        ${flag}
+        <span>${b.chars.toLocaleString()} 字</span>
+        <i class="dot"></i>
+        <span>${typeLabel}</span>
+        <i class="dot"></i>
+        <span>${bookAge(b.updated)}</span>
+      </div>
+      <div class="row2">
+        <div class="pbar"><i style="width:${pct}%"></i></div>
+        <span class="pct">${b.finished ? '100%' : pct + '%'}</span>
+      </div>
+    </div>
+    <button class="del" title="从书架删除">✕</button>`;
 }
 
 function renderShelf() {
   const box = $('#shelfList');
-  const books = SHELF.books || [];
-  $('#shelfStat').textContent = books.length ? `${books.length} 本` : '';
-  if (!books.length) {
-    box.innerHTML = '<div class="empty">书架还是空的。<br>点右上角「＋ 导入」把 TXT / EPUB / MOBI / PDF 放进来，<br>它会一直在这儿等你。</div>';
+  const all = SHELF.books || [];
+  const q = (SHELF.q || '').trim().toLowerCase();
+  const books = q ? all.filter(b => String(b.title).toLowerCase().includes(q)) : all;
+  const sizeMB = (SHELF.bytes || 0) / 1024 / 1024;
+  $('#shelfStat').textContent = all.length
+    ? `${all.length} 本 · ${sizeMB >= 1 ? sizeMB.toFixed(1) + ' MB' : Math.round(SHELF.bytes / 1024) + ' KB'}`
+    : '';
+
+  if (!all.length) {
+    box.innerHTML = `
+      <div class="empty">
+        <div class="ico">📚</div>
+        <b>书架还是空的</b>
+        <div class="hint">导入 TXT / EPUB / MOBI / AZW3 / PDF，<br>读到哪一句都记着，手机和电脑共用同一份。</div>
+        <button class="primary" id="emptyImport">选一本书导入</button>
+        <div class="hint" style="opacity:.8">桌面端也可以把文件直接拖进来</div>
+      </div>`;
+    const b = $('#emptyImport');
+    if (b) b.onclick = () => $('#fileIn').click();
     return;
   }
+  if (!books.length) {
+    box.innerHTML = `<div class="empty"><div class="ico">🔍</div><b>没找到「${esc(SHELF.q)}」</b>
+      <div class="hint">换个关键词，或清空搜索框看全部。</div></div>`;
+    return;
+  }
+
   box.innerHTML = '';
   books.forEach(b => {
     const el = document.createElement('div');
     el.className = 'bk' + (S.book && S.book.id === b.id ? ' cur' : '');
-    el.innerHTML = `
-      <div class="cov">${b.type === 'pdf' ? '📄' : b.type === 'epub' ? '📗' : '📕'}</div>
-      <div class="body">
-        <div class="ttl">${esc(b.title)}</div>
-        <div class="meta">${bookMetaLine(b)}</div>
-        <div class="pbar"><i style="width:${Math.min(100, b.progress.pct || 0)}%"></i></div>
-      </div>
-      <button class="del" title="从书架删除">✕</button>`;
-    el.onclick = e => { if (!e.target.classList.contains('del')) openBook(b.id); };
+    el.innerHTML = bookCard(b);
+    el.onclick = e => { if (!e.target.closest('.del')) openBook(b.id); };
     el.querySelector('.del').onclick = async e => {
       e.stopPropagation();
       if (!window.confirm(`把《${b.title}》从书架删掉？正文会一起删。`)) return;
@@ -2404,6 +2600,11 @@ function renderShelf() {
     };
     box.appendChild(el);
   });
+  // 拖拽时给个提示条
+  const tip = document.createElement('div');
+  tip.className = 'sh-tip';
+  tip.textContent = '松手就导入';
+  box.appendChild(tip);
 }
 
 async function loadShelf() {
@@ -2412,6 +2613,7 @@ async function loadShelf() {
     if (!d.ok) return;
     SHELF.books = d.books || [];
     SHELF.count = d.count || 0;
+    SHELF.bytes = d.bytes || 0;
     $('#chipShelf').textContent = SHELF.count ? `📚 书架 ${SHELF.count}` : '📚 书架';
     renderShelf();
   } catch (e) { /* 旧引擎没有书架接口，静默降级 */ }
@@ -2554,6 +2756,30 @@ $('#chipPre').onclick = async () => {
 $('#shelfClose').onclick = () => shelfOpen(false);
 $('#shelfMask').onclick = () => shelfOpen(false);
 $('#shelfImport').onclick = () => $('#fileIn').click();
+$('#shelfSearch').addEventListener('input', e => {
+  SHELF.q = e.target.value || '';
+  renderShelf();
+});
+/* 桌面端拖文件到书架直接导入 */
+(() => {
+  const box = $('#shelfList');
+  const isFileDrag = e => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+  box.addEventListener('dragover', e => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    box.classList.add('drag');
+  });
+  box.addEventListener('dragleave', e => {
+    if (e.target === box) box.classList.remove('drag');
+  });
+  box.addEventListener('drop', e => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    box.classList.remove('drag');
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) importLocalFile(f);
+  });
+})();
 $('#mtabs').addEventListener('click', e => {
   const b = e.target.closest('button');
   if (b) setView(b.dataset.tab);
@@ -2567,7 +2793,9 @@ $('#ttsProvider').onchange = async e => {
   if (provider === 'local') {
     $('#ttsLocalBox').open = true;
     if (!TTS_INFO || !TTS_INFO.local || !TTS_INFO.local.ok) {
-      toast('本机 TTS 还没连上，先填地址再点「探测」', 4200);
+      // 没起来就替用户拉起来，别让他去查"该跑哪个脚本"
+      toast('本机 TTS 还没连上，正在帮你启动…', 4200);
+      startLocalTts(true);
     }
   }
 };
@@ -2617,6 +2845,129 @@ $('#btnTtsSave').onclick = async () => {
   loadTts();
 };
 
+/* ---------- 本机 TTS 一键启动 ----------
+   以前用户要自己知道：在哪个 conda 环境、跑哪个脚本、端口多少。
+   现在点一下，引擎自己挑解释器、拉脚本，然后这里轮询到它真的能出声。 */
+let _ttsPollTimer = 0;
+
+async function startLocalTts(autoStart) {
+  const msg = $('#ttsStartMsg');
+  clearTimeout(_ttsPollTimer);
+  if (msg) msg.textContent = '正在拉起本机 TTS…';
+  try {
+    const d = await (await fetch(API + '/api/tts/local/start', { method: 'POST' })).json();
+    if (!d.ok) {
+      if (msg) msg.textContent = '启动失败：' + (d.error || '未知原因');
+      if (!autoStart) toast('启动失败：' + (d.error || ''), 5000);
+      return;
+    }
+    if (msg) {
+      const py = d.python ? ' · ' + d.python.split(/[\\/]/).slice(-2).join('/') : '';
+      msg.textContent = (d.already ? '本机 TTS 已经在跑了' : (d.msg || '正在启动…')) + py;
+    }
+    pollLocalTts(0);
+  } catch (e) {
+    if (msg) msg.textContent = '启动请求失败：' + e.message;
+  }
+}
+
+function pollLocalTts(n) {
+  clearTimeout(_ttsPollTimer);
+  _ttsPollTimer = setTimeout(async () => {
+    try {
+      const d = await (await fetch(API + '/api/tts/local/status')).json();
+      const msg = $('#ttsStartMsg');
+      if (d.up) {
+        if (msg) msg.textContent = '✅ 已就绪' + (d.probe && d.probe.engine ? '：' + d.probe.engine : '');
+        toast('本机 TTS 已就绪，可以直接听了', 3600);
+        await loadTts();
+        return;
+      }
+      if (msg) msg.textContent = `模型加载中… ${n * 3} 秒`;
+      if (n >= 30) {
+        if (msg) msg.textContent = '等了两分多钟还没起来，看看项目里的 tts.log';
+        return;
+      }
+      pollLocalTts(n + 1);
+    } catch (e) {
+      if (n < 5) pollLocalTts(n + 1);
+    }
+  }, 3000);
+}
+
+$('#btnTtsStart').onclick = () => startLocalTts(false);
+
+$('#btnPresetCosy').onclick = async () => {
+  const url = 'http://127.0.0.1:8891';
+  $('#ttsUrl').value = url;
+  $('#ttsModel').value = 'CosyVoice2-0.5B';
+  $('#ttsVoice').value = $('#ttsVoice').value || '默认女声';
+  const d = await saveTts({
+    provider: 'local', tts_local_url: url, tts_local_model: 'CosyVoice2-0.5B',
+    tts_local_voice: $('#ttsVoice').value, probe: true,
+  });
+  if (!d) return;
+  if (d.probe && d.probe.ok) {
+    $('#ttsProbeMsg').textContent = '已连上：' + reportProbe(d.probe);
+    toast('CosyVoice2 已连上', 3200);
+    loadTts();
+  } else {
+    $('#ttsProbeMsg').textContent = '还没起来，正在帮你启动…';
+    startLocalTts(true);
+  }
+};
+
+/* ---------- 引擎版本 / 升级 ----------
+   以前「重启引擎」只认 readaloud:// 协议，没装协议处理器时点了毫无反应；
+   现在都走 /api/restart，引擎自己拉自己。升级就是 git pull + 重启。 */
+async function checkUpdate(silent) {
+  const msg = $('#verMsg');
+  if (msg && !silent) msg.textContent = '检查中…';
+  try {
+    const d = await (await fetch(API + '/api/update')).json();
+    if ($('#verNow')) {
+      $('#verNow').textContent = `版本 v${d.version || '?'}${d.head ? '（' + d.head + '）' : ''}`;
+    }
+    if (!d.ok) {
+      if (msg && !silent) msg.textContent = d.error || '检查失败（不是 git 仓库？）';
+      return;
+    }
+    const chip = $('#chipUpdate');
+    if (d.behind > 0) {
+      if ($('#btnUpgrade')) $('#btnUpgrade').hidden = false;
+      if (chip) { chip.hidden = false; chip.textContent = `⬆ 可升级 ${d.behind}`; }
+      if (msg) msg.textContent = `有 ${d.behind} 个新提交${d.latest ? '：' + d.latest : ''}`;
+    } else {
+      if ($('#btnUpgrade')) $('#btnUpgrade').hidden = true;
+      if (chip) chip.hidden = true;
+      if (msg && !silent) msg.textContent = d.error || '已经是最新版本';
+    }
+  } catch (e) {
+    if (msg && !silent) msg.textContent = '检查失败：引擎没连上？';
+  }
+}
+
+async function doUpgrade() {
+  if (!window.confirm('升级会拉取最新代码并自动重启引擎，正在播放的朗读会中断。继续？')) return;
+  const msg = $('#verMsg');
+  if (msg) msg.textContent = '正在拉取更新…';
+  try {
+    const r = await fetch(API + '/api/update', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!d.ok) { if (msg) msg.textContent = '升级失败：' + (d.error || r.status); return; }
+    if (msg) msg.textContent = '升级完成，引擎正在重启…';
+    toast('升级完成，引擎重启中，几秒后自动重连', 6000);
+    setTimeout(() => connect({ manual: true }), 4500);
+  } catch (e) {
+    if (msg) msg.textContent = '升级请求失败：' + e.message;
+  }
+}
+
+$('#btnCheckUpdate').onclick = () => checkUpdate(false);
+$('#btnUpgrade').onclick = doUpgrade;
+const _chipUp = $('#chipUpdate');
+if (_chipUp) _chipUp.onclick = doUpgrade;
+
 $('#btnLanOn').onclick = () => setLan('0.0.0.0');
 $('#btnLanOff').onclick = () => setLan('127.0.0.1');
 window.addEventListener('pagehide', flushProgress);
@@ -2624,6 +2975,11 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) flush
 
 /* ---------- 启动 ---------- */
 async function boot() {
+  /* iOS 的文件选择器按 accept 里的扩展名过滤，.epub/.mobi 没有对应 UTI，
+     文件会整片变灰选不中 —— 移动端干脆不设过滤，选完再按扩展名校验。 */
+  if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
+    $('#fileIn').removeAttribute('accept');
+  }
   applyTheme(store.get('theme', 'auto'));
   // 语速/音调/音量三个滑块都记着：以前只存了语速，辛苦调好的音调音量一刷新就没了
   const restore = (id, valId, val, unit) => {
@@ -2635,6 +2991,10 @@ async function boot() {
   restore('#pitch', '#pitchV', store.get('pitch', 0), 'Hz');
   restore('#vol', '#volV', store.get('vol', 0), '%');
   count(); renderHistory();
+  // ?shelf=1 直接打开书架：手机上"添加到主屏幕"时可以把书架做成一个入口
+  try {
+    if (new URLSearchParams(location.search).get('shelf')) setTimeout(() => shelfOpen(true), 300);
+  } catch (e) {}
   // 手机上先落到上次用的那一屏，别一进来就是一条看不到头的长页
   if (isMobile()) setView(store.get('mview', '') || ($('#txt').value.trim() ? 'seg' : 'txt'));
   lpRefresh();          // 「登录态」按钮上的小圆点：开局就知道配没配
@@ -2642,7 +3002,11 @@ async function boot() {
   if (isLocalHost() || perm.state === 'granted') {
     const ok = await connect();
     if (!ok) await showOffline();
-    else pollPresynth();      // 引擎可能还留着上一次页面的预合成任务，接管进度
+    else {
+      pollPresynth();      // 引擎可能还留着上一次页面的预合成任务，接管进度
+      // 静默查一次新版本：有就在顶栏点亮「⬆ 可升级」，不打扰
+      setTimeout(() => checkUpdate(true), 6000);
+    }
   } else {
     await showOffline();
   }
