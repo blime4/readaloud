@@ -108,7 +108,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.8.2"
+ENGINE_VERSION = "1.8.3"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -1786,12 +1786,72 @@ def _repo_state() -> dict:
             "dirty": bool(dirty.strip()) if rc3 == 0 else True}
 
 
+_remote_pref = {"order": ["origin", "ssh"]}   # 哪条路通就先用哪条（见 _fetch_remote）
+
+
+def _ssh_url(url: str) -> str:
+    """把 https://github.com/a/b.git 换成 git@github.com:a/b.git。"""
+    m = re.search(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", (url or "").strip())
+    return f"git@github.com:{m.group(1)}/{m.group(2)}.git" if m else ""
+
+
+def _remote_url() -> str:
+    rc, out, _ = _git("remote", "get-url", "origin", timeout=8)
+    return out.strip() if rc == 0 else ""
+
+
+def _fetch_remote(branch: str, timeout: float = 12) -> tuple:
+    """拉远端引用，HTTPS 不通就改走 SSH；记住哪条通，下次先用它。
+
+    这台机器上 Clash 对 github.com 的 HTTPS 是持续 502，api.github.com 却正常，
+    SSH 22 也是通的 —— 结果就是"检查更新"永远报拉取失败，静默升级看着在跑，
+    其实从来没查到过新版本。两条腿都试，通的那条排前面（不然每次都要等
+    HTTPS 超时，按钮转二十秒）。返回 (rc, err, 用了哪条路)"""
+    alt = _ssh_url(_remote_url())
+    order = [k for k in _remote_pref["order"] if k == "origin" or alt]
+    if "origin" not in order:
+        order.insert(0, "origin")
+    errs = []
+    for kind in order:
+        if kind == "origin":
+            rc, _o, err = _git("fetch", "--quiet", "origin", branch, timeout=timeout)
+            if rc == 0:
+                _remote_pref["order"] = order
+                return 0, "", "origin"
+            errs.append("HTTPS: " + err[-120:])
+        else:
+            rc2, _o2, err2 = _git("fetch", "--quiet", alt,
+                                  f"refs/heads/{branch}:refs/remotes/origin/{branch}",
+                                  timeout=timeout)
+            if rc2 == 0:
+                _remote_pref["order"] = [k for k in ("ssh", "origin") if k == "origin" or alt]
+                log.info("HTTPS 拉不动，改走 SSH 拉到远端引用")
+                return 0, "", alt
+            errs.append("SSH: " + err2[-120:])
+    return 1, " / ".join(errs)[-300:], ""
+
+
+def _pull_remote(branch: str, timeout: float = 90) -> tuple:
+    """升级用：先 origin，失败再试 SSH。返回 (rc, 输出, 用了哪条路)。"""
+    alt = _ssh_url(_remote_url())
+    rc, out, err = _git("pull", "--ff-only", "origin", branch, timeout=timeout)
+    if rc == 0:
+        return 0, out, "origin"
+    if not alt:
+        return rc, (err or out), "origin"
+    rc2, out2, err2 = _git("pull", "--ff-only", alt, branch, timeout=timeout)
+    if rc2 == 0:
+        log.info("HTTPS 拉不动，改走 SSH 升级")
+        return 0, out2, alt
+    return rc2, " / ".join(x for x in (err, err2, out2) if x)[-300:], alt
+
+
 def _check_update() -> dict:
     st = _repo_state()
     if not st.get("repo"):
         return {"ok": False, "error": "这个目录不是 git 仓库，没法自动升级。", **st}
     branch = st["branch"] or "main"
-    rc, _, err = _git("fetch", "--quiet", "origin", branch, timeout=20)
+    rc, err, via = _fetch_remote(branch)
     behind, latest = 0, ""
     if rc == 0:
         rc2, out, _ = _git("rev-list", "--count", f"HEAD..origin/{branch}", timeout=15)
@@ -1800,7 +1860,7 @@ def _check_update() -> dict:
         rc3, subj, _ = _git("log", "-1", "--format=%s", f"origin/{branch}", timeout=10)
         latest = subj if rc3 == 0 else ""
     return {"ok": True, "version": ENGINE_VERSION, "behind": behind, "latest": latest,
-            "error": "" if rc == 0 else ("拉取失败：" + err[-160:]), **st}
+            "via": via, "error": "" if rc == 0 else ("拉取失败：" + err[-160:]), **st}
 
 
 @app.get("/api/version")
@@ -1829,11 +1889,11 @@ def api_update_apply():
     if st.get("dirty"):
         return jsonify({"ok": False, "error": "工作区有未提交的改动，先提交或还原再升级。"}), 409
     branch = st["branch"] or "main"
-    rc, out, err = _git("pull", "--ff-only", "origin", branch, timeout=90)
+    rc, out, via = _pull_remote(branch)
     if rc != 0:
-        return jsonify({"ok": False, "error": (err or out or "git pull 失败")[-300:]}), 502
+        return jsonify({"ok": False, "error": (out or "git pull 失败")[-300:]}), 502
     _restart_engine(1.6)
-    return jsonify({"ok": True, "restarted": True, "output": out[-400:]})
+    return jsonify({"ok": True, "restarted": True, "via": via, "output": out[-400:]})
 
 
 def _auto_update_worker() -> None:
@@ -1850,12 +1910,13 @@ def _auto_update_worker() -> None:
                     log.info("有新版本，但工作区有改动，跳过自动升级")
                 elif _active_clients() == 0 and not _presynth["running"]:
                     branch = info.get("branch") or "main"
-                    rc, out, err = _git("pull", "--ff-only", "origin", branch, timeout=90)
+                    rc, out, via = _pull_remote(branch)
                     if rc == 0:
-                        log.info("静默升级完成（%s 个提交），重启引擎", info["behind"])
+                        log.info("静默升级完成（%s 个提交，走 %s），重启引擎", info["behind"], via)
+                        _rlog(f"静默升级：{info['behind']} 个提交（{via}）")
                         _restart_engine(1.2)
                         return
-                    log.warning("静默升级失败: %s", (err or out)[-200:])
+                    log.warning("静默升级失败: %s", (out or "")[-200:])
                 else:
                     log.info("有新版本，等当前会话结束再升级")
         except Exception as e:
