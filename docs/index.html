@@ -307,6 +307,8 @@
     header .status{display:none}
     header .logo{font-size:15px}
     header .chip{font-size:11.5px;padding:5px 9px}
+    /* 手机上"页面从哪来"没意义，腾出位置给预合成进度 */
+    #chipMode{display:none}
     body{font-size:15px}
     /* 单视图：一次只给一屏，靠顶部分段切换，不再让三张卡挤成一条长页 */
     main{display:block;padding:10px 12px calc(112px + env(safe-area-inset-bottom))}
@@ -1435,6 +1437,7 @@ function playAt(i, force) {
   S.idx = i;
   highlight();
   saveResume();
+  updateMediaInfo();
   if (!S.audio) {
     S.audio = new Audio();
     setMiniCPMReaderAudio(S.audio);
@@ -1467,9 +1470,10 @@ function playAt(i, force) {
     if (S.playing) gapThenNext();
   };
   S.tried = 0;
+  keepAwake(true);
   a.play().then(() => {
     if (S.playRequest !== request) return;
-    S.playing = true; updateBar();
+    S.playing = true; updateBar(); setMediaState('playing');
   }).catch(e => {
     if (S.playRequest !== request) return;
     S.playing = false; updateBar();
@@ -1496,9 +1500,64 @@ function segEndAt() {
   }
   return S.items.length - 1;
 }
+/* ---------- 锁屏控制与屏幕常亮（手机听书的刚需） ----------
+   没接 MediaSession 时，锁屏通知栏只有一条"此标签页正在播放音频"，
+   没有暂停、没有上一句下一句，耳机线控也不灵。Wake Lock 让"边看
+   高亮边听"时屏幕不熄；切后台浏览器会自动放锁，纯听不受影响。 */
+function updateMediaInfo() {
+  if (!('mediaSession' in navigator)) return;
+  const cur = S.items[S.idx];
+  try {
+    navigator.mediaSession.metadata = cur ? new MediaMetadata({
+      title: cur.text.length > 64 ? cur.text.slice(0, 64) + '…' : cur.text,
+      artist: (S.book && S.book.title) || 'ReadAloud 朗读',
+      album: `第 ${S.idx + 1} / ${S.items.length} 句`,
+    }) : null;
+  } catch (e) { /* 老浏览器不支持就算了 */ }
+}
+function setMediaState(st) {
+  if (!('mediaSession' in navigator)) return;
+  try { navigator.mediaSession.playbackState = st; } catch (e) {}
+}
+let _wake = null;
+async function keepAwake(on) {
+  try {
+    if (on) {
+      if (_wake || !('wakeLock' in navigator)) return;
+      _wake = await navigator.wakeLock.request('screen');
+      _wake.addEventListener('release', () => { _wake = null; });
+    } else if (_wake) {
+      await _wake.release().catch(() => {});
+      _wake = null;
+    }
+  } catch (e) { _wake = null; }   // 没授权/不支持就静默，不影响播放
+}
+if ('mediaSession' in navigator) {
+  const safe = (name, fn) => { try { navigator.mediaSession.setActionHandler(name, fn); } catch (e) {} };
+  safe('play', () => {
+    if (!S.items.length) return;
+    if (S.idx < 0) play();
+    else if (S.audio && S.audio.paused) { stopMiniCPMTurn(); resumeReader(); }
+  });
+  safe('pause', () => pauseReader());
+  safe('previoustrack', () => prevSeg());
+  safe('nexttrack', () => nextSeg());
+}
+/* iOS 把后台页挂起会顺手暂停音频；回到前台自动接上，别让用户再点一次 */
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') { keepAwake(false); return; }
+  if (!S.playing) return;
+  keepAwake(true);
+  if (S.audio && S.audio.paused && !S.voiceBookmark) {
+    stopMiniCPMTurn();
+    resumeReader();
+  }
+});
+
 function finish() {
   S.playing = false; S.idx = S.items.length - 1;
   highlight(); updateBar();
+  setMediaState('paused'); keepAwake(false);
   toast('朗读完成 ✓');
 }
 function pauseReader() {
@@ -1508,6 +1567,7 @@ function pauseReader() {
   S.retryTimer = 0;
   S.playing = false;
   S.audio?.pause();
+  setMediaState('paused'); keepAwake(false);
 }
 function stopPlayback() {
   S.voiceBookmark = null;
@@ -1535,7 +1595,8 @@ function prevSeg() {
 function resumeReader() {
   const request = ++S.playRequest;
   S.playing = true;
-  S.audio.play().catch(() => {
+  keepAwake(true);
+  S.audio.play().then(() => setMediaState('playing')).catch(() => {
     if (S.playRequest === request) {
       S.playing = false;
       updateBar();
