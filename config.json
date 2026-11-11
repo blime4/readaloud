@@ -29,7 +29,7 @@
     "quality": false
   },
   "host": "0.0.0.0",
-  "tts_provider": "edge",
+  "tts_provider": "local",
   "tts_local_url": "http://127.0.0.1:8891",
   "tts_local_model": "CosyVoice2-0.5B",
   "tts_local_voice": "默认女声",
