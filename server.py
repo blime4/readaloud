@@ -71,7 +71,8 @@ DEFAULT_CONFIG = {
     "normalize": True,              # 读音规整（符号/日期/金额读顺）
     "auto_voice": True,             # 按内容自动推荐音色
     "long_doc_chars": 6000,         # 超过这个字数就分块总结，避免静默截断
-    "cache_limit": 400,             # 最多缓存多少个音频片段
+    "cache_limit": 1200,            # 最多缓存多少个音频片段（本机 TTS 一句一个文件）
+    "cache_mb": 900,                # 缓存总体积上限，条数之外的真正兜底
     # 上下文窗口。必须给"思考 + 正文"都留出空间：实测 8192 时 qwen3.5:9b 思考了
     # 一万七千多字就把预算烧光，正文输出 0 字（点「升配」等三分钟换来一句报错）。
     # 本机 16G 显存足够放到 32768。
@@ -102,13 +103,14 @@ DEFAULT_CONFIG = {
     "tts_local_autostart": True,
     "tts_local_python": "",         # 留空自动探测（见 _tts_python）
     "tts_local_script": "",         # 留空按端口猜：8891=tts_cosy_server，8890=tts_qwen_server
+    "tts_local_args": "",           # 额外启动参数，例如 "--fp16"（半精度，显存吃紧时可试）
     # 引擎自身：静默升级（git pull + 空闲时自动重启）
     "auto_update": True,
     # 兼容监听端口：老书签 127.0.0.1:8756 也指向本引擎，避免又打开一份旧副本
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.9.0"
+ENGINE_VERSION = "1.10.0"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -128,6 +130,8 @@ FEATURES = [
     "tts-provider",         # /api/tts 支持 provider=edge|local（本机 OpenAI 兼容 TTS）
     "lan-access",           # /api/lan：手机通过局域网访问本机引擎
     "presynth",             # /api/presynth：整本后台预合成，播放句句命中缓存
+    "presynth-hold",        # /api/presynth/hold：开播即让路，暂停从播放位置续备
+    "tts-bench",            # /api/tts/bench：量本机合成的 RTF，判断能不能跟上播放
     "tts-autostart",        # /api/tts/local：一键拉起本机大模型 TTS 并自动写回配置
     "engine-upgrade",       # /api/restart + /api/update：原地热重启、git pull 自升级
 ]
@@ -348,11 +352,48 @@ def synth(text: str, voice: str, rate: str, pitch: str, volume: str,
 
 
 def _trim_cache() -> None:
+    """按「条数 + 体积」双上限清缓存（LRU）。
+
+    只按条数清是不够的：一本书 464 句就顶穿了默认上限，预合成刚把整本
+    做完，最早合成的那批（正好是最该听的头部）又被自己挤掉，播放时重新
+    合成 —— 长文越听越卡，根子就在这里。
+
+    两个约束是踩出来的：
+    1) 删除失败绝不能让合成失败。本机的安全策略会拦批量删除，抛的还不是
+       Exception 的子类 —— 结果整个预合成线程被带走，界面上看着"在跑"其实
+       一句都没动。所以这里 catch BaseException，失败就放弃本轮。
+    2) 一轮最多删几条，别在合成路径上一次性删几百个文件。
+    """
     try:
-        files = sorted((p for p in TTS_CACHE.iterdir() if p.is_file() and p.suffix != ".part"),
-                       key=lambda p: p.stat().st_mtime, reverse=True)
-        for f in files[_cache_limit_now():]:
-            f.unlink(missing_ok=True)
+        entries = []
+        for p in TTS_CACHE.iterdir():
+            if not p.is_file() or p.suffix == ".part":
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            entries.append((st.st_mtime, st.st_size, p))
+        limit_n = _cache_limit_now()
+        limit_b = int(CFG.get("cache_mb", 900)) * 1024 * 1024
+        total_b = sum(e[1] for e in entries)
+        if len(entries) <= limit_n + 8 and total_b <= limit_b:
+            return                      # 没明显超：别每次合成都扫一遍目录
+        entries.sort(reverse=True)
+        used = 0
+        removed = 0
+        for i, (_m, size, p) in enumerate(entries):
+            used += size
+            if i < limit_n and used <= limit_b:
+                continue
+            try:
+                p.unlink(missing_ok=True)
+                removed += 1
+            except BaseException as e:                  # noqa: BLE001
+                log.warning("删缓存文件失败，本轮放弃清理：%s", e)
+                return
+            if removed >= 24:
+                return
     except Exception:
         pass
 
@@ -1455,26 +1496,56 @@ def api_book_delete(book_id):
 
 
 # ---------------------------------------------------------------- 后台预合成全文
-# 本地大模型 RTF≈1：听一句合成一句是贴着极限走的，逐句预取只有 3 句的缓冲。
-# 干脆在后台把整本书提前合成进 TTS_CACHE —— 播放时 /api/tts 全部命中缓存，
-# 句与句之间零等待。缓存键和前台 synth() 完全同源，所以"预合成过"等于"播过"。
+# 本地大模型 RTF≈0.9：合成比朗读快一点点，但只有一点点。也就是说
+# 「边听边备」在物理上是不成立的 —— 想听就必须独占这张卡。
+# 所以预合成的定位改成「不播的时候替你往后备」：一开播就让路，暂停/停止
+# 再从播放位置往后接着备。以前是只要前台 5 秒没动静就开工，而一句长句
+# 要听 12 秒 —— 每句之间它都能插进去干 7 秒活，前台请求就排在后面等，
+# 长文听感自然是一句一卡。
 
 _presynth = {
     "running": False, "job": 0, "total": 0, "done": 0,
     "fail": 0, "book": "", "label": "", "started": 0.0, "finished": 0.0,
-    "error": "",
+    "error": "", "hold": False, "at": 0, "jobs": [], "args": None,
 }
 _presynth_lock = threading.Lock()
-_play_touch = {"ts": 0.0}       # 最近一次前台合成的时间；预合成见了要让路
+_synth_gate = threading.Condition()     # 前台/预合成共用 GPU 的闸门
+_fg_busy = {"n": 0}                     # 正在跑的前台合成数
+_play_touch = {"ts": 0.0}               # 最近一次前台合成的时间；预合成见了要让路
 PRESYNTH_MAX_SEGS = 6000        # 一本书的合理上限，防误传整站文章
+PRESYNTH_IDLE = 25.0            # 前台安静这么久，预合成才动手（短暂停不打扰）
 
 
 def _cache_limit_now() -> int:
-    """预合成期间临时抬高缓存上限：书比上限长，会边合成边把自己挤掉。"""
+    """当前这本书整本的音频都留着。
+
+    预合成把 464 句备齐了，缓存上限却还是 400 —— 一超就按 LRU 删，
+    删掉的正好是最早合成、也就是开头那几十句，听到那儿又得重新合成。
+    所以上限跟着书的长度走，体积由 cache_mb 兜底。
+    """
     with _presynth_lock:
-        if _presynth["running"]:
-            return max(int(CFG["cache_limit"]), _presynth["total"] + 100)
-    return int(CFG["cache_limit"])
+        total = int(_presynth.get("total") or 0)
+    base = int(CFG["cache_limit"])
+    return max(base, total + 80) if total > 0 else base
+
+
+def _presynth_turn(stale) -> bool:
+    """等一个「GPU 闲着」的时机；返回 False 表示这个 job 已经作废。
+
+    条件是三件事同时成立：没有前台请求在跑、播放器没在播（hold）、
+    前台最近 PRESYNTH_IDLE 秒内没来过请求。
+    """
+    while True:
+        if stale():
+            return False
+        with _synth_gate:
+            busy = (_fg_busy["n"] > 0
+                    or _presynth["hold"]
+                    or time.time() - _play_touch["ts"] < PRESYNTH_IDLE)
+            if not busy:
+                return True
+            _synth_gate.wait(0.5)
+
 
 
 def _seg_rate(base_rate: int, offset) -> str:
@@ -1488,7 +1559,7 @@ def _seg_rate(base_rate: int, offset) -> str:
     return (f"+{v}%" if v >= 0 else f"{v}%")
 
 
-def _presynth_worker(my_job: int, jobs: list, args: dict) -> None:
+def _presynth_worker(my_job: int, jobs: list, args: dict, base_at: int = 0) -> None:
     """job 号就是停止信号：开始新任务时号数 +1，旧 worker 立刻作废。
     以前用布尔 cancel —— 旧线程还没退出时新任务把它复位了，旧线程
     永远不退，两个线程抢着写进度，统计出过 4/2 这种鬼数字。"""
@@ -1503,20 +1574,22 @@ def _presynth_worker(my_job: int, jobs: list, args: dict) -> None:
         with _presynth_lock:
             return _presynth["job"] != my_job
 
-    done = fail = 0
-    for text, off in jobs:
-        if stale():
-            return
-        # 前台正在合成（= 用户正在听，但这一句还没缓存）就先让路，别抢 GPU
-        while not stale() and time.time() - _play_touch["ts"] < 5:
-            time.sleep(2)
-        if stale():
+    done = base_at           # done 用绝对下标计数，前端进度条才对得上
+    fail = 0
+    for k, (text, off) in enumerate(jobs):
+        with _presynth_lock:
+            if _presynth["job"] != my_job:
+                return
+            _presynth["at"] = base_at + k       # 记着备到第几句，暂停后从这里续
+        # 前台在合成 / 正在播 / 刚播过：一律让路。让路的粒度就是一句，
+        # 所以「一句」不能太长 —— 这也是 max_len 别调太大的原因。
+        if not _presynth_turn(stale):
             return
         try:
             synth(text, voice, _seg_rate(base_rate, off), pitch, volume,
                   provider, model)
             done += 1
-        except Exception as e:              # 单句失败不停整本书
+        except BaseException as e:          # 单句失败不停整本书（含被安全策略拦下的删除）
             fail += 1
             log.warning("预合成第 %d/%d 句失败: %s", done + fail,
                         len(jobs), e)
@@ -1528,20 +1601,48 @@ def _presynth_worker(my_job: int, jobs: list, args: dict) -> None:
             _presynth["running"] = False
             _presynth["finished"] = time.time()
             log.info("预合成结束：%s —— 完成 %d / 失败 %d / 共 %d",
-                     _presynth["label"], done, fail, len(jobs))
+                     _presynth["label"], done, fail, _presynth["total"])
 
 
-def _start_presynth(jobs: list, args: dict) -> None:
+def _start_presynth(jobs: list, args: dict, start_at: int = 0) -> None:
+    """jobs 永远是**整本**的列表，start_at 是绝对下标（第几句）。
+
+    以前给 worker 传的是切过的子列表，at 却按绝对下标记 —— 暂停后
+    「从第 8 句续」会算成子列表的第 8 项，直接越界、一句都不做。
+    """
+    total = len(jobs)
+    start_at = max(0, min(int(start_at), total - 1))
     with _presynth_lock:
         _presynth["job"] += 1               # 号数一变，旧 worker 自动作废
-        _presynth.update(running=True, total=len(jobs),
-                         done=0, fail=0, started=time.time(),
-                         finished=0.0, error="",
+        _presynth.update(running=True, total=total,
+                         done=start_at, fail=0, started=time.time(),
+                         finished=0.0, error="", at=start_at,
+                         jobs=list(jobs), args=dict(args),
                          book=args.get("book") or "",
                          label=args.get("label") or "全文")
         my_job = _presynth["job"]
-    threading.Thread(target=_presynth_worker, args=(my_job, jobs, args),
+    threading.Thread(target=_presynth_worker,
+                     args=(my_job, jobs[start_at:], args, start_at),
                      daemon=True, name="presynth").start()
+
+
+def _presynth_seek(at: int) -> None:
+    """从第 at 句重新开工（只往前跳，不回头）。
+
+    播到一半暂停时，前端把播放位置传过来 —— 已经听过的部分没必要再备，
+    直接把队列挪到身后，省下来的 GPU 全用在「马上要听的那几句」上。
+    """
+    with _presynth_lock:
+        jobs = list(_presynth.get("jobs") or [])
+        args = _presynth.get("args")
+        running = _presynth["running"]
+        cur = int(_presynth.get("at") or 0)
+    if not jobs or not args or not running:
+        return
+    at = max(0, min(int(at), len(jobs) - 1))
+    if at <= cur:
+        return
+    _start_presynth(jobs, args, start_at=at)
 
 
 @app.post("/api/presynth")
@@ -1567,8 +1668,13 @@ def api_presynth_start():
     }
     if args["provider"] not in TTS.PROVIDERS:
         return jsonify({"ok": False, "error": f"不认识的语音引擎：{args['provider']}"}), 400
-    _start_presynth(jobs, args)
-    return jsonify({"ok": True, "total": len(jobs)})
+    try:
+        start_at = max(0, int(body.get("from") or 0))
+    except (TypeError, ValueError):
+        start_at = 0
+    start_at = min(start_at, len(jobs) - 1)
+    _start_presynth(jobs, args, start_at=start_at)
+    return jsonify({"ok": True, "total": len(jobs), "from": start_at})
 
 
 @app.get("/api/presynth")
@@ -1576,8 +1682,35 @@ def api_presynth_status():
     with _presynth_lock:
         st = {k: _presynth[k] for k in
               ("running", "total", "done", "fail", "book", "label",
-               "started", "finished", "error")}
+               "started", "finished", "error", "hold", "at")}
+    with _synth_gate:
+        st["fg"] = _fg_busy["n"]
+        st["idle"] = round(time.time() - _play_touch["ts"], 1)
     return jsonify({"ok": True, **st})
+
+
+@app.post("/api/presynth/hold")
+def api_presynth_hold():
+    """播放器开播 → hold=true（预合成立刻让路）；暂停/停止 → hold=false。
+
+    传了 at 就顺手把预合成队列挪到播放位置后面 —— 已经听过的不用再备。
+    """
+    body = request.get_json(silent=True) or {}
+    on = bool(body.get("on"))
+    new_at = None
+    if not on and body.get("at") is not None:
+        try:
+            new_at = max(0, int(body.get("at")))
+        except (TypeError, ValueError):
+            new_at = None
+    with _synth_gate:
+        _presynth["hold"] = on
+        _synth_gate.notify_all()
+    if new_at is not None:
+        _presynth_seek(new_at)
+    with _presynth_lock:
+        return jsonify({"ok": True, "hold": on, "at": _presynth["at"],
+                        "running": _presynth["running"]})
 
 
 @app.post("/api/presynth/cancel")
@@ -2001,7 +2134,11 @@ def start_local_tts() -> dict:
     flags = (0x00000008 | 0x00000200 | 0x08000000) if os.name == "nt" else 0
     try:
         out = open(BASE / "tts.log", "ab")
-        popen = subprocess.Popen([py, str(script), "--port", str(port)], cwd=str(BASE),
+        extra = CFG.get("tts_local_args") or ""
+        if isinstance(extra, str):
+            extra = extra.split()
+        cmd = [py, str(script), "--port", str(port)] + [str(a) for a in extra]
+        popen = subprocess.Popen(cmd, cwd=str(BASE),
                                  env=env, stdout=out, stderr=subprocess.STDOUT,
                                  stdin=subprocess.DEVNULL, creationflags=flags,
                                  close_fds=True)
@@ -2192,6 +2329,55 @@ def import_too_large(_error):
     return jsonify({"ok": False, "error": "文件不能超过 80 MB。"}), 413
 
 
+@app.get("/api/tts/bench")
+def api_tts_bench():
+    """合成一句真的，量出「每秒音频要花几秒合成」（RTF）。
+
+    本地大模型的 RTF 直接决定长文能不能顺：>1 就意味着合成永远追不上播放，
+    再怎么预取也只是把卡顿推迟一点。这个数字受显卡频率/显存影响很大
+    （实测同一台机器能在 0.9～2.6 之间浮动），所以让用户随时能自己量一次。
+    """
+    provider = (request.args.get("provider") or CFG.get("tts_provider") or "edge").lower()
+    if provider not in TTS.PROVIDERS:
+        return jsonify({"ok": False, "error": f"不认识的语音引擎：{provider}"}), 400
+    # 带时间戳是为了绕开磁盘缓存 —— 命中缓存的话永远是 0 秒，量不出真东西
+    text = "测一句速度，看看这台机器合成一秒语音到底要花多久。" + f"（{int(time.time())}）"
+    voice = ((CFG.get("tts_local_voice") or CFG["default_voice"])
+             if provider == "local" else CFG["default_voice"])
+    started = time.time()
+    with _synth_gate:
+        _fg_busy["n"] += 1
+        _play_touch["ts"] = time.time()
+        _synth_gate.notify_all()
+    try:
+        path, mime = synth(text, voice, CFG["rate"], CFG["pitch"], CFG["volume"],
+                           provider, CFG.get("tts_local_model") or "")
+    except Exception as e:                                   # noqa: BLE001
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 502
+    finally:
+        with _synth_gate:
+            _fg_busy["n"] = max(0, _fg_busy["n"] - 1)
+            _play_touch["ts"] = time.time()
+            _synth_gate.notify_all()
+    took = time.time() - started
+    size = path.stat().st_size if path.exists() else 0
+    audio = size / 9216.0 if mime == "audio/mpeg" else 0.0     # 72kbps mp3 ≈ 9KB/s
+    rtf = round(took / audio, 2) if audio > 0 else 0.0
+    if not audio:
+        verdict = "未知"
+    elif rtf < 0.8:
+        verdict = "很快"
+    elif rtf <= 1.0:
+        verdict = "跟得上"
+    elif rtf < 1.4:
+        verdict = "偏慢"
+    else:
+        verdict = "跟不上"
+    return jsonify({"ok": True, "provider": provider, "voice": voice,
+                    "seconds": round(took, 2), "audio": round(audio, 2),
+                    "rtf": rtf, "verdict": verdict})
+
+
 @app.route("/api/tts", methods=["GET", "POST"])
 def api_tts():
     if request.method == "POST":
@@ -2209,7 +2395,11 @@ def api_tts():
     model = body.get("model") or ""
     if provider not in TTS.PROVIDERS:
         return jsonify({"ok": False, "error": f"不认识的语音引擎：{provider}"}), 400
-    _play_touch["ts"] = time.time()     # 前台要音频了：后台预合成先让路
+    # 上闸门：前台请求期间预合成不许动手，否则这一句要排在它后面等一整句
+    with _synth_gate:
+        _fg_busy["n"] += 1
+        _play_touch["ts"] = time.time()
+        _synth_gate.notify_all()
     try:
         path, mime = synth(text, voice, rate, pitch, volume, provider, model)
     except TTS.TTSConfigError as e:
@@ -2224,6 +2414,11 @@ def api_tts():
     except Exception as e:
         log.error("语音合成失败: %s", e)
         return jsonify({"ok": False, "error": f"语音合成失败：{e}"}), 502
+    finally:
+        with _synth_gate:
+            _fg_busy["n"] = max(0, _fg_busy["n"] - 1)
+            _play_touch["ts"] = time.time()
+            _synth_gate.notify_all()
     resp = send_from_directory(TTS_CACHE, path.name, mimetype=mime)
     if body.get("download"):
         resp.headers["Content-Disposition"] = f'attachment; filename="readaloud.{path.suffix[1:]}"'

@@ -651,7 +651,8 @@
   <span class="chip gray btnish" id="chipShelf" title="书架：导入过的书都在这儿，进度跟着书走">书架</span>
   <span class="chip gray btnish" id="chipTheme" title="切换深色/浅色（朗读常在夜里用）">夜间</span>
   <span class="chip gray" id="chipMode" title="当前页面从哪里来 / 引擎在哪里">—</span>
-  <span class="chip ok btnish" id="chipPre" hidden title="后台正在把全文提前合成进缓存，听到的每句都会秒出；点一下可停止">预合成…</span>
+  <span class="chip ok btnish" id="chipPre" hidden title="后台正在把全文提前合成进缓存（只在暂停/不播时干活，一开播就让路）；点一下可停止">预合成…</span>
+  <span class="chip gray" id="chipBuf" hidden>合成中…</span>
   <span class="chip warn btnish" id="chipUpdate" hidden title="引擎有新版本，点这里升级并重启">可升级</span>
 </header>
 
@@ -774,6 +775,7 @@
       <div class="cactions" style="padding:6px 0 8px;gap:8px">
         <button class="primary tiny" id="btnTtsStart" title="引擎会自己挑选环境并拉起本机 TTS 服务">▶ 一键启动本机 TTS</button>
         <button class="ghost tiny" id="btnPresetCosy" title="填入 CosyVoice2 的默认地址与音色">CosyVoice2 预设</button>
+        <button class="ghost tiny" id="btnTtsBench" title="合成一句真实的语音，量出它比播放快还是慢">测速度</button>
       </div>
       <div class="hint" id="ttsStartMsg"></div>
       <pre class="ttslog" id="ttsStartLog" hidden></pre>
@@ -1253,8 +1255,8 @@ async function loadHealth() {
 /* 引擎跑的是旧代码就明确提示：改完 server.py 进程不会自己换代码，
    不提示的话会出现「页面是新的、引擎还是两天前的旧版」却没人察觉。 */
 const REQUIRED_FEATURES = ['structured-items', 'prosody-normalize', 'local-document-import',
-  'bookshelf', 'tts-provider'];
-const MIN_ENGINE = '1.3.1';   // 页面用到的引擎能力下限，升一次改一次
+  'bookshelf', 'tts-provider', 'presynth-hold'];
+const MIN_ENGINE = '1.10.0';   // 页面用到的引擎能力下限，升一次改一次
 
 function cmpVer(a, b) {
   const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
@@ -1603,20 +1605,154 @@ function ttsURL(i) {
   if (b.provider && b.provider !== 'edge') { q.set('provider', b.provider); q.set('model', b.model || ''); }
   return signed(API + '/api/tts?' + q.toString());
 }
-function preload(i) {
-  if (i >= S.items.length) return;
-  const slot = i % 3;
-  const a = S.preload[slot] || (S.preload[slot] = new Audio());
-  a.preload = 'auto';
-  try { a.src = ttsURL(i); } catch (e) {}
+/* ---------- 音频流水线 ----------
+   本机大模型合成一句大约要 1.1 倍于它自己的时长（RTF 0.9），余量薄得像纸：
+   请求顺序错一次、或者换 src 时又走一遍网络，听感就是一句一卡。
+   所以这里是一条「单飞 + 有序」的预取队列：
+   · 永远按播放顺序逐句取，一次只发一个请求 —— 合成端本来就是串行的
+     （CosyVoice 单卡一把锁），并发发三个只会让真正要听的那句排到队尾；
+   · 取回来存成 Blob URL，播放时 src 直接指向内存，切换零等待；
+   · 只留播放位置附近的几段，手机上不吃内存。 */
+const PF = {
+  blobs: new Map(),   // 下标 -> {url, size}
+  order: [],          // 待取的下标（有序）
+  inflight: -1,       // 正在取的下标，-1 表示空闲
+  token: 0,           // 换书/换音色时自增：旧请求回来直接丢弃
+  abort: null,
+  bad: new Set(),     // 合成失败过的下标，别无限重试
+};
+
+function pfDepth() {
+  const p = S.base && S.base.provider;
+  return p && p !== 'edge' ? 6 : 3;
 }
-function warmup(from, n) { for (let k = 0; k < n; k++) preload(from + k); }
+/* 本机大模型合成一句 ≈ 播放一句（实测 0.9～1.1 倍），所以不能"边听边等"——
+   起播前先备好前两句，给流水线一个二十来秒的缓冲，后面才接得顺。
+   系统语音快得多，不用等。 */
+function pfReady(from, n) {
+  let k = 0;
+  for (let i = from; i < from + n && i < S.items.length; i++) if (pfGet(i)) k++;
+  return k;
+}
+async function primeFirst(from, need) {
+  const b = S.base || baseStyle();
+  if (!b.provider || b.provider === 'edge') { pfSeed(from); return; }
+  const want = Math.min(need, Math.max(1, S.items.length - from));
+  pfSeed(from);
+  const t0 = Date.now();
+  let warned = false;
+  while (Date.now() - t0 < 90000) {
+    const have = pfReady(from, want);
+    if (have >= want) { bufChip(''); return; }
+    if (PF.bad.has(from)) { bufChip(''); return; }   // 合成失败，直接走兜底
+    const sec = Math.round((Date.now() - t0) / 1000);
+    if (sec > 30 && !warned) {
+      warned = true;
+      toast('本机合成偏慢，起播要多等一会儿。想查原因可去「语音引擎 → 测速度」；赶时间可切回微软语音。', 7000);
+    }
+    const msg = `正在准备前 ${want} 句语音 · 已备 ${have} · ${sec} 秒`;
+    bufChip(msg);
+    const ov = $('#overlay');
+    if (ov && ov.classList.contains('show')) overlay(true, msg);
+    await new Promise(r => setTimeout(r, 200));
+  }
+  bufChip('');
+}
+function bufChip(text) {
+  const el = $('#chipBuf');
+  if (!el) return;
+  el.hidden = !text;
+  el.textContent = text || '';
+}
+function pfClear() {
+  PF.token++;
+  try { if (PF.abort) PF.abort.abort(); } catch (e) {}
+  PF.abort = null;
+  PF.order = [];
+  PF.inflight = -1;
+  PF.bad.clear();
+  for (const b of PF.blobs.values()) { try { URL.revokeObjectURL(b.url); } catch (e) {} }
+  PF.blobs.clear();
+  bufChip('');
+}
+function pfGet(i) { const b = PF.blobs.get(i); return b ? b.url : ''; }
+function pfTrim() {
+  if (S.idx < 0) return;
+  const lo = S.idx - 2, hi = S.idx + pfDepth() + 2;
+  for (const [i, b] of PF.blobs) {
+    if (i >= lo && i <= hi) continue;
+    try { URL.revokeObjectURL(b.url); } catch (e) {}
+    PF.blobs.delete(i);
+  }
+}
+function pfSeed(from) {
+  const d = pfDepth();
+  const want = [];
+  for (let i = Math.max(0, from); i < Math.min(from + d, S.items.length); i++) {
+    if (!PF.blobs.has(i) && !PF.bad.has(i)) want.push(i);
+  }
+  PF.order = want;
+  pfPump();
+}
+function pfPump() {
+  if (PF.inflight >= 0) return;
+  while (PF.order.length) {
+    const i = PF.order.shift();
+    if (PF.blobs.has(i) || PF.bad.has(i) || i >= S.items.length) continue;
+    pfFetch(i);
+    return;
+  }
+}
+async function pfFetch(i) {
+  const token = PF.token;
+  PF.inflight = i;
+  const ctl = new AbortController();
+  PF.abort = ctl;
+  try {
+    const r = await fetch(ttsURL(i), { signal: ctl.signal, cache: 'force-cache' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const blob = await r.blob();
+    if (token !== PF.token) return;
+    if (!blob.size) throw new Error('空音频');
+    PF.blobs.set(i, { url: URL.createObjectURL(blob), size: blob.size });
+    S.fail.delete(i);
+  } catch (e) {
+    if (token === PF.token && e.name !== 'AbortError') PF.bad.add(i);
+  } finally {
+    if (token === PF.token) {
+      PF.inflight = -1;
+      PF.abort = null;
+      pfTrim();
+      pfPump();
+    }
+  }
+}
+/* 等某一句进内存：播放前用它来"顶住"第一句，同时把秒数摊在状态栏上 */
+function waitBlob(i, request, timeout) {
+  return new Promise(resolve => {
+    const t0 = Date.now();
+    const step = () => {
+      if (S.playRequest !== request) return resolve('');
+      const u = pfGet(i);
+      if (u) return resolve(u);
+      if (PF.bad.has(i)) return resolve('');
+      const ms = Date.now() - t0;
+      if (ms > (timeout || 240000)) return resolve('');
+      bufChip(`正在合成第 ${i + 1} 句 · ${(ms / 1000).toFixed(0)} 秒`);
+      setTimeout(step, 150);
+    };
+    step();
+  });
+}
+function preload(i) { pfSeed(i); }
+function warmup(from, n) { pfSeed(from); }
 
 /* ---------- 后台预合成全文 ----------
-   本地大模型 RTF≈1，听一句合成一句是贴着极限走的。开书后让引擎在
-   后台把整本提前合成进缓存，播放时句句秒出。缓存键里带着音色/语速，
-   所以参数一变旧音频全作废 —— 这里自动用新参数重开预合成。 */
-const PRE = { on: false, key: '', timer: null };
+   本地大模型 RTF≈0.9：合成只比朗读快一点点，所以「边听边备」在物理上
+   不成立 —— 想听就得独占 GPU。它的定位改成「不播的时候替你往后备」：
+   一开播就让路（/api/presynth/hold），暂停时从播放位置往后接着备。
+   缓存键里带着音色/语速，参数一变旧音频全作废，这里自动用新参数重开。 */
+const PRE = { on: false, key: '', timer: null, doneKey: '' };
 
 function presynthKey() {
   const b = S.base || baseStyle();
@@ -1624,12 +1760,25 @@ function presynthKey() {
                          b.provider, b.model, S.book && S.book.id]);
 }
 
-async function startPresynth() {
+/* 播放状态告诉引擎：hold=true 时预合成一句都不许合成 */
+function presynthHold(on, at) {
+  if (!ONLINE) return;
+  const body = { on: !!on };
+  if (!on && at != null) body.at = Math.max(0, at | 0);
+  fetch(API + '/api/presynth/hold', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).catch(() => { /* 旧引擎没这个接口，退化成老行为 */ });
+}
+
+async function startPresynth(from) {
   if (!ONLINE || !S.items.length) return;
   const key = presynthKey();
   if (PRE.on && PRE.key === key) return;    // 同一本书同一套参数，别重开
   PRE.key = key;
   const b = S.base || baseStyle();
+  const at = Math.max(0, Math.min(
+    from == null ? (Math.max(0, S.idx) + pfDepth()) : from, S.items.length - 1));
   try {
     const r = await fetch(API + '/api/presynth', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1639,13 +1788,13 @@ async function startPresynth() {
         volume: sgn(b.volume, '%'), provider: b.provider, model: b.model || '',
         book: (S.book && S.book.id) || '',
         label: (S.book && S.book.title) || '当前文稿',
+        from: at,
       }),
     });
     const d = await r.json();
     if (d.ok && d.total > 1) {
       PRE.on = true;
       pollPresynth();
-      toast(`后台预合成已开始：${d.total} 句，边听边备，听到的都秒出`, 3600);
     }
   } catch (e) { /* 预合成是锦上添花，失败不打扰朗读 */ }
 }
@@ -1667,10 +1816,13 @@ async function pollPresynth() {
       }
       el.hidden = false;
       const pct = d.total ? Math.round(d.done / d.total * 100) : 0;
-      el.textContent = `预合成 ${d.done}/${d.total}（${pct}%）`;
+      el.textContent = d.hold
+        ? `预合成已暂停 ${d.done}/${d.total}`
+        : `预合成 ${d.done}/${d.total}（${pct}%）`;
     }
   } catch (e) { /* 引擎没这个接口（旧版本），静默 */ }
   if (!running) {
+    if (PRE.on) PRE.doneKey = PRE.key;   // 这本书已经整本备完了，别再重开
     PRE.on = false;
     el.hidden = true;
   } else {
@@ -1747,10 +1899,28 @@ function playAt(i, force) {
     S.audio = new Audio();
     setMiniCPMReaderAudio(S.audio);
   }
+  keepAwake(true);
+  presynthHold(true);          // 开播了：后台预合成立刻让路，GPU 只喂这一句
+  const ready = pfGet(i);
+  if (ready) {
+    startSeg(i, ready, request, force);
+    pfSeed(i + 1);
+    return;
+  }
+  // 还没备好：让流水线优先合成这一句，界面上把秒数报出来 ——
+  // 以前这里是对着静音干等，用户根本不知道是在合成还是卡死了。
+  pfSeed(i);
+  waitBlob(i, request).then(url => {
+    if (S.playRequest !== request) return;
+    startSeg(i, url || ttsURL(i), request, force);
+  });
+}
+
+function startSeg(i, url, request, force) {
   const a = S.audio;
   a.onended = null;
   a.onerror = null;
-  a.src = ttsURL(i);
+  a.src = url;
   a.onended = () => { if (S.playing) gapThenNext(); };
   a.onerror = () => {
     if (S.audio !== a || S.idx !== i || (!S.playing && (!force || S.playRequest !== request))) return;
@@ -1784,7 +1954,8 @@ function playAt(i, force) {
     S.playing = false; updateBar();
     toast('播放被浏览器拦住了，请再点一次「▶」', 3000);
   });
-  warmup(i + 1, 3);
+  bufChip('');
+  pfSeed(i + 1);
 }
 /* 句间/段间停顿：以前是 MP3 一个接一个无缝连读，听感像机器；
    现在按 text_nlp 给的 pause（标题 760ms、段末 660ms、句间 330ms）留呼吸。 */
@@ -1853,6 +2024,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') { keepAwake(false); return; }
   if (!S.playing) return;
   keepAwake(true);
+  pfSeed(Math.max(0, S.idx) + 1);      // 切回来把流水线补齐（后台时取回不动）
   if (S.audio && S.audio.paused && !S.voiceBookmark) {
     stopMiniCPMTurn();
     resumeReader();
@@ -1863,6 +2035,8 @@ function finish() {
   S.playing = false; S.idx = S.items.length - 1;
   highlight(); updateBar();
   setMediaState('paused'); keepAwake(false);
+  bufChip('');
+  presynthHold(false, S.idx);
   toast('朗读完成 ✓');
 }
 function pauseReader() {
@@ -1873,14 +2047,20 @@ function pauseReader() {
   S.playing = false;
   S.audio?.pause();
   setMediaState('paused'); keepAwake(false);
+  bufChip('');
+  // 停了就把 GPU 还给后台预合成：从下一句往后接着备，下次点播放就能秒出。
+  // 短暂停顿不会打扰 —— 引擎那边还有 25 秒的安静门槛。
+  const at = Math.max(0, S.idx);
+  presynthHold(false, at);
+  const key = presynthKey();
+  if (PRE.doneKey !== key && (!PRE.on || PRE.key !== key)) startPresynth(at + pfDepth());
 }
 function stopPlayback() {
   S.voiceBookmark = null;
   stopMiniCPMVoice();
   pauseReader();
   S.audio?.removeAttribute('src');
-  S.preload.forEach(a => { try { a.removeAttribute('src'); } catch (e) {} });
-  S.preload = [];
+  pfClear();
   S.idx = -1;
   highlight();
 }
@@ -1901,6 +2081,7 @@ function resumeReader() {
   const request = ++S.playRequest;
   S.playing = true;
   keepAwake(true);
+  presynthHold(true);
   S.audio.play().then(() => setMediaState('playing')).catch(() => {
     if (S.playRequest === request) {
       S.playing = false;
@@ -1928,6 +2109,8 @@ function liveChange() {
   if (!S.items.length || S.idx < 0) return;
   const wasPlaying = S.playing;
   const at = S.idx;
+  pfClear();                    // 语速/音色变了：已经备好的音频全部作废
+  PRE.key = '';                 // 后台预合成也按新参数重开
   if (wasPlaying) { S.audio.pause(); S.playing = true; playAt(at, true); }
   updateBar();
 }
@@ -1962,10 +2145,13 @@ async function play(requestedMode) {
     // 有断点就从断点接着读（maybeResume 已把位置写进 S.idx），否则从头开始。
     // 注意别写死 playAt(0) —— 那样刚弹完"已定位到第 N 句"就又跳回第一句了。
     const start = S.idx >= 0 ? S.idx + 1 : 0;
-    warmup(start, 3);
+    // 起播前先备两句：本地大模型合成 ≈ 实时，没有这一步就会一句一卡。
+    // 系统语音（edge）几乎瞬时，primeFirst 直接放行。
+    await primeFirst(start, 2);
     S.playing = true;
     playAt(start, true);
-    if (S.items.length >= 15) startPresynth();   // 长文开后台预合成
+    // 注意：这里不再顺手开预合成。本地大模型合成一句 ≈ 听一句，
+    // 后台再插一手只会把正在听的那句挤到队尾 —— 让路，等暂停了再备。
   } catch (e) {
     toast('出错了：' + e.message, 3600);
   } finally { S.busy = false; overlay(false); }
@@ -2119,6 +2305,7 @@ function adoptPrepared(d, mode) {
   S.items = d.items || (d.segments || []).map(t => ({ text: t, kind: 'para', pause: 330, rate: 0 }));
   S.idx = -1;
   S.fail.clear();
+  pfClear();                 // 换稿了：上一份的音频全部作废
   S.style = d.style;
   S.lastPlayChars = d.source_chars || 0;
 
@@ -2981,7 +3168,7 @@ if (isLocalHost() && typeof createMiniCPMVoice === 'function') {
 $('#chipShelf').onclick = () => shelfOpen(true);
 $('#chipPre').onclick = async () => {
   try { await fetch(API + '/api/presynth/cancel', { method: 'POST' }); } catch (e) {}
-  PRE.on = false; PRE.key = '';
+  PRE.on = false; PRE.key = ''; PRE.doneKey = '';
   $('#chipPre').hidden = true;
   toast('已停止后台预合成');
 };
@@ -3158,6 +3345,30 @@ function pollLocalTts(n) {
 }
 
 $('#btnTtsStart').onclick = () => startLocalTts(false);
+
+/* 测速：本地大模型"能不能跟上播放"是长文流畅与否的唯一关键。
+   RTF>1 意味着合成比播放慢，再怎么预取也会被追上 —— 这时要么先让它备，
+   要么换回系统语音。让人看见这个数字，比在设置里猜有用得多。 */
+$('#btnTtsBench').onclick = async () => {
+  const msg = $('#ttsStartMsg');
+  const btn = $('#btnTtsBench');
+  btn.disabled = true;
+  if (msg) msg.textContent = '正在合成一句真实的语音…（本地大模型大约十几秒）';
+  try {
+    const d = await (await fetch(API + '/api/tts/bench')).json();
+    if (!d.ok) { if (msg) msg.textContent = '测速失败：' + (d.error || ''); return; }
+    let line = `速度：合成 1 秒语音要 ${d.rtf} 秒（${d.verdict}）`;
+    if (d.rtf <= 1) line += ' —— 跟得上播放，长文可以直接听。';
+    else if (d.rtf < 1.4) line += ' —— 略慢于播放，起播会先备两句，之后基本不断。';
+    else line += ' —— 比播放慢不少，建议先让它后台备一会儿；赶时间就切回「微软语音」。';
+    if (msg) msg.textContent = line;
+    toast(line, 8000);
+  } catch (e) {
+    if (msg) msg.textContent = '测速失败：' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
 
 $('#btnPresetCosy').onclick = async () => {
   const url = 'http://127.0.0.1:8891';

@@ -12,7 +12,8 @@
   "normalize": true,
   "auto_voice": true,
   "long_doc_chars": 6000,
-  "cache_limit": 400,
+  "cache_limit": 1200,
+  "cache_mb": 900,
   "num_ctx": 32768,
   "keep_alive": "30m",
   "fetch_timeout": 25,
@@ -24,7 +25,7 @@
   "browser_fetch": true,
   "prefs": {
     "style": "",
-    "mode": "auto",
+    "mode": "none",
     "model": "",
     "quality": false
   },
@@ -38,6 +39,7 @@
   "tts_local_autostart": true,
   "tts_local_python": "",
   "tts_local_script": "",
+  "tts_local_args": "--fp16 --preload",
   "auto_update": true,
   "extra_ports": [
     8756
