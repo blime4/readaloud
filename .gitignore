@@ -28,3 +28,5 @@ books/
 # 本地大模型 TTS：权重和虚拟环境都是本机资产，不进仓库
 models/
 .tts-venv/
+# CosyVoice 官方仓库（含 4.1GB 权重），要时按 README 重新 clone
+.cosyvoice-src/

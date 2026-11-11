@@ -58,8 +58,90 @@
 串行步数多。这不是配置问题 —— 换 SGLang-Omni 也解决不了，它优化的是
 吞吐（并发很多句），不是单句首字节延迟。
 
-所以默认引擎仍然是 `edge`。要"实时 + 本地大模型"，需要非自回归的模型
-（CosyVoice2 的 flow matching、GPT-SoVITS 的 VITS），这条路本仓库还没接。
+所以默认引擎仍然是 `edge`。要"实时 + 本地大模型"，得换非自回归的模型 ——
+也就是下面这个。
+
+### 自带一份 CosyVoice2（推荐，音质明显好于 edge）
+
+`start-cosy.bat`，服务在 `http://127.0.0.1:8891`。地址、模型、音色都已经写进
+`config.json`，面板里把引擎切到「本机大模型」就能听。
+
+- **架构**：flow matching，非自回归 —— 一次前向出一整段音频，不像 Qwen3-TTS
+  那样一个 token 一个 token 地吐，这就是它快一个数量级的原因。
+- **音色**：`CosyVoice2-0.5B` **不带预置音色**（`list_available_spks()` 是空的），
+  只支持 zero-shot 克隆 —— 每个音色都是一对「参考音频 + 原话」。
+  默认音色「默认女声」用仓库自带的 `asset/zero_shot_prompt.wav`；
+  想用你自己的声音读书，往 `models/cosyvoice-voices/` 放两个文件：
+
+      models/cosyvoice-voices/我的声音.wav   3～10 秒干净人声，≥16k 采样率，别超 30 秒
+      models/cosyvoice-voices/我的声音.txt   wav 里念的那句话，一字不差
+
+  重启服务后音色就多一个「我的声音」，面板里填这个名字即可。
+- **显存**：约 3 GB，加载 12～22 秒，之后常驻。
+
+**实测性能（RTX 4060 Ti 16 GB）**
+
+| 文本长度 | 合成 | 音频 | RTF |
+| --- | --- | --- | --- |
+| 7 字 | 1.9 s | 1.4 s | 1.33 |
+| 15 字 | 3.5 s | 3.5 s | 1.00 |
+| 29 字 | 5.9 s | 6.6 s | 0.89 |
+| 41 字 | 8.3 s | 9.3 s | 0.90 |
+
+也就是**按句朗读时能跟上**（一句话生成得比念完快一点），短句因为固定开销
+会慢半拍，靠预取缓冲吃掉。和 Qwen3-TTS 的 3～7 比，这是换了个量级的差别。
+
+**已知的坑：这台机器上速度会掉下去。** 同一天下午用同一份代码、同一个模型重测，
+RTF 变成 **2.1～2.6**（41 字要 19 秒），期间 `nvidia-smi` 显示显卡一直停在
+**P2 状态**、推理时 GPU 利用率只有 10～40%、功耗 40 W（正常应该能到 P0 和上百瓦）。
+纯算力基线（fp32 矩阵乘 20.7 TFLOPS、kernel 发射 0.017 ms）都是正常值，
+所以不是模型或代码的问题，是显卡电源状态/驱动那边的事。
+遇到"朗读一开始还行、越用越慢"，先看这个：
+
+    nvidia-smi --query-gpu=pstate,clocks.sm,utilization.gpu,power.draw --format=csv
+
+回到 P0 的常见办法：重启机器；或在 NVIDIA 控制面板把「电源管理模式」设成
+「最高性能优先」；或关掉一批吃显存的浏览器/Electron 应用。
+
+另外顺手记一笔：**fp16 在这张卡上更慢**（RTF 1.58 vs 1.33），而且音频会短一截
+（质量下降），所以默认用 fp32。TF32 只快 7%，默认不开。
+
+#### 这套环境当初是怎么搭起来的（Windows，踩坑记录）
+
+官方没有 Windows 的一键脚本，下面是我实际跑通的顺序，重装时照抄：
+
+1. `conda create -n cosyvoice python=3.10 -y`
+2. `conda install -n cosyvoice -c conda-forge pynini==2.1.5`
+   —— pip 在 Windows 上装不了 pynini（要 OpenFst 头文件），只能用 conda。
+3. `git clone --recursive https://github.com/FunAudioLLM/CosyVoice .cosyvoice-src`
+4. 改 `.cosyvoice-src/requirements.txt`：删掉两行 `--extra-index-url`，
+   注释掉 `openai-whisper==20231117`；然后
+   `pip install --no-cache-dir -r requirements.txt`
+   （`--no-cache-dir` 不是洁癖，是沙箱里 pip 清缓存会触发保护直接退出）
+5. openai-whisper 单独装：`pip install openai-whisper --no-build-isolation`
+6. **CUDA 版 torch**：PyPI / 清华源的 torch 都是 CPU 版（装完 `torch.version.cuda` 是
+   `None`）。从 `https://mirrors.aliyun.com/pytorch-wheels/cu124/` 直接下
+   `torch-2.5.1+cu124-cp310-cp310-win_amd64.whl` 和同名 torchaudio，
+   `pip install --no-deps <两个 whl>`。**文件名必须保持原样**，改名后 pip 报
+   `Invalid wheel filename`。`download.pytorch.org` 在这边只有 0.2 MB/s，2.5 GB 要下 3 小时。
+7. `pip install "setuptools<81"` —— setuptools 82 起删了 `pkg_resources`，
+   hyperpyyaml 加载 `cosyvoice2.yaml` 时要 import 它，不降级就
+   `ModuleNotFoundError: No module named 'pkg_resources'`。
+8. `pip install flask`（服务本身要）。
+9. **权重**分两处下（ModelScope，`iic/CosyVoice2-0.5B`）：
+   - `pretrained_models/CosyVoice2-0.5B/` 下的 campplus / flow / hift / llm / onnx 等；
+   - **仓库根目录**的 `CosyVoice-BlankEN/`（约 1 GB，Qwen2.5-0.5B 主干），
+     下完放到 `pretrained_models/CosyVoice2-0.5B/CosyVoice-BlankEN/`。
+
+   注意：`pretrained_models/CosyVoice2-0.5B/CosyVoice-BlankEN/` 这个路径在仓库里也存在，
+   但里面是 6 个 145 字节的空壳（`文件内容为空`），照那个下会报
+   `SafetensorError: Error while deserializing header: header too large`。
+   判断方法：正常文件是 988 MB，空壳是 145 字节。
+10. **wetext 的 fst**：`wetext` 用自己的 `snapshot_download` 拉 `pengzhendong/wetext`，
+    在这台机器上稳定 403。直接从
+    `https://modelscope.cn/models/pengzhendong/wetext/resolve/master/zh/tn/tagger.fst`
+    （zh/en 各 `tagger.fst` + `verbalizer.fst`）下到 `models/wetext/zh|en/tn/`，
+    服务启动时会把 `snapshot_download` 指过去。没有它也能跑，只是「10 点」不会读成「十点」。
 
 ### 为什么没上 SGLang
 
@@ -343,6 +425,8 @@ selftest_bookshelf.py  书架与语音引擎自检（20 项，含假本地 TTS �
 install.bat         一键安装
 install-tts.bat     装本机大模型 TTS（建独立环境 + 下 4.5GB 权重，只需一次）
 start-tts.bat       启动 Qwen3-TTS 服务（127.0.0.1:8890）
+tts_cosy_server.py  同上的 CosyVoice2 版（zero-shot 克隆，127.0.0.1:8891）
+start-cosy.bat      启动 CosyVoice2 服务（要用 conda 环境 cosyvoice）
 ```
 
 ## 卸载
