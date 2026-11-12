@@ -34,6 +34,10 @@ import time
 import traceback
 from pathlib import Path
 
+# Windows 下所有子进程（nvidia-smi / git / ffmpeg…）都必须隐藏控制台窗口，
+# 否则每次调用都会在屏幕上闪一个 CMD 黑框。
+NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
 import requests
 import edge_tts
 from flask import Flask, Response, jsonify, request, send_from_directory
@@ -122,7 +126,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.11.4"
+ENGINE_VERSION = "1.11.5"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -896,7 +900,7 @@ def host_info(force: bool = False) -> dict:
             out = subprocess.run(
                 ["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
                  "--format=csv,noheader"],
-                capture_output=True, text=True, timeout=4)
+                capture_output=True, text=True, timeout=4, creationflags=NO_WINDOW)
             for line in out.stdout.strip().splitlines():
                 parts = [p.strip() for p in line.split(",")]
                 if parts and parts[0]:
@@ -2111,7 +2115,8 @@ def _soft_restart() -> None:
 def _git(*args, timeout: float = 25) -> tuple:
     try:
         r = subprocess.run(["git", *args], cwd=str(BASE), capture_output=True,
-                           text=True, encoding="utf-8", errors="replace", timeout=timeout)
+                           text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout, creationflags=NO_WINDOW)
         return r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
     except subprocess.TimeoutExpired:
         return 124, "", "git 超时（网络？）"

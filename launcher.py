@@ -71,7 +71,7 @@ def _usable(exe: str) -> bool:
     """
     try:
         r = subprocess.run([exe, "-c", "import flask, edge_tts, requests"],
-                           capture_output=True, timeout=25)
+                           capture_output=True, timeout=25, creationflags=NO_WINDOW)
         return r.returncode == 0
     except Exception:
         return False
@@ -122,7 +122,8 @@ def port_pids(p: int) -> list:
     """查出正在监听该端口的进程号（只用系统自带的 netstat）。"""
     try:
         out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True,
-                             text=True, encoding="utf-8", errors="ignore", timeout=8).stdout
+                             text=True, encoding="utf-8", errors="ignore", timeout=8,
+                             creationflags=NO_WINDOW).stdout
     except Exception as e:
         log(f"netstat 调用失败: {e}")
         return []
@@ -173,7 +174,8 @@ def stop(p: int) -> int:
     for pid in pids:
         try:
             subprocess.run(["taskkill", "/PID", pid, "/F"], capture_output=True,
-                           text=True, encoding="utf-8", errors="ignore", timeout=8)
+                           text=True, encoding="utf-8", errors="ignore", timeout=8,
+                           creationflags=NO_WINDOW)
             log(f"已停止进程 {pid}")
         except Exception as e:
             log(f"停止 {pid} 失败: {e}")

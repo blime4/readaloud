@@ -36,6 +36,9 @@ import threading
 import time
 import types
 from pathlib import Path
+
+# ffmpeg / nvidia-smi 等子进程一律隐藏控制台，避免运行中黑框闪烁。
+NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 from urllib.parse import quote
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -377,7 +380,8 @@ def to_mp3(wav_bytes: bytes, sample_rate: int, speed: float = 1.0) -> bytes:
         args += ["-filter:a", f"atempo={max(0.5, min(2.0, speed)):.3f}"]
     args += ["-b:a", "72k", "-f", "mp3", "pipe:1"]
     done = subprocess.run(args, input=wav_bytes, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, timeout=180)
+                          stderr=subprocess.PIPE, timeout=180,
+                          creationflags=NO_WINDOW)
     if done.returncode != 0:
         raise RuntimeError("ffmpeg 转 mp3 失败："
                            + done.stderr.decode("utf-8", "replace")[:200])

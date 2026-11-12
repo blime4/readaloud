@@ -28,6 +28,9 @@ import threading
 import time
 from pathlib import Path
 
+# ffmpeg 等子进程隐藏控制台，避免黑框闪烁。
+NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")   # 直连 huggingface.co 在这台机器上不通
 
 from flask import Flask, Response, jsonify, request   # noqa: E402
@@ -138,7 +141,8 @@ def to_mp3(wav_bytes: bytes, sample_rate: int, speed: float = 1.0) -> bytes:
         args += ["-filter:a", f"atempo={max(0.5, min(2.0, speed)):.3f}"]
     args += ["-ar", str(sample_rate), "-ac", "1", "-b:a", "72k", "-f", "mp3", "pipe:1"]
     done = subprocess.run(args, input=wav_bytes, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, timeout=120)
+                          stderr=subprocess.PIPE, timeout=120,
+                          creationflags=NO_WINDOW)
     if done.returncode != 0:
         raise RuntimeError("ffmpeg 转 mp3 失败：" + done.stderr.decode("utf-8", "replace")[:200])
     return done.stdout
