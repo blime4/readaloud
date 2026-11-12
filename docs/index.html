@@ -450,33 +450,54 @@
   .qralt button.tiny{font-family:var(--mono);letter-spacing:.04em}
   .qralt button.tiny.on{border-color:var(--accent);color:var(--accent-2);background:var(--accent-soft)}
 
-  /* ---------- 目录：WorkBuddy 式右侧飞出 + 逐条滑入 ---------- */
-  .tocmask{position:fixed;inset:0;z-index:69;background:rgba(0,0,0,.32);
+  /* ---------- 目录：右侧飞出 + 逐条滑入（WorkBuddy 会话选择器手感） ---------- */
+  .tocmask{position:fixed;inset:0;z-index:69;background:rgba(0,0,0,.34);
     opacity:0;pointer-events:none;transition:opacity .22s}
   .tocmask.show{opacity:1;pointer-events:auto}
-  .tocfly{position:fixed;top:0;right:0;bottom:0;width:min(420px,94vw);z-index:70;
+  .tocfly{position:fixed;top:0;right:0;bottom:0;width:min(430px,94vw);z-index:70;
     background:var(--panel);border-left:1px solid var(--line);
-    box-shadow:-18px 0 44px rgba(0,0,0,.28);
-    transform:translateX(103%);transition:transform .28s cubic-bezier(.22,.9,.26,1);
+    box-shadow:-22px 0 54px rgba(0,0,0,.3);
+    transform:translateX(103%);
+    transition:transform .3s cubic-bezier(.19,1,.22,1);
     display:flex;flex-direction:column}
   .tocfly.show{transform:translateX(0)}
-  .tocfly .tf-head{padding:14px 16px 12px;border-bottom:1px solid var(--line)}
-  .tocfly .tf-title{display:flex;align-items:center;gap:10px;margin-bottom:10px}
-  .tocfly .tf-title h3{margin:0;font-size:16px;flex:1}
-  .tocfly .tf-list{flex:1;overflow-y:auto;padding:8px 8px 24px}
-  .tfitem{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;
-    cursor:pointer;font-size:13.5px;
-    animation:tfIn .3s cubic-bezier(.2,.8,.3,1) backwards;
-    animation-delay:calc(var(--i) * 22ms)}
-  @keyframes tfIn{from{opacity:0;transform:translateX(28px)}to{opacity:1;transform:none}}
-  .tfitem:hover{background:var(--btn-hover);transform:translateX(3px);transition:.12s}
+  .tocfly .tf-head{padding:14px 16px 12px;border-bottom:1px solid var(--line);
+    display:flex;flex-direction:column;gap:10px}
+  .tocfly .tf-title{display:flex;align-items:center;gap:10px}
+  .tocfly .tf-title h3{margin:0;font-size:16px}
+  .tocfly .tf-title .tf-count{font-size:11.5px;color:var(--txt-3);font-family:var(--mono)}
+  .tocfly .tf-title .grow{flex:1}
+  .tocfly .tf-list{flex:1;overflow-y:auto;padding:8px 8px 28px;
+    scrollbar-width:thin}
+  .tocfly .tf-list.show{animation:tfList .26s ease-out}
+  @keyframes tfList{from{opacity:0;transform:scale(.985)}to{opacity:1;transform:none}}
+  .tfitem{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:9px;
+    cursor:pointer;font-size:13.5px;position:relative;
+    animation:tfIn .34s cubic-bezier(.16,.9,.28,1) backwards;
+    animation-delay:calc(var(--i) * 24ms)}
+  @keyframes tfIn{from{opacity:0;transform:translateX(34px) scale(.985)}
+                  to{opacity:1;transform:none}}
+  .tfitem:hover{background:var(--btn-hover)}
   .tfitem.cur{background:var(--accent-soft)}
+  .tfitem.cur::before{content:"";position:absolute;left:0;top:8px;bottom:8px;width:3px;
+    border-radius:2px;background:var(--accent)}
   .tfitem.cur .tt{color:var(--accent-2);font-weight:600}
   .tfitem.active{outline:1px solid var(--accent);background:var(--accent-soft)}
-  .tfitem .tno{color:var(--txt-3);font-size:11px;min-width:40px;text-align:right;
+  .tfitem .tno{color:var(--txt-3);font-size:11px;min-width:22px;text-align:right;
     flex:none;font-family:var(--mono);letter-spacing:.03em}
   .tfitem .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .tocfly .sh-search{width:100%}
+  .tfitem .tmeta{flex:none;font-size:11px;color:var(--txt-3);font-family:var(--mono);
+    letter-spacing:.02em;opacity:.9}
+  .tfitem .tnow{flex:none;font-size:10.5px;padding:1px 6px;border-radius:99px;
+    background:var(--accent);color:#fff;letter-spacing:.02em}
+  .tocfly .tf-foot{padding:10px 16px 14px;border-top:1px solid var(--line);
+    display:flex;gap:8px;align-items:center}
+  .tocfly .tf-foot .hint{flex:1;font-size:11px}
+  .tocfly .sh-search{flex:none;width:100%}
+  @media (max-width:520px){ .tfitem .tmeta{display:none} }
+  @media (prefers-reduced-motion:reduce){
+    .tocfly{transition:none} .tfitem{animation:none}
+  }
   #shelfSort{height:34px;background:var(--btn);color:var(--txt);border:1px solid var(--btn-bd);
     border-radius:8px;padding:0 6px;font:12px var(--ui)}
 
@@ -704,6 +725,7 @@
     <span id="stClient"></span>
   </div>
   <div class="grow"></div>
+  <span class="chip gray btnish" id="chipToc" hidden title="章节目录：跳到某一篇 / 某一段">☰ 目录</span>
   <span class="chip gray btnish" id="chipShelf" title="书架：导入过的书都在这儿，进度跟着书走">书架</span>
   <span class="chip gray btnish" id="chipQR" title="手机扫码，接着听">📱</span>
   <span class="chip gray btnish" id="chipTheme" title="切换深色/浅色（朗读常在夜里用）">夜间</span>
@@ -983,7 +1005,9 @@
   <div class="tf-head">
     <div class="tf-title">
       <h3>目录</h3>
-      <span class="hint" id="tocStat"></span>
+      <span class="tf-count" id="tocStat"></span>
+      <span class="grow"></span>
+      <button class="ghost tiny" id="tocNow" title="回到正在听的这一章">定位当前</button>
       <button class="ghost tiny" id="tocClose" title="关闭（Esc）">✕</button>
     </div>
     <label class="sh-search">
@@ -992,6 +1016,9 @@
     </label>
   </div>
   <div class="tf-list" id="tocList"></div>
+  <div class="tf-foot">
+    <span class="hint">↑↓ 选择 · Enter 跳转 · Esc 关闭</span>
+  </div>
 </div>
 
 <div class="shelfWrap" id="shelfWrap">
@@ -2601,7 +2628,9 @@ function adoptPrepared(d, mode) {
   }
   S.base = baseStyle();
   // 有章节结构的稿子亮出目录按钮（小说的"第X章"、文档的标题行都算）
-  $('#btnToc').hidden = !chaptersOf(S.items).length;
+  const tocN = tocEntries().length;
+  $('#btnToc').hidden = !tocN;
+  $('#chipToc').hidden = !tocN;
   // 从书架打开的书，进度以服务端为准（那是手机和电脑共用的那份）；
   // 手动粘文字进来的，退回本机 localStorage 的断点。
   const resume = S.pendingResume;
@@ -2858,7 +2887,7 @@ $('#btnPlay').onclick = () => { addHistory($('#txt').value); play(); };
 $('#btnPolPlay').onclick = () => { addHistory($('#txt').value); play('polish'); };
 $('#btnSum').onclick = () => aiInto('summarize');
 $('#btnPol').onclick = () => aiInto('polish');
-$('#btnClear').onclick = () => { pushHistory($('#txt').value); $('#txt').value = ''; S.items = []; S.idx = -1; S.book = null; $('#btnToc').hidden = true; renderItems(); count(); };
+$('#btnClear').onclick = () => { pushHistory($('#txt').value); $('#txt').value = ''; S.items = []; S.idx = -1; S.book = null; $('#btnToc').hidden = true; $('#chipToc').hidden = true; renderItems(); count(); };
 $('#btnUndo').onclick = () => {
   if (!S.history.length) return toast('没有可撤销的变更');
   $('#txt').value = S.history.pop(); S.items = []; S.idx = -1; count(); toast('已撤销');
@@ -3673,51 +3702,89 @@ function chaptersOf(items) {
   if (!items || !items.length) return [];
   const out = [];
   items.forEach((it, i) => {
-    if (!it || !it.text || it.text.length > 64) return;
-    if (it.kind === 'heading' || RE_TOC.test(it.text)) out.push({ idx: i, title: it.text });
+    if (!it || !it.text) return;
+    // 引擎识别出的标题块最可靠（含从目录/篇末分隔补出来的篇名）；
+    // 老引擎没有 heading 时，再退回正则认「第X章」这类。
+    if (it.kind === 'heading' || (it.text.length <= 64 && RE_TOC.test(it.text))) {
+      out.push({ idx: i, title: it.text.trim() });
+    }
   });
   return out;
+}
+/* 目录条目：优先真章节；一本书一个标题都认不出来时，按 100 句一段给出可跳的锚点，
+   不然长书里「目录」按钮直接消失，反而更难用。 */
+function tocEntries() {
+  const real = chaptersOf(S.items);
+  if (real.length || S.items.length < 120) return real;
+  const step = 100, out = [];
+  for (let i = 0; i < S.items.length; i += step) {
+    out.push({ idx: i, title: `第 ${i + 1}–${Math.min(S.items.length, i + step)} 句`, pseudo: true });
+  }
+  return out;
+}
+/* 每章大概要听多久：中文朗读约 4.5 字/秒（含停顿） */
+function tocSpan(ch, next) {
+  const end = next ? next.idx : S.items.length;
+  let chars = 0;
+  for (let i = ch.idx; i < end; i++) {
+    const t = S.items[i] && S.items[i].text;
+    if (t) chars += t.length;
+  }
+  const sec = chars / 4.5;
+  const dur = sec >= 60 ? `${Math.round(sec / 60)} 分` : `${Math.max(10, Math.round(sec))} 秒`;
+  return { span: end - ch.idx, pct: Math.round((ch.idx / Math.max(1, S.items.length)) * 100), dur };
 }
 let TOC_Q = '';
 let TOC_ACT = -1;                 // 键盘浏览的行（Enter 跳转）
 function tocOpen(open) {
-  $('#tocFly').classList.toggle('show', open);
-  $('#tocMask').classList.toggle('show', open);
+  const fly = $('#tocFly'), mask = $('#tocMask');
   if (open) {
     TOC_Q = ''; $('#tocSearch').value = '';
     renderToc();
-    setTimeout(() => { if (!isMobile()) $('#tocSearch').focus(); }, 180);
+    fly.classList.add('show'); mask.classList.add('show');
+    const list = $('#tocList');
+    list.classList.remove('show'); void list.offsetWidth; list.classList.add('show');
+    setTimeout(() => { if (!isMobile()) $('#tocSearch').focus(); }, 200);
+  } else {
+    fly.classList.remove('show'); mask.classList.remove('show');
   }
 }
 function renderToc() {
   const list = $('#tocList');
   const q = TOC_Q.trim().toLowerCase();
-  const all = chaptersOf(S.items);
+  const all = tocEntries();
   const chs = all.filter(c => !q || String(c.title).toLowerCase().includes(q));
-  $('#tocStat').textContent = all.length ? `${chs.length}/${all.length} 章` : '';
+  $('#tocStat').textContent = all.length ? `${all.length} 章 · ${S.items.length} 句` : '';
   if (!chs.length) {
     list.innerHTML = `<div class="empty"><div class="ico">📖</div><b>没有识别出章节</b>
-      <div class="hint">「第一章…」「Chapter N」这类独立成行的标题会自动进目录。</div></div>`;
+      <div class="hint">「第一章…」「Chapter N」这类独立成行的标题，或书前的目录，都会被认成章节。</div></div>`;
     TOC_ACT = -1;
     return;
   }
-  let curN = -1;
+  let curN = -1;                                  // 当前听到第几章
   all.forEach((c, n) => { if (S.idx >= c.idx) curN = n; });
+  let curEl = null;
   list.innerHTML = '';
   chs.forEach((c, i) => {
     const n = all.indexOf(c);
+    const meta = tocSpan(c, all[n + 1]);
     const el = document.createElement('div');
-    // 逐条从右滑入（WorkBuddy 会话选择那种节奏），条目太多时延迟封顶，别等半天
-    el.style.setProperty('--i', Math.min(i, 24));
-    el.className = 'tfitem' + (S.idx >= 0 && n === curN ? ' cur' : '');
-    el.innerHTML = `<span class="tno">${c.idx + 1}</span><span class="tt">${esc(c.title)}</span>`;
+    el.style.setProperty('--i', Math.min(i, 16));   // 逐条滑入，条目太多时延迟封顶
+    const isCur = S.idx >= 0 && n === curN;
+    el.className = 'tfitem' + (isCur ? ' cur' : '');
+    el.innerHTML =
+      `<span class="tno">${String(n + 1).padStart(2, '0')}</span>` +
+      `<span class="tt">${esc(c.title)}</span>` +
+      (isCur ? '<span class="tnow">正在听</span>' : '') +
+      `<span class="tmeta">${meta.pct}% · ${meta.dur}</span>`;
+    el.title = `第 ${c.idx + 1} 句开始 · 本章 ${meta.span} 句 · 约 ${meta.dur}`;
     el.onclick = () => { tocOpen(false); seekReader(c.idx); };
     list.appendChild(el);
+    if (isCur) curEl = el;
   });
   // 默认落在当前章（键盘 ↑↓ 从这里开始）
   TOC_ACT = chs.findIndex(c => S.idx >= 0 && all.indexOf(c) === curN);
-  const cur = list.children[TOC_ACT];
-  if (cur && cur.classList.contains('cur')) cur.scrollIntoView({ block: 'center' });
+  if (curEl) setTimeout(() => curEl.scrollIntoView({ block: 'center' }), 60);
   else TOC_ACT = -1;
 }
 function tocMove(d) {
@@ -3737,8 +3804,13 @@ function tocJumpActive() {
   el.click();
 }
 $('#btnToc').onclick = () => tocOpen(!$('#tocFly').classList.contains('show'));
+$('#chipToc').onclick = () => tocOpen(true);
 $('#tocClose').onclick = () => tocOpen(false);
 $('#tocMask').onclick = () => tocOpen(false);
+$('#tocNow').onclick = () => {
+  const el = $('#tocList').querySelector('.tfitem.cur');
+  if (el) { el.scrollIntoView({ block: 'center', behavior: 'smooth' }); el.classList.add('active'); }
+};
 $('#tocSearch').addEventListener('input', e => { TOC_Q = e.target.value || ''; renderToc(); });
 /* 目录面板的键盘：Esc 关闭、↑↓ 浏览、Enter 跳转。
    capture 阶段处理并拦下事件，别让全局 Esc 又把播放停了。 */

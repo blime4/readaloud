@@ -233,6 +233,158 @@ def _looks_like_line_paragraphs(s: str) -> bool:
     return hit / len(lines) >= 0.75
 
 
+# ------------------------------------------------------------ 篇章名（目录）
+# 中文小说、短篇集的篇名常常只是**单独一行的短词**，没有任何「第X章」标记：
+#     目录：为了大家的安全/ 1        正文：为了大家的安全
+# 只认「第X章」的话，整本书一个章节都认不出来（《烧纸》就是全书 0 章），
+# 于是前端的☰目录按钮压根不出现 —— 用户看到的是"目录功能没做出来"。
+# 这里补两层：① 先找目录块，把它列出的篇名当白名单；② 再用短行启发式兜底。
+
+RE_TOC_PAIR = re.compile(
+    r"^\s*(?P<t>.{1,32}?)\s*[/／]\s*(?P<p>[0-9ivxlⅰ-ⅻ]{1,6})\s*$", re.I)
+RE_CJK_CHAR = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+_TITLE_BAD_TAIL = "。！？…”’」，、；：,;:."
+_TITLE_BAD_HEAD = "“”‘’「」『』\"'《》（）()【】[]，。、；：！？·—-"
+RE_TITLE_NOISE = re.compile(r"[0-9@/\\|<>{}\[\]=+~^*_（）()]")
+
+
+def _title_like(t: str, min_len: int = 2) -> bool:
+    """一行短文本能不能当篇名/章名（保守判断，宁可漏也别把正文当标题）。"""
+    t = (t or "").strip()
+    if not (min_len <= len(t) <= 24):
+        return False
+    if t[0] in _TITLE_BAD_HEAD or t[-1] in _TITLE_BAD_TAIL:
+        return False
+    if RE_TITLE_NOISE.search(t):
+        return False
+    if any(ch in t for ch in "。！？…"):
+        return False
+    return len(RE_CJK_CHAR.findall(t)) / len(t) >= 0.6
+
+
+def _norm_title(t: str) -> str:
+    return re.sub(r"\s+", "", (t or "").strip()).strip("·—-:： ")
+
+
+def _find_titles(lines: list) -> tuple:
+    """返回 (要当标题的行号集合, 要丢掉的目录行号集合)。
+
+    目录行是「篇名/页码」或一串连续短行——留着会被朗读成"书名串烧"，别无用处。
+    只有确认正文里也出现同名篇名时才丢，避免误删真正的内容。
+
+    注意：这里只按"非空行"顺序看邻居。一行一段的文本会被补上大量空行，
+    直接按原始行号找连续段落会永远断在空行上（第一版就栽在这儿）。
+    """
+    seq = [(i, l.strip()) for i, l in enumerate(lines) if l.strip()]
+    m = len(seq)
+    toc_titles, toc_rows = {}, set()
+    toc_runs = []                             # 每一段"连续短标题"的 (篇名序列)
+
+    i = 0
+    while i < m:
+        run, j, seen = [], i, set()
+        while j < m:
+            t = seq[j][1]
+            mm = RE_TOC_PAIR.match(t)
+            cand = mm.group("t").strip() if mm else t
+            if cand and _title_like(cand, min_len=1):   # 「舞 / 151」这种单字篇名
+                key = _norm_title(cand)
+                if key in seen:
+                    break                     # 一段目录里又出现同名 → 这里已经是正文开头了
+                seen.add(key)
+                run.append((seq[j][0], cand, bool(mm)))
+                j += 1
+                continue
+            break
+        if len(run) >= 4:                    # 连着 4 行以上短标题 → 认定是目录
+            toc_runs.append([(t, pg) for _, t, pg in run])
+            for row, title, _pg in run:
+                toc_titles.setdefault(_norm_title(title), []).append(row)
+                toc_rows.add(row)
+            i = j
+        else:
+            i += 1
+
+    title_idx, drop_idx = set(), set()
+    for k, (row, t) in enumerate(seq):
+        if row in toc_rows:
+            continue
+        key = _norm_title(t)
+        if key in toc_titles and len(key) >= 2:
+            title_idx.add(row)
+            drop_idx.update(toc_titles[key])        # 正文出现了，目录那几行就可以不读
+
+    # 兜底：整本书没有目录可依赖时，才用"独立短行 + 后面紧跟长正文"判定。
+    # 目录已经给了篇名就不要再猜 —— 猜出来的多半是译者名、献词这类短行。
+    for k, (row, t) in enumerate(seq):
+        if title_idx:
+            break
+        if row in toc_rows or row in title_idx:
+            continue
+        if not _title_like(t):
+            continue
+        nxt = seq[k + 1][1] if k + 1 < m else ""
+        prv = seq[k - 1][1] if k > 0 else ""
+        if len(nxt) < 30:                    # 标题后面应当紧跟一段像样的正文
+            continue
+        if len(prv) > 20 and not RE_LINE_PARA_END.search(prv):
+            continue                          # 上一行没说完，不是标题边界
+        title_idx.add(row)
+
+    # 有些篇名在正文里根本没被抽出来（PDF 转文字时整行丢了），
+    # 但「（原载《…》）」这种篇末分隔是可靠的 —— 用它按目录顺序把缺的篇名补回去。
+    synth = _fill_missing_titles(seq, title_idx, toc_runs)
+
+    return title_idx, drop_idx, synth
+
+
+RE_COPYRIGHT_END = re.compile(r"^[（(]?\s*原载[^）)]{0,60}[）)]?\s*$")
+
+
+def _fill_missing_titles(seq: list, title_idx: set, toc_runs: list) -> dict:
+    """用「（原载…）」分隔 + 目录顺序，补回正文里丢失的篇名。
+
+    返回 {行号: 篇名}：在这些行之前插一个标题块（这一行本身还是正文，不能吃掉）。
+    只在"目录里大部分篇名都能在正文对上号"时才动手，避免给别的书瞎编章节。
+    """
+    if not toc_runs:
+        return {}
+    # 挑条目最多、且带页码的那份目录（同一本书常有两份目录）
+    order = [t for t, _ in max(toc_runs, key=lambda r: (sum(1 for _, pg in r if pg), len(r)))]
+    if len(order) < 3:
+        return {}
+
+    found = {}
+    for row in sorted(title_idx):
+        txt = next((t for r, t in seq if r == row), "")
+        found.setdefault(_norm_title(txt), row)
+    hit = sum(1 for t in order if _norm_title(t) in found)
+    if hit < 3 or hit / len(order) < 0.4:      # 对不上号，多半不是同一套标题
+        return {}
+
+    # 篇末标记「（原载《文艺中央》，1987年）」后面那一行，就是下一篇的开头
+    starts = []
+    for k, (row, t) in enumerate(seq):
+        if RE_COPYRIGHT_END.match(t) and k + 1 < len(seq):
+            starts.append(seq[k + 1][0])
+
+    synth, bi = {}, 0
+    last = -1
+    for title in order:
+        key = _norm_title(title)
+        if key in found:
+            last = max(last, found[key])
+            continue
+        nxt_row = min((r for r in found.values() if r > last), default=float("inf"))
+        while bi < len(starts) and starts[bi] <= last:
+            bi += 1
+        if bi < len(starts) and starts[bi] < nxt_row and (not synth or starts[bi] > max(synth)):
+            synth[starts[bi]] = title
+            last = starts[bi]
+            bi += 1
+    return synth
+
+
 def parse_blocks(raw: str) -> list:
     """把原始文本切成有类型的块：[{kind, text}]，kind ∈ heading/list/quote/para。"""
     s = (raw or "").replace("\r\n", "\n").replace("\r", "\n")
@@ -245,6 +397,8 @@ def parse_blocks(raw: str) -> list:
         s = "\n\n".join(s.split("\n"))
 
     blocks, buf, kind, in_code = [], [], None, False
+    all_lines = s.split("\n")
+    title_idx, drop_idx, synth_titles = _find_titles(all_lines)
 
     def flush():
         nonlocal buf, kind
@@ -252,7 +406,7 @@ def parse_blocks(raw: str) -> list:
             blocks.append({"kind": kind or "para", "text": "\n".join(buf).strip()})
         buf, kind = [], None
 
-    for line in s.split("\n"):
+    for ln_no, line in enumerate(all_lines):
         if RE_FENCE.match(line):
             in_code = not in_code
             flush()
@@ -268,6 +422,16 @@ def parse_blocks(raw: str) -> list:
             continue
         if not line.strip():
             flush()
+            continue
+        if ln_no in drop_idx:                 # 目录行本身不读（正文里还有同名的篇章标题）
+            flush()
+            continue
+        if ln_no in synth_titles:             # 正文丢了篇名，但篇末分隔把位置钉死了
+            flush()
+            blocks.append({"kind": "heading", "text": synth_titles[ln_no]})
+        if ln_no in title_idx:
+            flush()
+            blocks.append({"kind": "heading", "text": line.strip()})
             continue
 
         m = RE_HEADING.match(line)
