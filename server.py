@@ -126,7 +126,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.11.7"
+ENGINE_VERSION = "1.11.8"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -220,6 +220,13 @@ def api_preflight(_any):
 _PAGE_PATHS = ("/", "/index.html", "/favicon.ico", "/manifest.json",
                "/apple-touch-icon.png", "/icon-192.png", "/icon-512.png")
 
+# 页面要用的静态资源（脚本/样式/图标）跟 GitHub Pages 上那份一模一样，本来就不是秘密，
+# 也拿不到任何书；但手机打开页面时 <script src> 不会带 ?k，所以这里必须整体放行，
+# 否则 qr.js 401 → 二维码、语音组件全部哑掉。
+_STATIC_EXT = (".js", ".mjs", ".css", ".map", ".png", ".jpg", ".jpeg", ".webp",
+               ".svg", ".ico", ".woff", ".woff2", ".ttf", ".json", ".webmanifest",
+               ".wasm")
+
 
 def lan_token() -> str:
     token = str(CFG.get("lan_token") or "")
@@ -232,6 +239,8 @@ def lan_token() -> str:
 
 def _request_token() -> str:
     token = request.args.get("k") or request.headers.get("X-ReadAloud-Key") or ""
+    if not token:
+        token = str(request.cookies.get("ra_key") or "")      # 主页带码访问时种下的
     if not token and request.method in ("POST", "DELETE") and request.is_json:
         token = str((request.get_json(silent=True) or {}).get("k") or "")
     return token
@@ -248,6 +257,8 @@ def _guard_lan():
         return None                      # 页面本身可以先给，接口再收口
     if request.path.startswith(("/minicpm-voice", "/docs/")):
         return None
+    if not request.path.startswith("/api/") and request.path.lower().endswith(_STATIC_EXT):
+        return None                      # qr.js / 图标 / wasm 之类，页面外壳的一部分
     if _request_token() == lan_token():
         return None
     return jsonify({"ok": False, "need_key": True,
@@ -945,11 +956,17 @@ def model_list() -> list:
 # ---------------------------------------------------------------- 路由
 
 @app.get("/")
+@app.get("/index.html")
 def index():
     for p in UI_CANDIDATES:
         if p.exists():
             resp = Response(p.read_bytes(), mimetype="text/html; charset=utf-8")
             resp.headers["Cache-Control"] = "no-store"     # 改完刷新即生效，线上本地不分叉
+            # 带 ?k= 打开过一次，就把访问码种成 Cookie：手机加主屏 / 换了标签页
+            # 之后即使 localStorage 没了、网址上也没了 ?k，接口照样能过闸。
+            if request.args.get("k") == lan_token():
+                resp.set_cookie("ra_key", lan_token(), max_age=180 * 86400,
+                                samesite="Lax", path="/")
             return resp
     return ("页面文件缺失：docs/index.html", 500)
 
@@ -972,6 +989,20 @@ def pwa_assets():
 @app.get("/favicon.ico")
 def favicon():
     return ("", 204)
+
+
+@app.get("/<path:name>")
+def docs_static(name):
+    """docs/ 下其余静态资源（qr.js、图标、字体等）。
+    漏了这条会很难查：页面能开，但 qr.js 404 → qrcode 未定义，二维码永远不出来。"""
+    docs_dir = (BASE / "docs").resolve()
+    try:
+        target = (docs_dir / name).resolve()
+        if target.is_file() and (target == docs_dir or docs_dir in target.parents):
+            return send_from_directory(docs_dir, name, max_age=0)
+    except Exception:
+        pass
+    return ("", 404)
 
 
 @app.get("/api/ping")
@@ -2680,6 +2711,44 @@ def _lan_ip() -> str:
         sock.close()
 
 
+def _lan_ips() -> list:
+    """本机所有可用的内网 IPv4（多网卡时很常见：WiFi 一个、有线或 VPN 又一个）。
+    手机和电脑"同一个 WiFi"未必是默认路由那张网卡，所以扫不通时得能换一个试。"""
+    import socket
+    found = []
+
+    def add(a: str):
+        if (a and a not in found and not a.startswith("127.")
+                and not a.startswith("169.254.")          # APIPA，没拿到 DHCP 时的假地址
+                and not a.startswith("0.")):
+            found.append(a)
+
+    add(_lan_ip())                                        # 默认出口网卡排第一
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            add(info[4][0])
+    except Exception:
+        pass
+    if not found:                                         # 主机名解析不出来就用路由探测兜底
+        add(_lan_ip())
+
+    # 排个序：家庭/办公常见网段在前，Docker/WSL 这类虚拟网卡（172.17+）垫底，
+    # 免得二维码弹窗里第一个备选就是永远连不上的桥接地址。
+    def rank(a: str) -> int:
+        if a.startswith("192.168."):
+            return 0
+        if a.startswith("10."):
+            return 1
+        if a.startswith("172."):
+            return 9
+        return 5
+
+    if found:
+        first, rest = found[0], sorted(found[1:], key=lambda a: (rank(a), a))
+        return [first] + rest
+    return found
+
+
 @app.get("/api/lan")
 def api_lan():
     host = (CFG.get("host") or "127.0.0.1")
@@ -2687,10 +2756,14 @@ def api_lan():
     ip = _lan_ip()
     open_lan = host not in ("127.0.0.1", "localhost", "::1")
     token = lan_token()
+    urls = ([f"http://{ip}:{port}/?k={token}"]
+            + [f"http://{a}:{port}/?k={token}" for a in _lan_ips() if a != ip]) \
+        if (open_lan and ip) else []
     return jsonify({
         "ok": True, "host": host, "port": port, "ip": ip, "open": open_lan,
         "token": token,
-        "url": f"http://{ip}:{port}/?k={token}" if (open_lan and ip) else "",
+        "url": urls[0] if urls else "",
+        "urls": urls,                     # 多网卡时给备选，手机不在同一网段可换一个扫
     })
 
 

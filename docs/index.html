@@ -445,6 +445,10 @@
     padding:30px 18px;text-align:center}
   .qr-center .qrbig svg{display:block;background:#fff;border-radius:8px;
     box-shadow:0 4px 18px rgba(0,0,0,.18)}
+  .qralt{display:flex;flex-wrap:wrap;gap:6px;align-items:center;justify-content:center}
+  .qralt .hint{flex-basis:100%}
+  .qralt button.tiny{font-family:var(--mono);letter-spacing:.04em}
+  .qralt button.tiny.on{border-color:var(--accent);color:var(--accent-2);background:var(--accent-soft)}
 
   /* ---------- 目录：WorkBuddy 式右侧飞出 + 逐条滑入 ---------- */
   .tocmask{position:fixed;inset:0;z-index:69;background:rgba(0,0,0,.32);
@@ -1051,6 +1055,7 @@
     <div class="qr-center">
       <div class="qrbig" id="qrBigImg"></div>
       <div class="hint" id="qrUrl" style="word-break:break-all;text-align:center"></div>
+      <div class="qralt" id="qrAlt" hidden></div>
       <div class="hint" id="qrHint">手机和这台电脑连同一个 WiFi，用相机扫码打开 —— 书架、进度都是同一份，随时接着听。</div>
       <button class="primary" id="qrEnable" hidden>开启局域网访问并重启引擎</button>
       <div class="hint" id="qrMsg"></div>
@@ -1130,13 +1135,21 @@ const LAN_KEY = (() => {
     return store.get('lanKey', '') || '';
   } catch (e) { return ''; }
 })();
-const signed = url => (!LAN_KEY || !url ? url
-  : url + (url.indexOf('?') >= 0 ? '&' : '?') + 'k=' + encodeURIComponent(LAN_KEY));
+const signed = url => {
+  if (!LAN_KEY || !url) return url;
+  if (/[?&]k=/.test(url)) return url;          // ttsURL 之类已经带过，别再加一次
+  return url + (url.indexOf('?') >= 0 ? '&' : '?') + 'k=' + encodeURIComponent(LAN_KEY);
+};
 
-/* 所有打向本机引擎的请求自动带码；Audio.src 走 ttsURL，那里单独加 */
+/* 所有打向本机引擎的请求自动带码；Audio.src 走 ttsURL，那里单独加。
+   注意：手机直接打开引擎托管的页面时 API 是空串（同源），这时也必须带码——
+   以前只在 API 非空时才签，导致手机端每个接口都撞 401，页面能开但啥都读不到。 */
 const _rawFetch = window.fetch.bind(window);
 window.fetch = (input, init) => {
-  if (typeof input === 'string' && API && input.indexOf(API) === 0) input = signed(input);
+  if (typeof input === 'string') {
+    const toEngine = API ? input.indexOf(API) === 0 : input.indexOf('/api/') === 0;
+    if (toEngine) input = signed(input);
+  }
   return _rawFetch(input, init);
 };
 
@@ -1202,11 +1215,14 @@ async function permissionState() {
 }
 
 /* ---------- 探活 ---------- */
+let PING_NEED_KEY = false;
 async function ping(base, timeout = 3000) {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), timeout);
   try {
-    const r = await fetch(base + '/api/ping', { cache: 'no-store', signal: ac.signal });
+    // 探活也要带码：手机从内网地址打开时，少一个 k 就是 401，会被误判成"引擎没起"
+    const r = await fetch(signed(base + '/api/ping'), { cache: 'no-store', signal: ac.signal });
+    if (r.status === 401) { PING_NEED_KEY = true; return null; }   // 引擎在，只是没带对访问码
     if (!r.ok) return null;
     const d = await r.json();
     return d && d.app === 'readaloud' ? d : null;
@@ -1225,13 +1241,14 @@ async function connect({ manual = false } = {}) {
   $('#cxActions').innerHTML = '<span class="hint"><span class="spin-sm"></span> 正在探测…</span>';
 
   let info = null, used = null;
+  PING_NEED_KEY = false;
   for (const base of candidateBases()) {
     info = await ping(base);
     if (info) { used = base; break; }
   }
 
   connecting = false;
-  if (!info) { ONLINE = false; await showOffline(); return false; }
+  if (!info) { ONLINE = false; await showOffline({ needKey: PING_NEED_KEY }); return false; }
 
   API = used;
   ONLINE = true;
@@ -1244,8 +1261,11 @@ async function connect({ manual = false } = {}) {
 }
 
 /* ---------- 连不上时的引导 ---------- */
-async function showOffline() {
-  const perm = await permissionState();
+async function showOffline(why) {
+  // 页面本身就是引擎给的（本机 or 手机扫内网地址）：不存在"公网访问本机"的权限，
+  // 别拿权限卡去糊弄人，直接说引擎/访问码的问题。
+  const engineServed = servedByEngine() || isLocalHost();
+  const perm = engineServed ? { state: 'same-origin' } : await permissionState();
   setDot('off');
   $('#stServer').textContent = '未连接本机引擎';
   $('#chipMode').textContent = (servedByEngine() || isLocalHost()) ? '本地引擎未启动' : 'GitHub Pages · 未连本机';
@@ -1297,6 +1317,38 @@ async function showOffline() {
   };
   const localLink = () => addBtn('在本机页面打开', 'btn', `http://127.0.0.1:${port()}/`);
 
+  /* 情况零：引擎确实在，但这次访问没带访问码（手机最容易踩）
+     以前这里一律显示"引擎没启动"，手机端看起来就是"打开网页啥都没有"。 */
+  if (why && why.needKey) {
+    $('#ccard').className = 'ccard bad';
+    $('#cxIcon').textContent = '🔑';
+    $('#cxTitle').textContent = '引擎在跑，这次访问少了访问码';
+    $('#cxDesc').innerHTML =
+      '这台设备是从内网地址打开页面的，引擎要求带访问码才给数据。' +
+      '<b>最简单的办法：回到电脑上点顶栏 📱，用手机重新扫一次码</b>（二维码里自带访问码）。' +
+      '<div class="hint" style="margin-top:8px">也可以在下面直接填电脑上显示的访问码：</div>';
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:8px;margin-top:8px;align-items:center';
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.placeholder = '访问码，如 9a8bd038';
+    inp.autocapitalize = 'off'; inp.spellcheck = false;
+    inp.style.cssText = 'flex:1;min-height:38px;padding:0 10px;border:1px solid var(--line);' +
+      'border-radius:6px;background:var(--input,var(--btn));color:var(--txt);font-family:var(--mono)';
+    const go = document.createElement('button');
+    go.className = 'btn primary'; go.textContent = '用这个码';
+    go.onclick = () => {
+      const v = inp.value.trim();
+      if (!v) { toast('先填访问码（电脑上 📱 弹窗里那串）'); return; }
+      store.set('lanKey', v);
+      location.reload();
+    };
+    row.appendChild(inp); row.appendChild(go);
+    $('#cxDesc').appendChild(row);
+    addBtn('填好了，重试', 'btn', null, () => connect({ manual: true }));
+    return;
+  }
+
   /* 情况一：浏览器把本地网络访问拦下了 */
   if (perm.state === 'denied') {
     $('#ccard').className = 'ccard bad';
@@ -1331,7 +1383,23 @@ async function showOffline() {
     return;
   }
 
-  /* 情况三：权限没问题，就是引擎没在跑 */
+  /* 情况三：权限没问题，就是引擎没在跑（或者手机这边网不通） */
+  if (!isLocalHost() && location.protocol === 'http:') {
+    // 手机/平板从局域网地址打开：页面都拿到了，说明网是通的，那就是引擎刚好没应答
+    $('#ccard').className = 'ccard warn';
+    $('#cxIcon').textContent = '📶';
+    $('#cxTitle').textContent = '引擎没应答';
+    $('#cxDesc').innerHTML =
+      '页面已经打开了，说明手机和电脑在同一个网里，但引擎没回话。' +
+      '<div class="hint" style="margin-top:8px">去电脑上看一眼：引擎窗口/进程还在不在，' +
+      '或者重新双击桌面上的 <b>「启动朗读」</b>；起来后手机这边点「重试」就行。</div>' +
+      '<div class="hint" style="margin-top:6px">如果换了 WiFi（比如从家里换到公司），' +
+      '回到电脑上点顶栏 📱 重新扫一次码 —— 地址会变。</div>';
+    addBtn('重试', 'btn primary', null, () => connect({ manual: true }));
+    addBtn('重新扫码？回电脑点 📱', 'btn', null,
+      () => toast('在电脑上点顶栏 📱，用手机重新扫码即可', 6000));
+    return;
+  }
   $('#ccard').className = 'ccard warn';
   $('#cxIcon').textContent = '💤';
   $('#cxTitle').textContent = '本机朗读引擎没有运行';
@@ -1624,7 +1692,7 @@ let es = null;
 function subscribeEvents() {
   if (es) { try { es.close(); } catch (e) {} }
   try {
-    es = new EventSource(API + '/api/events');
+    es = new EventSource(signed(API + '/api/events'));
     es.addEventListener('speak', ev => {
       const d = JSON.parse(ev.data);
       if (d.stop) { stopPlayback(); toast('已停止（来自快捷键）'); return; }
@@ -3513,31 +3581,65 @@ function qrModal(open) {
   $('#qrWrap').classList.toggle('show', open);
   if (open) prepQR();
 }
-async function renderQR() {
+function paintQR(url) {
+  const qr = qrcode(0, 'M');
+  qr.addData(url);
+  qr.make();
+  $('#qrBigImg').innerHTML = qr.createSvgTag(6, 10);
+  $('#qrUrl').textContent = url;
+  QR_URL = url;
+}
+async function renderQR(force) {
   const d = await (await fetch(API + '/api/lan')).json();
   const open = d.ok && d.open && d.url;
   $('#qrEnable').hidden = !!open;
-  if (open) {
-    if (QR_URL !== d.url) {
-      const qr = qrcode(0, 'M');
-      qr.addData(d.url);
-      qr.make();
-      $('#qrBigImg').innerHTML = qr.createSvgTag(6, 10);
-      QR_URL = d.url;
-    }
-    $('#qrBigImg').hidden = false;
-    $('#qrUrl').textContent = d.url;
-    $('#qrHint').hidden = false;
-  } else {
+  if (!open) {
     $('#qrBigImg').hidden = true;
     $('#qrBigImg').innerHTML = '';
     $('#qrUrl').textContent = '';
     $('#qrHint').hidden = true;
+    $('#qrAlt').hidden = true;
+    return;
+  }
+  const urls = (d.urls && d.urls.length ? d.urls : [d.url]);
+  const cur = urls.indexOf(QR_URL) >= 0 && !force ? QR_URL : urls[0];
+  if (force || cur !== QR_URL) paintQR(cur);
+  $('#qrBigImg').hidden = false;
+  $('#qrHint').hidden = false;
+  // 多网卡（比如同时接了 WiFi 和公司网）时给备选地址：手机跟哪张网卡同段就扫哪个
+  const alt = $('#qrAlt');
+  alt.innerHTML = '';
+  if (urls.length > 1) {
+    alt.hidden = false;
+    const tip = document.createElement('div');
+    tip.className = 'hint';
+    tip.textContent = '打不开？换个地址再扫：';
+    alt.appendChild(tip);
+    const btns = [];
+    urls.forEach(u => {
+      const host = u.replace(/^https?:\/\//, '').split('/')[0];
+      const b = document.createElement('button');
+      b.className = 'tiny';
+      b.textContent = host;
+      b.onclick = () => {
+        paintQR(u);
+        btns.forEach(x => { x.className = 'tiny' + (x === b ? ' on' : ''); });
+      };
+      btns.push(b);
+      alt.appendChild(b);
+    });
+    btns.forEach(x => { x.className = 'tiny' + (urls[btns.indexOf(x)] === cur ? ' on' : ''); });
+  } else {
+    alt.hidden = true;
   }
 }
 async function prepQR() {
   $('#qrMsg').textContent = '';
-  try { await renderQR(); } catch (e) { $('#qrMsg').textContent = '引擎没连上，等连接恢复再试'; }
+  try { await renderQR(); } catch (e) {
+    $('#qrMsg').textContent = (typeof qrcode === 'undefined')
+      ? '二维码组件没加载成功，按 Ctrl+F5 强制刷新一次页面'
+      : '引擎没连上，等连接恢复再试';
+  }
 }
 $('#chipQR').onclick = () => qrModal(true);
 $('#qrClose').onclick = () => qrModal(false);
@@ -3929,17 +4031,22 @@ async function boot() {
   // 手机上先落到上次用的那一屏，别一进来就是一条看不到头的长页
   if (isMobile()) setView(store.get('mview', '') || ($('#txt').value.trim() ? 'seg' : 'txt'));
   lpRefresh();          // 「登录态」按钮上的小圆点：开局就知道配没配
-  const perm = await permissionState();
-  if (isLocalHost() || perm.state === 'granted') {
-    const ok = await connect();
-    if (!ok) await showOffline();
-    else {
-      pollPresynth();      // 引擎可能还留着上一次页面的预合成任务，接管进度
-      // 静默查一次新版本：有就在顶栏点亮「⬆ 可升级」，不打扰
-      setTimeout(() => checkUpdate(true), 6000);
+  /* 别再拿权限当门槛：
+     「本地网络访问」权限只在"公网页面 → 本机"时才存在。手机打开的是
+     http://192.168.x.x:8759 —— 页面本身就在局域网里，压根没有这个权限可授权，
+     可旧逻辑照样在这里拦一道，结果就是"网页打开了、里面啥都没有"。
+     现在的做法：先直接连，连不上再由 showOffline 按真实原因给引导。 */
+  const ok = await connect();
+  if (!ok) await showOffline();
+  else {
+    pollPresynth();      // 引擎可能还留着上一次页面的预合成任务，接管进度
+    // 静默查一次新版本：有就在顶栏点亮「⬆ 可升级」，不打扰
+    setTimeout(() => checkUpdate(true), 6000);
+    // 手机（尤其扫码进来的新设备）编辑器里空空如也，落在这屏就是"啥都没有"。
+    // 有书架就直接把书架推到眼前 —— 同一批书、同一份进度，点一本就接着听。
+    if (isMobile() && !$('#txt').value.trim() && SHELF.count) {
+      setTimeout(() => shelfOpen(true), 400);
     }
-  } else {
-    await showOffline();
   }
 }
 boot();

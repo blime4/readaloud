@@ -37,16 +37,17 @@
   "tts_local_key": "",
   "tts_local_format": "wav",
   "tts_local_autostart": true,
+  "gpu_clock_lock": "1800",
+  "gpu_clock_elevate": true,
   "tts_local_python": "",
   "tts_local_script": "",
   "tts_local_args": "--fp16 --preload",
   "tts_local_env": "",
+  "tts_local_split": 30,
   "keep_display_awake": true,
   "auto_update": true,
   "extra_ports": [
     8756
   ],
-  "lan_token": "9a8bd038",
-  "gpu_clock_lock": "1800",
-  "gpu_clock_elevate": true
+  "lan_token": "9a8bd038"
 }
