@@ -97,7 +97,10 @@ CUDA Graph 解码后吞吐 2 倍实时，「边听边备」重新成立 —— �
 - 旧前端不带 `playing`，自动退回「一开播就全停」的老语义；
 - **暂停即续备**：暂停/停止时把播放位置传过去（`at`），
   已经听过的部分不再重备，省下的 GPU 全用在马上要听的那几句上。
-- 顶栏会出现「预合成 N/M」进度 chip，点一下即停；播放中缓冲薄时显示「已暂停」。
+- 顶栏的「预合成 N/M」chip 分成两半：**点文字＝继续**（让路中＝插队先备，
+  停止后＝从断点接着备，走 `POST /api/presynth/resume`），右边的小 **✕＝停止**；
+  让路时显示橙色「预合成让路」，停止后变灰色「继续预合成 N/M」留在原地，
+  进度 90 秒不动会显示「预合成卡住」，点一下自动从这段重开。
 - 音色/语速/引擎一变，缓存键就变了 —— 前端自动用新参数重开。
 - 缓存上限跟着书的长走（`cache_limit` 1200 条 + `cache_mb` 900MB 双上限），
   整本书不会边合成边把自己挤掉 —— 以前 400 条的上限，预合成刚做完，
@@ -474,7 +477,7 @@ AI 功能额外需要 [Ollama](https://ollama.com)；没有也能正常朗读，
 | `POST /api/ai` | 总结 / 润色（`stream=true` 可流式，结果自动缓存） |
 | `GET /api/tts?text=&voice=&rate=&pitch=&volume=` | 直接返回 MP3 |
 | `GET /api/tts/bench?text=&voice=` | 测速度：用带时间戳的文本绕开缓存真合成一句，返回 `rtf`（合成 1 秒音频要几秒）与 `verdict` 分档建议 |
-| `POST /api/presynth` · `GET` · `POST /api/presynth/cancel` | 后台预合成全文：启动（`items` + 播放参数，可带 `from` 从第几句续备）/ 查进度 / 停止。缓存键与 `/api/tts` 完全同源，预合成过即秒回 |
+| `POST /api/presynth` · `GET` · `POST /api/presynth/cancel` · `POST /api/presynth/resume` | 后台预合成全文：启动（`items` + 播放参数，可带 `from` 从第几句续备）/ 查进度 / 停止 / **从断点继续**（复用引擎留着的 `jobs`，换书或正文变了返回 409 让前端重发）。缓存键与 `/api/tts` 完全同源，预合成过即秒回 |
 | `POST /api/presynth/hold` | 让路协议：`{on:true}` 开播后一句都不再合成，同时按住电源请求不让系统进待机（否则显卡掉到 500MHz）；`{on:false, at:N}` 暂停时松开并把队列挪到第 N 句继续备 |
 | `GET /api/recommend` | 按内容推荐音色 |
 | `GET\|POST /api/settings` | 记住 AI 偏好（会注入提示词）与朗读选项 |

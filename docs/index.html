@@ -254,6 +254,15 @@
     border-color:color-mix(in srgb,var(--accent) 45%,var(--line))}
   .chip.btnish{cursor:pointer}
   .chip.btnish:hover{border-color:var(--accent); color:var(--accent)}
+  /* 预合成 chip：文字区＝继续/插队，右端小 ✕＝停。
+     以前点整块就是"取消"，停了 chip 直接消失，页面上再也没有继续的入口。 */
+  .chip.pre{gap:6px; padding-right:4px}
+  .chip.pre>b{font-weight:500}
+  .chip.pre>i.prex{
+    font-style:normal; font-size:9px; line-height:1; padding:2px 3px;
+    opacity:.42; border-radius:2px; letter-spacing:0;
+  }
+  .chip.pre>i.prex:hover{opacity:1; background:var(--accent-soft); color:var(--accent)}
   .row{display:flex; align-items:center; gap:10px; padding:10px 16px; border-bottom:1px solid var(--line)}
   .row:last-child{border-bottom:0}
   .row label{
@@ -730,7 +739,7 @@
   <span class="chip gray btnish" id="chipQR" title="手机扫码，接着听">📱</span>
   <span class="chip gray btnish" id="chipTheme" title="切换深色/浅色（朗读常在夜里用）">夜间</span>
   <span class="chip gray" id="chipMode" title="当前页面从哪里来 / 引擎在哪里">—</span>
-  <span class="chip ok btnish" id="chipPre" hidden title="后台正在把全文提前合成进缓存（只在暂停/不播时干活，一开播就让路）；点一下可停止">预合成…</span>
+  <span class="chip ok btnish pre" id="chipPre" hidden title="后台正在把全文提前合成进缓存（只在暂停/不播时干活，一开播就让路）；点文字＝继续，✕＝停止"><b id="preTxt">预合成…</b><i class="prex" id="preStop" title="停止后台预合成">✕</i></span>
   <span class="chip gray" id="chipBuf" hidden>合成中…</span>
   <span class="chip warn btnish" id="chipUpdate" hidden title="引擎有新版本，点这里升级并重启">可升级</span>
 </header>
@@ -1493,8 +1502,8 @@ async function loadHealth() {
 /* 引擎跑的是旧代码就明确提示：改完 server.py 进程不会自己换代码，
    不提示的话会出现「页面是新的、引擎还是两天前的旧版」却没人察觉。 */
 const REQUIRED_FEATURES = ['structured-items', 'prosody-normalize', 'local-document-import',
-  'bookshelf', 'tts-provider', 'presynth-hold'];
-const MIN_ENGINE = '1.10.0';   // 页面用到的引擎能力下限，升一次改一次
+  'bookshelf', 'tts-provider', 'presynth-hold', 'presynth-resume'];
+const MIN_ENGINE = '1.11.12';   // 页面用到的引擎能力下限，升一次改一次
 
 function cmpVer(a, b) {
   const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
@@ -2013,7 +2022,15 @@ function warmup(from, n) { pfSeed(from); }
    不成立 —— 想听就得独占 GPU。它的定位改成「不播的时候替你往后备」：
    一开播就让路（/api/presynth/hold），暂停时从播放位置往后接着备。
    缓存键里带着音色/语速，参数一变旧音频全作废，这里自动用新参数重开。 */
-const PRE = { on: false, key: '', timer: null, doneKey: '' };
+const PRE = {
+  on: false, key: '', timer: null, doneKey: '',
+  stopAt: 0,           // 停在第几句 —— 重新开工的起点
+  force: false,        // 用户点了"继续"：别再自动给播放让路
+  auto: true,          // 允许「播放→暂停」时自动把它勾起来；按过 ✕ 就不再自动
+  last: {},            // 最近一次引擎状态，点击处理用
+  lastDone: -1,        // 上次看到的 done，用来判断进度是不是卡住了
+  stuckAt: 0,
+};
 
 function presynthKey() {
   const b = S.base || baseStyle();
@@ -2035,11 +2052,16 @@ function presynthHold(on, at, playing) {
   }).catch(() => { /* 旧引擎没这个接口，退化成老行为 */ });
 }
 
-async function startPresynth(from) {
+async function startPresynth(from, auto) {
   if (!ONLINE || !S.items.length) return;
+  if (auto && PRE.auto === false) return;   // 按过 ✕：别再自己冒出来
+  if (!auto) PRE.auto = true;
+  PRE.force = false;
   const key = presynthKey();
   if (PRE.on && PRE.key === key) return;    // 同一本书同一套参数，别重开
   PRE.key = key;
+  PRE.lastDone = -1;
+  PRE.stuckAt = 0;
   const b = S.base || baseStyle();
   const at = Math.max(0, Math.min(
     from == null ? (Math.max(0, S.idx) + pfDepth()) : from, S.items.length - 1));
@@ -2063,44 +2085,112 @@ async function startPresynth(from) {
   } catch (e) { /* 预合成是锦上添花，失败不打扰朗读 */ }
 }
 
+/* 预合成 chip 的三种样子：在跑 / 给播放让路 / 停下待续。
+   颜色跟着变 —— 跑=绿、让路=橙、停下=灰，不用读字就知道它什么状态。 */
+function paintPre(text, title, mode) {
+  const el = $('#chipPre');
+  if (!el) return;
+  if (text == null) { el.hidden = true; return; }
+  const t = $('#preTxt');
+  if (t) t.textContent = text; else el.textContent = text;
+  if (title) el.title = title;
+  el.hidden = false;
+  el.classList.toggle('ok', mode !== 'gray' && mode !== 'warn');
+  el.classList.toggle('warn', mode === 'warn');
+  el.classList.toggle('gray', mode === 'gray');
+}
+
 async function pollPresynth() {
   clearTimeout(PRE.timer);
-  const el = $('#chipPre');
-  let running = false;
+  let next = 2000;
   try {
     const d = await (await fetch(API + '/api/presynth')).json();
-    if (d && d.ok && d.running) {
-      running = true;
-      PRE.on = true;
-      // 听着听着换了音色/语速：旧缓存作废，自动用新参数重开
-      if (PRE.key && presynthKey() !== PRE.key) {
-        fetch(API + '/api/presynth/cancel', { method: 'POST' }).catch(() => {});
-        setTimeout(() => { PRE.key = ''; startPresynth(); }, 400);
-        return;
-      }
-      el.hidden = false;
-      const pct = d.total ? Math.round(d.done / d.total * 100) : 0;
-      el.textContent = d.hold
-        ? `预合成已暂停 ${d.done}/${d.total}`
-        : `预合成 ${d.done}/${d.total}（${pct}%）`;
-      // 边听边备（CUDA Graph 后吞吐 2 倍实时，让路不再是"播着就全停"）：
-      // 眼前缓冲 ≥6 句就放行后台往后备整本；缓冲见底（<3 句）再喊停，
-      // 保证起播和追句时 GPU 只喂前台。迟滞区间防抖动。
-      if (S.playing) {
-        let ahead = 0;
-        for (let i = S.idx + 1; i < S.items.length && PF.blobs.has(i); i++) ahead++;
-        if (ahead < 3 && !d.hold) presynthHold(true, null, true);
-        else if (ahead >= 6 && d.hold) presynthHold(false, null, true);
+    if (d && d.ok) {
+      const total = d.total | 0;
+      const done = total ? Math.min(d.done | 0, total) : (d.done | 0);
+      if (d.running) {
+        PRE.on = true;
+        if (done !== PRE.lastDone) { PRE.lastDone = done; PRE.stuckAt = 0; }
+        else if (!PRE.stuckAt) PRE.stuckAt = Date.now();
+        // 让路时"不动"是正常的，别当卡死；只有该跑不跑才算卡住
+        const stuck = !d.hold && PRE.stuckAt && Date.now() - PRE.stuckAt > 90000;
+        PRE.last = { running: true, hold: !!d.hold, stuck, done, total };
+        PRE.stopAt = Math.max(PRE.stopAt, done, d.at | 0);
+        // 听着听着换了音色/语速：旧缓存作废，自动用新参数重开
+        if (PRE.key && presynthKey() !== PRE.key) {
+          fetch(API + '/api/presynth/cancel', { method: 'POST' }).catch(() => {});
+          setTimeout(() => { PRE.key = ''; startPresynth(); }, 400);
+          return;
+        }
+        const pct = total ? Math.round(done / total * 100) : 0;
+        if (stuck) {
+          paintPre(`预合成卡住 ${done}/${total}`,
+                   '进度好一会儿没动了，点一下从这段重开', 'warn');
+        } else if (d.hold) {
+          paintPre(`预合成让路 ${done}/${total}`,
+                   '正在播，先把显卡留给耳朵；攒够缓冲会自己继续。点一下＝插队先备着', 'warn');
+        } else {
+          paintPre(`预合成 ${done}/${total}（${pct}%）`,
+                   '后台正在把全文提前合成进缓存；点文字＝优先合成，✕＝停止');
+        }
+        // 边听边备（CUDA Graph 后吞吐 2 倍实时，让路不再是"播着就全停"）：
+        // 眼前缓冲 ≥6 句就放行后台往后备整本；缓冲见底（<3 句）再喊停，
+        // 保证起播和追句时 GPU 只喂前台。迟滞区间防抖动。
+        if (S.playing) {
+          let ahead = 0;
+          for (let i = S.idx + 1; i < S.items.length && PF.blobs.has(i); i++) ahead++;
+          // 手动点了"继续"就把门槛降到 1 句：用户明说了要先备，别又立刻按住
+          const floor = PRE.force ? 1 : 3;
+          if (ahead < floor && !d.hold) presynthHold(true, null, true);
+          else if (d.hold && (ahead >= 6 || PRE.force)) presynthHold(false, null, true);
+        }
+      } else {
+        if (PRE.on) PRE.doneKey = PRE.key;   // 这本书已经整本备完了，别再重开
+        PRE.on = false;
+        PRE.last = { running: false, hold: false, done, total };
+        PRE.stopAt = Math.max(PRE.stopAt, done, d.at | 0);
+        if (total > 1 && done < total) {
+          // 停下了就把入口留在原地：以前这时候 chip 直接消失，
+          // 页面上再没有任何"继续"的地方，只能靠播放→暂停把它勾回来。
+          paintPre(`继续预合成 ${done}/${total}`,
+                   `已停下，点一下从第 ${PRE.stopAt + 1} 句接着备`, 'gray');
+          next = 5000;      // 慢轮询：顺手接管别的页面（手机）开的任务
+        } else {
+          paintPre(null);
+        }
       }
     }
   } catch (e) { /* 引擎没这个接口（旧版本），静默 */ }
-  if (!running) {
-    if (PRE.on) PRE.doneKey = PRE.key;   // 这本书已经整本备完了，别再重开
-    PRE.on = false;
-    el.hidden = true;
-  } else {
-    PRE.timer = setTimeout(pollPresynth, 2000);
-  }
+  PRE.timer = setTimeout(pollPresynth, next);
+}
+
+/* 「继续」优先让引擎用它自己留着的 jobs 从断点续 —— 不用重发整本正文；
+   引擎重启过、任务没了，再按当前稿子重新提交一份。 */
+async function resumePresynth() {
+  PRE.auto = true;
+  PRE.force = false;
+  const at = Math.max(0, Math.min(
+    Math.max(PRE.stopAt || 0, S.idx || 0), Math.max(0, S.items.length - 1)));
+  try {
+    const r = await fetch(API + '/api/presynth/resume', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ at, book: (S.book && S.book.id) || '',
+                             total: S.items.length }),
+    });
+    const d = await r.json();
+    if (d && d.ok) {
+      PRE.on = true; PRE.key = presynthKey(); PRE.doneKey = '';
+      PRE.lastDone = -1; PRE.stuckAt = 0;
+      toast('继续预合成');
+      pollPresynth();
+      return true;
+    }
+  } catch (e) { /* 老引擎没有这个接口，下面按新任务重开 */ }
+  PRE.on = false; PRE.key = ''; PRE.doneKey = '';
+  await startPresynth(at);
+  if (PRE.on) { toast('继续预合成'); return true; }
+  toast('预合成没起来，检查一下语音引擎');
+  return false;
 }
 
 /* ---------- 断点续读 ----------
@@ -2334,7 +2424,7 @@ function pauseReader() {
   const at = Math.max(0, S.idx);
   presynthHold(false, at);
   const key = presynthKey();
-  if (PRE.doneKey !== key && (!PRE.on || PRE.key !== key)) startPresynth(at + pfDepth());
+  if (PRE.doneKey !== key && (!PRE.on || PRE.key !== key)) startPresynth(at + pfDepth(), true);
 }
 function stopPlayback() {
   S.voiceBookmark = null;
@@ -2392,6 +2482,7 @@ function liveChange() {
   const at = S.idx;
   pfClear();                    // 语速/音色变了：已经备好的音频全部作废
   PRE.key = '';                 // 后台预合成也按新参数重开
+  PRE.auto = true;              // 换参数是新活，之前按过的 ✕ 不再作数
   if (wasPlaying) { S.audio.pause(); S.playing = true; playAt(at, true); }
   updateBar();
 }
@@ -2590,6 +2681,12 @@ function adoptPrepared(d, mode) {
   S.idx = -1;
   S.fail.clear();
   pfClear();                 // 换稿了：上一份的音频全部作废
+  // 后台预合成也跟着作废（否则进度条会显示上一本书的 14/330），
+  // 用户按过的 ✕ 到新书上就重新有效 —— 新书默认还是自动接力。
+  if (PRE.on) fetch(API + '/api/presynth/cancel', { method: 'POST' }).catch(() => {});
+  PRE.on = false; PRE.key = ''; PRE.doneKey = '';
+  PRE.stopAt = 0; PRE.force = false; PRE.auto = true;
+  PRE.lastDone = -1; PRE.stuckAt = 0;
   S.style = d.style;
   S.lastPlayChars = d.source_chars || 0;
 
@@ -3487,10 +3584,38 @@ if (isLocalHost() && typeof createMiniCPMVoice === 'function') {
 
 /* ---------- 书架 / 手机端 / 语音引擎 的交互 ---------- */
 $('#chipShelf').onclick = () => shelfOpen(true);
+/* 预合成 chip：点文字＝继续/插队，点右边的小 ✕＝停。
+   旧版点整块就是"取消"，而且一取消 chip 就没了 —— 用户只看到
+   「预合成已暂停 14/330」，点一下反而彻底关掉，再也找不回来。 */
 $('#chipPre').onclick = async () => {
+  const st = PRE.last || {};
+  if (st.running && st.stuck) {
+    // 卡住了：先作废这一轮，再从停下的那句重开
+    try { await fetch(API + '/api/presynth/cancel', { method: 'POST' }); } catch (e) {}
+    PRE.on = false; PRE.key = '';
+    toast('这一段卡住了，正在重开');
+    setTimeout(resumePresynth, 250);
+    return;
+  }
+  if (st.running) {
+    // 在跑或在让路：点了就表示"别管缓冲，先往后备"
+    PRE.force = true;
+    presynthHold(false, null, S.playing);
+    toast(S.playing ? '预合成优先，缓冲见底会自动让回去' : '预合成继续');
+    pollPresynth();
+    return;
+  }
+  resumePresynth();
+};
+$('#preStop').onclick = async (ev) => {
+  ev.stopPropagation();          // ✕ 别冒泡成"继续"
+  PRE.auto = false;              // 之后"播放→暂停"不再自动把它勾起来
+  PRE.force = false;
   try { await fetch(API + '/api/presynth/cancel', { method: 'POST' }); } catch (e) {}
   PRE.on = false; PRE.key = ''; PRE.doneKey = '';
-  $('#chipPre').hidden = true;
+  PRE.stopAt = Math.max(PRE.stopAt || 0, (PRE.last && PRE.last.done) | 0);
+  // 不藏 chip：留成灰色的「继续预合成 x/y」，想反悔随时点回来
+  pollPresynth();
   toast('已停止后台预合成');
 };
 $('#shelfClose').onclick = () => shelfOpen(false);

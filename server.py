@@ -126,7 +126,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.11.11"
+ENGINE_VERSION = "1.11.12"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -147,6 +147,7 @@ FEATURES = [
     "lan-access",           # /api/lan：手机通过局域网访问本机引擎
     "presynth",             # /api/presynth：整本后台预合成，播放句句命中缓存
     "presynth-hold",        # /api/presynth/hold：开播即让路，暂停从播放位置续备
+    "presynth-resume",      # /api/presynth/resume：停下的任务一键从断点续上
     "tts-bench",            # /api/tts/bench：量本机合成的 RTF，判断能不能跟上播放
     "tts-autostart",        # /api/tts/local：一键拉起本机大模型 TTS 并自动写回配置
     "engine-upgrade",       # /api/restart + /api/update：原地热重启、git pull 自升级
@@ -2055,6 +2056,47 @@ def api_presynth_cancel():
             _presynth["finished"] = time.time()
             _presynth["error"] = "已取消"
     return jsonify({"ok": True})
+
+
+@app.post("/api/presynth/resume")
+def api_presynth_resume():
+    """「继续预合成」：把停下的任务从断点接回去。
+
+    以前网页上只有「点一下＝取消」，停了 chip 就消失，再没有任何继续的入口
+    —— 只能靠"播放→暂停"把自动任务勾回来，还常被「整本已备完」的标记挡住。
+    jobs/args 在 cancel 时是留着的，所以这里不必让前端重发整本正文；
+    引擎重启过（内存状态没了）才由前端退回 /api/presynth 重新提交。
+    """
+    body = request.get_json(silent=True) or {}
+    with _presynth_lock:
+        jobs = list(_presynth.get("jobs") or [])
+        args = dict(_presynth.get("args") or {})
+        st = {k: _presynth[k] for k in ("running", "at", "done", "book")}
+        total = len(jobs)
+    if not jobs or not args:
+        return jsonify({"ok": False, "error": "没有可继续的任务"}), 400
+    # 换过书 / 正文改过：旧队列已经不适用，让前端按当前稿子重开
+    want_book = str(body.get("book") or "")
+    if want_book and st["book"] and want_book != st["book"]:
+        return jsonify({"ok": False, "error": "这个任务属于另一本书"}), 409
+    try:
+        want_total = int(body.get("total") or 0)
+    except (TypeError, ValueError):
+        want_total = 0
+    if want_total and want_total != total:
+        return jsonify({"ok": False, "error": "正文已经变了"}), 409
+    if st["running"]:
+        return jsonify({"ok": True, "running": True, "total": total, "from": st["at"]})
+    try:
+        at = int(body.get("at")) if body.get("at") is not None else int(st["at"] or 0)
+    except (TypeError, ValueError):
+        at = int(st["at"] or 0)
+    # done 是绝对下标：已经备过的别退回去重算（前端还可能传更靠前的播放位置）
+    at = max(at, int(st["done"] or 0))
+    at = max(0, min(at, total - 1))
+    _start_presynth(jobs, args, start_at=at)
+    log.info("预合成继续：从第 %d/%d 句往后", at + 1, total)
+    return jsonify({"ok": True, "running": True, "total": total, "from": at})
 
 
 # ---------------------------------------------------------------- 版本 / 重启 / 升级
