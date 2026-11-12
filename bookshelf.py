@@ -178,6 +178,48 @@ def delete_book(book_id: str) -> None:
     shutil.rmtree(book_dir, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- 分段缓存
+# 打开一本书 = 重新解析整本正文（清洗/规整/逐句），几万字的书要等几秒。
+# 把分段结果按「正文指纹 + 分段参数」缓存下来，第二次点开就是秒开。
+PREP_CACHE = 2                          # 每本最多留几份（换语速/长度参数重试也能命中）
+PREP_MAX_CHARS = 2_000_000              # 超大文本不缓存，别把 prep.json 撑爆
+
+
+def _prep_path(book_id: str) -> Path:
+    return _dir(book_id) / "prep.json"
+
+
+def get_prep(book_id: str, key: str) -> dict | None:
+    try:
+        data = json.loads(_prep_path(book_id).read_text(encoding="utf-8"))
+        entry = data.get(key) if isinstance(data, dict) else None
+        return entry if isinstance(entry, dict) and entry.get("items") else None
+    except Exception:
+        return None
+
+
+def put_prep(book_id: str, key: str, entry: dict, chars: int) -> None:
+    if chars > PREP_MAX_CHARS:
+        return
+    try:
+        data = json.loads(_prep_path(book_id).read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    data.pop(key, None)
+    data[key] = entry
+    while len(data) > PREP_CACHE:       # dict 保序，最旧的那份先出局
+        data.pop(next(iter(data)))
+    book_dir = _dir(book_id)
+    try:
+        tmp = book_dir / "prep.part"
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(book_dir / "prep.json")
+    except Exception:
+        pass                            # 缓存写不进去不影响朗读
+
+
 def stats() -> dict:
     books = list_books()
     size = 0

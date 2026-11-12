@@ -72,6 +72,14 @@ def speakable(text: str) -> bool:
 # 解析阶段用到的标记
 RE_FENCE = re.compile(r"^\s*(```|~~~)")
 RE_HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*)$")
+# 章节标题（小说最常见）：「第一章 雪夜」「卷二」「Chapter 3」这类独立成行的行。
+# 整行匹配且标题部分限长，避免把正文里恰好出现的"序章"二字误伤成标题。
+RE_CHAPTER = re.compile(
+    r"^\s*#{0,6}\s*"
+    r"(?:第[0-9〇零一二三四五六七八九十百千万两]+\s*[章回卷节部篇话幕]"
+    r"|Chapter\s+[0-9]+|CHAPTER\s+[0-9]+|Chapter\s+[IVXLivxl]+"
+    r"|序章|楔子|引子|尾声|终章|后记|番外[篇集]?)"
+    r"[\s：:·、．.\-—]*[^。！？\n]{0,48}\s*$")
 RE_HR = re.compile(r"^\s{0,3}([-*_])\s*(\1\s*){2,}$")
 RE_LIST = re.compile(r"^(\s*)([-*+]|\d{1,3}[.)])\s+(.*)$")
 RE_QUOTE = re.compile(r"^\s{0,3}>\s?(.*)$")
@@ -224,6 +232,13 @@ def parse_blocks(raw: str) -> list:
         if m:
             flush()
             blocks.append({"kind": "heading", "text": m.group(2).strip()})
+            continue
+        # 章节行（第X章 / Chapter N / 楔子…）：当标题块处理。
+        # 前端据此生成目录，跳章就是跳到这个条目的下标。
+        m = RE_CHAPTER.match(line)
+        if m:
+            flush()
+            blocks.append({"kind": "heading", "text": line.strip()})
             continue
         m = RE_QUOTE.match(line)
         if m:

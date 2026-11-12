@@ -126,7 +126,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.11.5"
+ENGINE_VERSION = "1.11.6"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -1458,6 +1458,14 @@ def api_ai():
                     "ai_cached": cached, **style})
 
 
+def _nlp_fingerprint() -> str:
+    """读音词典的修改时间 —— 用户改了词典，分段缓存就得失效。"""
+    try:
+        return str(int((BASE / "pronounce.json").stat().st_mtime))
+    except Exception:
+        return "0"
+
+
 @app.post("/api/prepare")
 def api_prepare():
     """一步到位：清洗 -> （可选）AI -> 读音规整 -> 逐句。
@@ -1466,6 +1474,10 @@ def api_prepare():
        [{text, kind, pause, rate}]  —— pause 是这句之后该停多久（毫秒），
        kind 是 heading/list/quote/para，前端据此做停顿、语速层次和高亮。
     另外带上按内容推荐的音色与语言判定，前端可以直接采纳。
+
+    书架的书带 book_id 来：纯直读（ai=none）的分段结果按
+    「正文指纹+参数+词典版本」缓存进 books/<id>/prep.json，
+    第二次打开同一本书直接秒回 —— 点开即听，不用再等几秒解析。
     """
     body = request.get_json(silent=True) or {}
     ai = body.get("ai") or "none"
@@ -1474,6 +1486,33 @@ def api_prepare():
     max_len = int(body.get("max_len") or CFG["max_len"])
     if not (raw or "").strip():
         return jsonify({"ok": False, "error": "没有可朗读的文本"}), 400
+
+    # 分段缓存：只缓存「原文直读」。AI 模式的产出随模型/提示词变化，不进缓存。
+    book_id = str(body.get("book_id") or "")
+    prep_key = ""
+    if ai == "none" and re.fullmatch(r"[0-9a-f]{12}", book_id):
+        digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+        prep_key = f"{digest}|{max_len}|{int(do_norm)}|{_nlp_fingerprint()}|v1"
+        cached_plan = SHELF.get_prep(book_id, prep_key)
+        if cached_plan:
+            items = cached_plan.get("items") or []
+            return jsonify({
+                "ok": True,
+                "text": raw,
+                "segments": cached_plan.get("segments") or [it.get("text") for it in items],
+                "items": items,
+                "count": len(items),
+                "style": {
+                    "voice": body.get("voice") or CFG["default_voice"],
+                    "rate": body.get("rate") or CFG["rate"],
+                    "pitch": body.get("pitch") or CFG["pitch"],
+                    "volume": body.get("volume") or CFG["volume"],
+                    "note": "", "title": "",
+                },
+                "ai": "none", "ai_note": "", "ai_cached": False, "model": None,
+                "long_doc": False, "source_chars": len(raw),
+                "normalized": do_norm, "prep_cached": True,
+            })
 
     style = {
         "voice": body.get("voice") or CFG["default_voice"],
@@ -1513,6 +1552,15 @@ def api_prepare():
         segs = [r["text"]]
         r["items"] = [{"text": r["text"], "kind": "para", "pause": 660, "rate": 0}]
 
+    if prep_key:                        # 首次解析完顺手存缓存，下次秒回
+        try:
+            SHELF.put_prep(book_id, prep_key,
+                           {"items": r["items"], "segments": segs,
+                            "count": len(segs), "ts": time.time()},
+                           len(raw))
+        except Exception:
+            pass
+
     names = [v.get("ShortName") for v in list_voices() if v.get("ShortName")]
     rec = NLP.recommend_voice(r["text"], names) if r["text"] else {}
     return jsonify({
@@ -1532,6 +1580,7 @@ def api_prepare():
         "voice_suggestion": rec.get("voice"),
         "voice_reason": rec.get("reason"),
         "normalized": do_norm,
+        "prep_cached": False,
     })
 
 

@@ -428,8 +428,27 @@
   ::-webkit-scrollbar-thumb:hover{background:var(--btn-bd);background-clip:content-box}
   ::selection{background:var(--accent-soft); color:var(--txt)}
 
-  /* ---------- 书架 ---------- */
-  .shelfWrap{position:fixed;inset:0;z-index:45;display:none}
+  /* ---------- 继续听横幅 / 二维码 / 目录 ---------- */
+  .resumebar{display:flex;align-items:center;gap:10px;margin:10px 16px 0;padding:9px 12px;
+    border:1px solid var(--accent);border-radius:10px;background:var(--accent-soft);
+    cursor:pointer;max-width:1400px}
+  .resumebar .rb-ico{font-size:18px}
+  .resumebar .rb-body{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1}
+  .resumebar .rb-body b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .resumebar .rb-sub{color:var(--txt-2);font-size:12px}
+  .resumebar .ghost{opacity:.45}
+  .resumebar:hover .ghost{opacity:1}
+  .qrbox{display:flex;align-items:center;gap:14px;margin-top:10px;padding:10px;
+    border:1px solid var(--line);border-radius:8px}
+  .qrbox svg{display:block;background:#fff;border-radius:6px;flex:none}
+  .tocitem{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;
+    cursor:pointer;font-size:13px}
+  .tocitem:hover{background:var(--btn-hover)}
+  .tocitem.cur{background:var(--accent-soft)}
+  .tocitem .tno{color:var(--txt-3);font-size:11px;min-width:36px;text-align:right;flex:none}
+  .tocitem .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+  /* ---------- 书架 ---------- */  .shelfWrap{position:fixed;inset:0;z-index:45;display:none}
   .shelfWrap.show{display:block}
   .shelfMask{position:absolute;inset:0;background:var(--bg);opacity:.8;
              background:color-mix(in srgb,var(--bg) 78%,transparent);
@@ -656,6 +675,12 @@
   <span class="chip warn btnish" id="chipUpdate" hidden title="引擎有新版本，点这里升级并重启">可升级</span>
 </header>
 
+<div class="resumebar" id="resumeBar" hidden title="接着上次继续听">
+  <span class="rb-ico">🎧</span>
+  <div class="rb-body"><b id="rbTitle"></b><span class="rb-sub" id="rbSub"></span></div>
+  <button class="ghost tiny" id="rbHide" title="本次先不显示">✕</button>
+</div>
+
 <div class="connect" id="connect">
   <div class="ccard" id="ccard">
     <div class="cicon" id="cxIcon">🔌</div>
@@ -880,6 +905,11 @@
           <button class="tiny" id="btnLanOff" hidden>只允许本机</button>
         </div>
         <div class="hint" id="lanUrl" style="margin-top:8px;word-break:break-all"></div>
+        <button class="tiny" id="btnQR" hidden style="margin-top:6px">📱 显示二维码</button>
+        <div class="qrbox" id="qrBox" hidden>
+          <div id="qrImg"></div>
+          <div class="hint">手机相机扫码直接打开 —— 要和这台电脑在同一个 WiFi，网址里自带访问码。</div>
+        </div>
       </div>
     </details>
     <details class="help" style="border-top:1px solid var(--line)">
@@ -911,7 +941,29 @@
   <div class="pinfo" id="pIdx">0 / 0</div>
   <div class="bar" id="bar" title="点这里跳到任意位置"><i id="barI"></i></div>
   <div class="pinfo" id="pRemain">—</div>
+  <button class="pb ghost" id="btnToc" title="目录：按章节跳转" hidden>☰</button>
   <button class="pb ghost" id="btnRepeat" title="重读当前句">↻</button>
+</div>
+
+<div class="shelfWrap" id="tocWrap">
+  <div class="shelfMask" id="tocMask"></div>
+  <aside class="shelf" role="dialog" aria-label="目录">
+    <div class="shelf-head">
+      <div class="sh-top">
+        <h3>目录</h3>
+        <span class="hint" id="tocStat"></span>
+        <span class="grow"></span>
+        <button class="ghost tiny" id="tocClose" title="关闭">✕</button>
+      </div>
+      <div class="sh-tools">
+        <label class="sh-search">
+          <span class="sic">/</span>
+          <input id="tocSearch" type="search" placeholder="搜章节标题" autocomplete="off" spellcheck="false">
+        </label>
+      </div>
+    </div>
+    <div class="shelf-list" id="tocList"></div>
+  </aside>
 </div>
 
 <div class="shelfWrap" id="shelfWrap">
@@ -945,6 +997,7 @@
   <div class="sbar"><i id="ovBar"></i></div>
   <div style="margin-top:12px"><button class="tiny" id="btnCancel">取消</button></div></div></div>
 
+<script src="./qr.js"></script>
 <script src="./minicpm-voice.js"></script>
 <script>
 /* ============================================================================
@@ -2352,6 +2405,8 @@ async function prepare(text, mode) {
         voice: $('#voice').value, rate: sgn(baseStyle().rate, '%'),
         pitch: sgn(baseStyle().pitch, 'Hz'),
         volume: sgn(baseStyle().volume, '%'),
+        // 书架的书直读时带上编号：引擎把分段结果缓存起来，第二次打开秒出
+        book_id: (mode === 'none' && S.book && S.book.id) || undefined,
       }),
     });
     const d = await r.json();
@@ -2411,6 +2466,8 @@ function adoptPrepared(d, mode) {
     } else { $('#recRow').style.display = 'none'; }
   }
   S.base = baseStyle();
+  // 有章节结构的稿子亮出目录按钮（小说的"第X章"、文档的标题行都算）
+  $('#btnToc').hidden = !chaptersOf(S.items).length;
   // 从书架打开的书，进度以服务端为准（那是手机和电脑共用的那份）；
   // 手动粘文字进来的，退回本机 localStorage 的断点。
   const resume = S.pendingResume;
@@ -2667,7 +2724,7 @@ $('#btnPlay').onclick = () => { addHistory($('#txt').value); play(); };
 $('#btnPolPlay').onclick = () => { addHistory($('#txt').value); play('polish'); };
 $('#btnSum').onclick = () => aiInto('summarize');
 $('#btnPol').onclick = () => aiInto('polish');
-$('#btnClear').onclick = () => { pushHistory($('#txt').value); $('#txt').value = ''; S.items = []; S.idx = -1; renderItems(); count(); };
+$('#btnClear').onclick = () => { pushHistory($('#txt').value); $('#txt').value = ''; S.items = []; S.idx = -1; S.book = null; $('#btnToc').hidden = true; renderItems(); count(); };
 $('#btnUndo').onclick = () => {
   if (!S.history.length) return toast('没有可撤销的变更');
   $('#txt').value = S.history.pop(); S.items = []; S.idx = -1; count(); toast('已撤销');
@@ -3108,6 +3165,7 @@ async function loadShelf() {
     SHELF.bytes = d.bytes || 0;
     $('#chipShelf').textContent = SHELF.count ? `📚 书架 ${SHELF.count}` : '📚 书架';
     renderShelf();
+    refreshResumeBar();          // 书架数据顺带喂给「继续听」横幅
   } catch (e) { /* 旧引擎没有书架接口，静默降级 */ }
 }
 
@@ -3143,6 +3201,7 @@ async function loadLan() {
     $('#lanUrl').innerHTML = d.open && d.url
       ? `手机打开：<b>${esc(d.url)}</b><br>网址里的 <code>k=…</code> 是访问码，同一 WiFi 下别人没这个码就用不了你的书。`
       : '';
+    $('#btnQR').hidden = !(d.open && d.url);
   } catch (e) { /* 旧引擎 */ }
 }
 
@@ -3272,6 +3331,93 @@ $('#shelfSearch').addEventListener('input', e => {
     if (f) importLocalFile(f);
   });
 })();
+/* ---------- 继续听横幅 ---------- */
+let RB = null;                    // 最近在听、还没读完的那本
+function renderResumeBar() {
+  const bar = $('#resumeBar');
+  if (!RB || RB.finished || !(RB.progress && RB.progress.next > 0)) { bar.hidden = true; return; }
+  bar.hidden = false;
+  $('#rbTitle').textContent = RB.title;
+  $('#rbSub').textContent =
+    `上次听到 ${RB.progress.pct}%（第 ${RB.progress.next} / ${RB.progress.total} 句），点这里接着听`;
+}
+async function refreshResumeBar() {
+  try {
+    const d = await (await fetch(API + '/api/books')).json();
+    if (!d.ok) return;
+    RB = (d.books || []).find(b => !b.finished && b.progress && b.progress.next > 0) || null;
+    renderResumeBar();
+  } catch (e) { /* 未连接时静默 */ }
+}
+$('#resumeBar').onclick = e => {
+  if (e.target.closest('#rbHide')) { RB = null; renderResumeBar(); return; }
+  if (RB) openBook(RB.id);
+};
+
+/* ---------- 手机收听二维码 ---------- */
+let QR_URL = '';
+async function toggleQR() {
+  const box = $('#qrBox');
+  if (!box.hidden) { box.hidden = true; return; }
+  try {
+    const d = await (await fetch(API + '/api/lan')).json();
+    if (!d.ok || !d.open || !d.url) { toast('先点「允许手机访问」，重启引擎后再来生成'); return; }
+    if (QR_URL !== d.url) {
+      const qr = qrcode(0, 'M');
+      qr.addData(d.url);
+      qr.make();
+      $('#qrImg').innerHTML = qr.createSvgTag(4, 8);
+      QR_URL = d.url;
+    }
+    box.hidden = false;
+  } catch (e) { toast('生成二维码失败：' + e.message); }
+}
+$('#btnQR').onclick = toggleQR;
+
+/* ---------- 目录（章节跳转） ---------- */
+const RE_TOC = /(?:第[0-9〇零一二三四五六七八九十百千万两]+\s*[章回卷节部篇话幕]|chapter\s+[0-9ivxl]+|序章|楔子|引子|尾声|终章|后记|番外)/i;
+function chaptersOf(items) {
+  if (!items || !items.length) return [];
+  const out = [];
+  items.forEach((it, i) => {
+    if (!it || !it.text || it.text.length > 64) return;
+    if (it.kind === 'heading' || RE_TOC.test(it.text)) out.push({ idx: i, title: it.text });
+  });
+  return out;
+}
+let TOC_Q = '';
+function tocOpen(open) {
+  $('#tocWrap').classList.toggle('show', open);
+  if (open) { renderToc(); setTimeout(() => { if (!isMobile()) $('#tocSearch').focus(); }, 60); }
+}
+function renderToc() {
+  const list = $('#tocList');
+  const q = TOC_Q.trim().toLowerCase();
+  const chs = chaptersOf(S.items).filter(c => !q || String(c.title).toLowerCase().includes(q));
+  if (!chs.length) {
+    list.innerHTML = `<div class="empty"><div class="ico">📖</div><b>没有识别出章节</b>
+      <div class="hint">「第一章…」「Chapter N」这类独立成行的标题会自动进目录。</div></div>`;
+    return;
+  }
+  $('#tocStat').textContent = `${chs.length} 章 · 共 ${S.items.length} 句`;
+  let curN = -1;
+  const all = chaptersOf(S.items);
+  all.forEach((c, n) => { if (S.idx >= c.idx) curN = n; });
+  list.innerHTML = '';
+  chs.forEach(c => {
+    const n = all.indexOf(c);
+    const el = document.createElement('div');
+    el.className = 'tocitem' + (S.idx >= 0 && n === curN ? ' cur' : '');
+    el.innerHTML = `<span class="tno">${c.idx + 1}</span><span class="tt">${esc(c.title)}</span>`;
+    el.onclick = () => { tocOpen(false); seekReader(c.idx); };
+    list.appendChild(el);
+  });
+}
+$('#btnToc').onclick = () => tocOpen(!$('#tocWrap').classList.contains('show'));
+$('#tocClose').onclick = () => tocOpen(false);
+$('#tocMask').onclick = () => tocOpen(false);
+$('#tocSearch').addEventListener('input', e => { TOC_Q = e.target.value || ''; renderToc(); });
+
 $('#mtabs').addEventListener('click', e => {
   const b = e.target.closest('button');
   if (b) setView(b.dataset.tab);
