@@ -87,19 +87,27 @@ def _public(meta: dict) -> dict:
         "progress": {"next": nxt, "total": total, "ts": prog.get("ts") or 0, "pct": pct},
         "finished": bool(total and nxt >= total),
         "cover": meta.get("cover") or "",
+        "pin": bool(meta.get("pin")),
     }
 
 
-def list_books() -> list:
-    """按"最近动过"排序。排序键统一用 updated，翻书也算动过。"""
+def list_books(sort: str = "recent") -> list:
+    """按"最近动过"排序（翻书也算动过）。pin 过的永远在最上面。
+    sort=recent | title | progress。"""
     items = []
     for path in _root().iterdir():
-        if not path.is_dir():
+        if not path.is_dir() or path.name.startswith("."):
             continue
         meta = _read_meta(path)
         if meta:
             items.append(_public(meta))
-    items.sort(key=lambda b: b.get("updated") or 0, reverse=True)
+    if sort == "title":
+        items.sort(key=lambda b: (not b.get("pin"), b["title"], -(b.get("updated") or 0)))
+    elif sort == "progress":
+        items.sort(key=lambda b: (not b.get("pin"),
+                                  -b["progress"]["pct"], -(b.get("updated") or 0)))
+    else:
+        items.sort(key=lambda b: (not b.get("pin"), -(b.get("updated") or 0)))
     return items
 
 
@@ -126,7 +134,7 @@ def add_book(title: str, text: str, type_: str = "txt", source: str = "") -> dic
     digest = hashlib.sha1(content.encode("utf-8")).hexdigest()
     now = round(time.time(), 3)          # 秒级会让"同一秒入库的两本书"分不出先后
     for path in _root().iterdir():
-        meta = _read_meta(path) if path.is_dir() else None
+        meta = _read_meta(path) if path.is_dir() and not path.name.startswith(".") else None
         if meta and meta.get("sha1") == digest:
             meta["updated"] = now
             if title:
@@ -171,11 +179,96 @@ def save_progress(book_id: str, next_index: int, total: int) -> dict:
     return _public(meta)
 
 
+def _patch_meta(book_id: str, patch: dict) -> dict:
+    """小改动（改名/置顶）只动 meta.json，不碰正文。"""
+    book_dir = _dir(book_id)
+    meta = _read_meta(book_dir)
+    if not meta:
+        raise BookError("这本书不在书架上了。")
+    meta.update(patch)
+    tmp = book_dir / "meta.part"
+    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(book_dir / "meta.json")
+    return _public(meta)
+
+
+def rename_book(book_id: str, title: str) -> dict:
+    return _patch_meta(book_id, {"title": _clean_title(title)})
+
+
+def set_pin(book_id: str, on: bool) -> dict:
+    return _patch_meta(book_id, {"pin": bool(on)})
+
+
 def delete_book(book_id: str) -> None:
+    """删除进回收站（books/.trash/），误删还能捞回来；超过 TRASH_KEEP 挤掉最旧的。"""
     book_dir = _dir(book_id)
     if not book_dir.exists():
         raise BookError("这本书不在书架上了。")
-    shutil.rmtree(book_dir, ignore_errors=True)
+    dst = _trash_dir() / book_id
+    if dst.exists():
+        shutil.rmtree(dst, ignore_errors=True)
+    try:
+        book_dir.replace(dst)              # 移动进回收站，正文还在硬盘上
+    except Exception:
+        shutil.rmtree(book_dir, ignore_errors=True)
+        return
+    trash = [p for p in _trash_dir().iterdir() if p.is_dir()]
+    if len(trash) > TRASH_KEEP:
+        oldest = min(trash, key=lambda p: p.stat().st_mtime)
+        shutil.rmtree(oldest, ignore_errors=True)
+
+
+TRASH_KEEP = 50
+
+
+def _trash_dir() -> Path:
+    d = _root() / ".trash"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def list_trash() -> list:
+    items = []
+    for path in _trash_dir().iterdir():
+        if not path.is_dir():
+            continue
+        meta = _read_meta(path)
+        if meta:
+            items.append(_public(meta))
+    items.sort(key=lambda b: -(b.get("updated") or 0))
+    return items
+
+
+def restore_book(book_id: str) -> dict:
+    if not _ID_RE.match(str(book_id or "")):
+        raise BookError("书的编号无效。")
+    src = _trash_dir() / book_id
+    if not src.exists():
+        raise BookError("回收站里没有这本书。")
+    dst = _root() / book_id
+    if dst.exists():
+        raise BookError("书架上已有一本同编号的书，先处理掉它再恢复。")
+    src.replace(dst)
+    meta = _read_meta(dst)
+    return _public(meta) if meta else {}
+
+
+def purge_book(book_id: str) -> None:
+    if not _ID_RE.match(str(book_id or "")):
+        return
+    src = _trash_dir() / book_id
+    if src.exists():
+        shutil.rmtree(src, ignore_errors=True)
+
+
+def empty_trash() -> int:
+    n = 0
+    for path in _trash_dir().iterdir():
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            n += 1
+    return n
 
 
 # ---------------------------------------------------------------- 分段缓存
@@ -225,6 +318,6 @@ def stats() -> dict:
     size = 0
     for path in _root().iterdir():
         txt = path / "text.txt"
-        if path.is_dir() and txt.exists():
+        if path.is_dir() and not path.name.startswith(".") and txt.exists():
             size += txt.stat().st_size
     return {"count": len(books), "bytes": size, "limit": MAX_BOOKS}

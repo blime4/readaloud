@@ -1609,7 +1609,52 @@ def api_import():
 
 @app.get("/api/books")
 def api_books():
-    return jsonify({"ok": True, "books": SHELF.list_books(), **SHELF.stats()})
+    sort = (request.args.get("sort") or "recent").lower()
+    if sort not in ("recent", "title", "progress"):
+        sort = "recent"
+    return jsonify({"ok": True, "books": SHELF.list_books(sort), "sort": sort, **SHELF.stats()})
+
+
+@app.get("/api/books/trash")
+def api_books_trash():
+    return jsonify({"ok": True, "books": SHELF.list_trash()})
+
+
+@app.post("/api/books/trash/empty")
+def api_books_trash_empty():
+    return jsonify({"ok": True, "purged": SHELF.empty_trash()})
+
+
+@app.post("/api/books/trash/<book_id>/restore")
+def api_book_restore(book_id):
+    try:
+        return jsonify({"ok": True, "book": SHELF.restore_book(book_id)})
+    except SHELF.BookError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+
+
+@app.delete("/api/books/trash/<book_id>")
+def api_book_purge(book_id):
+    SHELF.purge_book(book_id)
+    return jsonify({"ok": True})
+
+
+@app.post("/api/books/<book_id>/rename")
+def api_book_rename(book_id):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify({"ok": True, "book": SHELF.rename_book(book_id, body.get("title") or "")})
+    except SHELF.BookError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+
+
+@app.post("/api/books/<book_id>/pin")
+def api_book_pin(book_id):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify({"ok": True, "book": SHELF.set_pin(book_id, bool(body.get("on")))})
+    except SHELF.BookError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
 
 
 @app.get("/api/books/<book_id>")

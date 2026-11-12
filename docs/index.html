@@ -447,6 +447,8 @@
   .tocitem.cur{background:var(--accent-soft)}
   .tocitem .tno{color:var(--txt-3);font-size:11px;min-width:36px;text-align:right;flex:none}
   .tocitem .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #shelfSort{height:34px;background:var(--btn);color:var(--txt);border:1px solid var(--btn-bd);
+    border-radius:8px;padding:0 6px;font:12px var(--ui)}
 
   /* ---------- 书架 ---------- */  .shelfWrap{position:fixed;inset:0;z-index:45;display:none}
   .shelfWrap.show{display:block}
@@ -554,13 +556,18 @@
     font-size:10px;color:var(--txt-3);font-family:var(--mono);
     font-variant-numeric:tabular-nums;min-width:32px;text-align:right;letter-spacing:.04em;
   }
-  .bk .del{
-    position:absolute;right:10px;top:10px;width:24px;height:24px;min-height:0;padding:0;
-    border:1px solid transparent;background:transparent;color:var(--txt-3);
-    opacity:0;transition:.15s;font-size:11px;line-height:1;
+  .bk .acts{
+    position:absolute;right:8px;top:8px;display:flex;gap:2px;opacity:0;transition:.15s;
   }
-  .bk:hover .del,.bk.cur .del{opacity:1}
+  .bk:hover .acts,.bk.cur .acts{opacity:1}
+  .bk .act,.bk .del{
+    width:24px;height:24px;min-height:0;padding:0;border:1px solid transparent;
+    background:transparent;color:var(--txt-3);font-size:11px;line-height:1;
+  }
+  .bk .act:hover{color:var(--accent-2);background:transparent;border-color:var(--line)}
+  .bk .act.pin.on{opacity:1;color:var(--warn)}
   .bk .del:hover{color:var(--danger);background:transparent;border-color:var(--danger)}
+  .bk .pflag{font-size:10px;margin-left:4px}
   .bk.drop-in{border-left-color:var(--accent);background:var(--accent-soft)}
 
   /* 空状态 */
@@ -642,7 +649,7 @@
     .shelf-list{padding:0}
     .bk{padding:12px 14px}
     .bk .cov{width:40px;height:56px;font-size:18px}
-    .bk .del{opacity:1}
+    .bk .acts{opacity:1}
     .shelf-foot{font-size:10px;padding-bottom:calc(13px + env(safe-area-inset-bottom))}
     .connect{padding:12px}
     .ccard{padding:16px;gap:12px}
@@ -981,6 +988,11 @@
           <span class="sic">/</span>
           <input id="shelfSearch" type="search" placeholder="搜索书名" autocomplete="off" spellcheck="false">
         </label>
+        <select id="shelfSort" title="排序方式">
+          <option value="recent">最近</option>
+          <option value="title">书名</option>
+          <option value="progress">进度</option>
+        </select>
         <button class="sh-import" id="shelfImport" title="导入 TXT / EPUB / MOBI / PDF">＋ 导入</button>
       </div>
     </div>
@@ -988,7 +1000,24 @@
     <div class="shelf-foot">
       导入的书会留在这台电脑上，手机打开同一个地址看到的就是这一份，读到第几句也跟着走。<br>
       书只存在你自己的硬盘里，不会上传到任何地方。
+      <div style="margin-top:8px"><button class="ghost tiny" id="btnTrash">🗑 回收站</button></div>
     </div>
+  </aside>
+</div>
+
+<div class="shelfWrap" id="trashWrap">
+  <div class="shelfMask" id="trashMask"></div>
+  <aside class="shelf" role="dialog" aria-label="回收站">
+    <div class="shelf-head">
+      <div class="sh-top">
+        <h3>回收站</h3>
+        <span class="hint" id="trashStat"></span>
+        <span class="grow"></span>
+        <button class="ghost tiny" id="trashEmpty" title="清空回收站（彻底删除）">清空</button>
+        <button class="ghost tiny" id="trashClose" title="关闭">✕</button>
+      </div>
+    </div>
+    <div class="shelf-list" id="trashList"></div>
   </aside>
 </div>
 
@@ -3087,7 +3116,7 @@ function bookCard(b) {
   return `
     <div class="cov" style="${coverOf(b)}"><span>${esc(coverText(b))}</span></div>
     <div class="body">
-      <div class="ttl">${esc(b.title)}</div>
+      <div class="ttl">${esc(b.title)}${b.pin ? '<span class="pflag">📌</span>' : ''}</div>
       <div class="meta">
         ${flag}
         <span>${b.chars.toLocaleString()} 字</span>
@@ -3101,7 +3130,11 @@ function bookCard(b) {
         <span class="pct">${b.finished ? '100%' : pct + '%'}</span>
       </div>
     </div>
-    <button class="del" title="从书架删除">✕</button>`;
+    <div class="acts">
+      <button class="act pin${b.pin ? ' on' : ''}" title="${b.pin ? '取消置顶' : '置顶'}">📌</button>
+      <button class="act ren" title="重命名">✎</button>
+      <button class="del" title="从书架删除（可从回收站恢复）">✕</button>
+    </div>`;
 }
 
 function renderShelf() {
@@ -3138,14 +3171,35 @@ function renderShelf() {
     const el = document.createElement('div');
     el.className = 'bk' + (S.book && S.book.id === b.id ? ' cur' : '');
     el.innerHTML = bookCard(b);
-    el.onclick = e => { if (!e.target.closest('.del')) openBook(b.id); };
+    el.onclick = e => {
+      if (e.target.closest('.acts')) return;
+      openBook(b.id);
+    };
     el.querySelector('.del').onclick = async e => {
       e.stopPropagation();
-      if (!window.confirm(`把《${b.title}》从书架删掉？正文会一起删。`)) return;
+      if (!window.confirm(`把《${b.title}》移到回收站？正文保留，可以从回收站恢复。`)) return;
       await fetch(API + '/api/books/' + b.id, { method: 'DELETE' });
       if (S.book && S.book.id === b.id) S.book = null;
-      toast('已从书架删除');
+      toast('已移到回收站');
       loadShelf();
+    };
+    el.querySelector('.act.pin').onclick = async e => {
+      e.stopPropagation();
+      await fetch(API + '/api/books/' + b.id + '/pin', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ on: !b.pin }),
+      });
+      b.pin = !b.pin;
+      renderShelf();
+    };
+    el.querySelector('.act.ren').onclick = e => {
+      e.stopPropagation();
+      const name = window.prompt('重命名这本书', b.title);
+      if (!name || name === b.title) return;
+      fetch(API + '/api/books/' + b.id + '/rename', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: name }),
+      }).then(() => { toast('已重命名'); loadShelf(); });
     };
     box.appendChild(el);
   });
@@ -3158,7 +3212,9 @@ function renderShelf() {
 
 async function loadShelf() {
   try {
-    const d = await (await fetch(API + '/api/books')).json();
+    const sort = store.get('shelfSort', 'recent');
+    const sel = $('#shelfSort'); if (sel && sel.value !== sort) sel.value = sort;
+    const d = await (await fetch(API + '/api/books?sort=' + encodeURIComponent(sort))).json();
     if (!d.ok) return;
     SHELF.books = d.books || [];
     SHELF.count = d.count || 0;
@@ -3311,6 +3367,67 @@ $('#shelfSearch').addEventListener('input', e => {
   SHELF.q = e.target.value || '';
   renderShelf();
 });
+$('#shelfSort').addEventListener('change', e => {
+  store.set('shelfSort', e.target.value || 'recent');
+  loadShelf();
+});
+
+/* ---------- 回收站 ---------- */
+function trashOpen(open) {
+  $('#trashWrap').classList.toggle('show', open);
+  if (open) loadTrash();
+}
+async function loadTrash() {
+  const list = $('#trashList');
+  try {
+    const d = await (await fetch(API + '/api/books/trash')).json();
+    const books = d.books || [];
+    $('#trashStat').textContent = books.length ? `${books.length} 本 · 彻底删除后不可恢复` : '';
+    if (!books.length) {
+      list.innerHTML = `<div class="empty"><div class="ico">🗑</div><b>回收站是空的</b>
+        <div class="hint">从书架删除的书会先放在这里，误删可以捞回来。</div></div>`;
+      return;
+    }
+    list.innerHTML = '';
+    books.forEach(b => {
+      const el = document.createElement('div');
+      el.className = 'bk';
+      el.innerHTML = `
+        <div class="cov" style="${coverOf(b)}"><span>${esc(coverText(b))}</span></div>
+        <div class="body">
+          <div class="ttl">${esc(b.title)}</div>
+          <div class="meta"><span>${b.chars.toLocaleString()} 字</span><i class="dot"></i><span>${bookAge(b.updated)}</span></div>
+        </div>
+        <div class="acts" style="opacity:1">
+          <button class="act" data-a="restore" title="恢复到书架">↩</button>
+          <button class="del" data-a="purge" title="彻底删除">✕</button>
+        </div>`;
+      el.querySelector('[data-a=restore]').onclick = async e => {
+        e.stopPropagation();
+        const r = await (await fetch(API + '/api/books/trash/' + b.id + '/restore', { method: 'POST' })).json();
+        if (!r.ok) { toast(r.error || '恢复失败'); return; }
+        toast('已恢复到书架');
+        loadTrash(); loadShelf();
+      };
+      el.querySelector('[data-a=purge]').onclick = async e => {
+        e.stopPropagation();
+        if (!window.confirm(`彻底删除《${b.title}》？正文将不可恢复。`)) return;
+        await fetch(API + '/api/books/trash/' + b.id, { method: 'DELETE' });
+        loadTrash();
+      };
+      list.appendChild(el);
+    });
+  } catch (e) { list.innerHTML = `<div class="empty"><b>加载失败</b></div>`; }
+}
+$('#trashEmpty').onclick = async () => {
+  if (!window.confirm('清空回收站？所有内容将彻底删除。')) return;
+  await fetch(API + '/api/books/trash/empty', { method: 'POST' });
+  toast('已清空回收站');
+  loadTrash();
+};
+$('#btnTrash').onclick = () => trashOpen(true);
+$('#trashClose').onclick = () => trashOpen(false);
+$('#trashMask').onclick = () => trashOpen(false);
 /* 桌面端拖文件到书架直接导入 */
 (() => {
   const box = $('#shelfList');
