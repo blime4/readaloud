@@ -110,6 +110,7 @@ DEFAULT_CONFIG = {
     "tts_local_script": "",         # 留空按端口猜：8891=tts_cosy_server，8890=tts_qwen_server
     "tts_local_args": "",           # 额外启动参数，例如 "--fp16"（半精度，显存吃紧时可试）
     "tts_local_env": "",            # 额外环境变量，写法 "K=V;K2=V2"（见 start_local_tts）
+    "tts_local_split": 30,          # 本地合成超过这个字数就把长句切两段并发（0 关闭）
     # 播放时按住电源请求，别让系统进待机：待机状态下显卡只有 500MHz，
     # 合成时间直接翻倍（实测 RTF 1.07 → 2.2）。见 _awake_hold。
     "keep_display_awake": True,
@@ -119,7 +120,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.10.2"
+ENGINE_VERSION = "1.10.3"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -312,6 +313,48 @@ def _prosody(value, unit: str, fallback: str) -> str:
     return f"{m.group(1) or '+'}{m.group(2)}{unit}"
 
 
+_LOCAL_SOFT_MARKS = "，,、；;：:·"      # 句内软停顿：长句在这里切开
+_LOCAL_SENT_END = "。！？!?"
+
+
+def _local_split(text: str, limit: int) -> list | None:
+    """长句按软停顿切成两段（CosyVoice 对长句的流式分块推理效率很差：
+    58 字 RTF 2.0+，切半并发后每段回到 1.1 档）。返回 None 表示不用切。
+
+    段尾统一收成句号：拼回一条音频时，两段之间是原句本来就该有的停顿。
+    """
+    if len(text) < limit + 4:
+        return None
+    mid = len(text) // 2
+    cand = [i for i, ch in enumerate(text)
+            if ch in _LOCAL_SOFT_MARKS and 6 <= i < len(text) - 6]
+    i = min(cand, key=lambda x: abs(x - mid)) if cand else mid
+    s1, s2 = text[: i + 1], text[i + 1:]
+    tail = s1[-1]
+    if tail in "，,、；;：:·（(“\"“":
+        s1 = s1[:-1] + "。"
+    elif tail not in _LOCAL_SENT_END:
+        s1 += "。"
+    return [s1, s2]
+
+
+def _join_audio(a: bytes, b: bytes, mime: str) -> tuple:
+    """把两段同源音频接成一条。WAV 拼 data 块，MP3 直接接帧。"""
+    if mime == "audio/mpeg":
+        return a + b, mime
+    if not (a.startswith(b"RIFF") and b.startswith(b"RIFF")):
+        raise ValueError("分段合成的返回不是 WAV，无法拼接")
+    off_a = a.find(b"data", 12)
+    off_b = b.find(b"data", 12)
+    if off_a < 0 or off_b < 0:
+        raise ValueError("WAV 里找不到 data 块")
+    da, db = a[off_a + 8:], b[off_b + 8:]
+    head = bytearray(a[: off_a + 8])
+    struct.pack_into("<I", head, off_a + 4, len(da) + len(db))       # data 块大小
+    struct.pack_into("<I", head, 4, off_a + 8 + len(da) + len(db) - 8)  # RIFF 大小
+    return bytes(head) + da + db, "audio/wav"
+
+
 def synth(text: str, voice: str, rate: str, pitch: str, volume: str,
           provider: str | None = None, model: str | None = None) -> tuple:
     """合成一段语音，带磁盘缓存。返回 (文件路径, mimetype)。
@@ -333,9 +376,33 @@ def synth(text: str, voice: str, rate: str, pitch: str, volume: str,
         path = TTS_CACHE / f"{key}.{fmt}"
         if path.exists() and path.stat().st_size > 0:
             return path, TTS.FORMAT_MIME[fmt]
-        data, mime = TTS.synthesize_local(text, voice, model, url, api_key, rate, fmt)
-        # 以服务端真实返回的类型为准（有的服务会忽略 response_format）
-        ext = next((e for e, m in TTS.FORMAT_MIME.items() if m == mime), fmt)
+        # 长句切成两段并发合成（tts_cosy_server 允许 2 条并发，单条喂不饱
+        # 显卡；长句本身还因流式分块而 RTF 翻倍）。两段各自落缓存——同一句
+        # 倒回去重听时，段缓存直接命中，只差一次内存拼接。
+        segs = _local_split(text, int(CFG.get("tts_local_split") or 30))
+        if segs and fmt in ("wav", "mp3"):
+            parts: list = [None, None]
+
+            def _seg(k: int, s: str) -> None:
+                try:
+                    parts[k] = synth(s, voice, rate, pitch, volume, provider, model)
+                except BaseException as e:                     # noqa: BLE001
+                    parts[k] = e
+
+            ths = [threading.Thread(target=_seg, args=(k, s), daemon=True)
+                   for k, s in enumerate(segs)]
+            for t in ths: t.start()
+            for t in ths: t.join()
+            err = next((p for p in parts if isinstance(p, BaseException)), None)
+            if err is not None:
+                raise err
+            ext = "mp3" if parts[0][1] == "audio/mpeg" else "wav"
+            data, mime = _join_audio(parts[0][0].read_bytes(),
+                                     parts[1][0].read_bytes(), parts[0][1])
+        else:
+            data, mime = TTS.synthesize_local(text, voice, model, url, api_key, rate, fmt)
+            # 以服务端真实返回的类型为准（有的服务会忽略 response_format）
+            ext = next((e for e, m in TTS.FORMAT_MIME.items() if m == mime), fmt)
         path = TTS_CACHE / f"{key}.{ext}"
         tmp = path.with_suffix(".part")
         tmp.write_bytes(data)
@@ -1574,11 +1641,29 @@ def _awake_loop() -> None:
             pass
 
 
+def _gpu_burst_kick() -> None:
+    """让本机 TTS 服务跑一次几秒的 GPU burst，把 DVFS 从待机的 500MHz
+    顶回高频。机器已经睡着的话，电源请求只能防它继续睡、救不了频率 ——
+    这个 burst 才是拉频的。放后台线程，不拖慢起播。"""
+    base = (CFG.get("tts_local_url") or "").strip()
+    if not base:
+        return
+    def _go():
+        try:
+            requests.post(f"{TTS.normalize_base(base)}/warmup",
+                          headers=TTS._headers(CFG.get("tts_local_key") or ""),
+                          timeout=30)
+        except Exception:                                      # noqa: BLE001
+            pass
+    threading.Thread(target=_go, daemon=True, name="gpu-burst").start()
+
+
 def _awake_hold(on: bool) -> None:
     """播放时按住电源请求，停下就放开。重复调用无副作用。"""
     if os.name != "nt":
         return
     with _awake["lock"]:
+        first = on and not _awake["on"]
         if on == _awake["on"]:
             return
         _awake["on"] = on
@@ -1588,6 +1673,8 @@ def _awake_hold(on: bool) -> None:
                     target=_awake_loop, daemon=True, name="keep-awake")
                 _awake["thread"].start()
             _awake_touch()
+            if first and CFG.get("keep_display_awake", True):
+                _gpu_burst_kick()
             log.info("播放中：先不让系统睡（否则显卡掉到 500MHz，合成慢一倍）")
         else:
             log.info("停止播放：恢复系统的睡眠策略")

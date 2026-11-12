@@ -232,13 +232,45 @@ def health():
     })
 
 
+def _gpu_clock_mhz() -> int:
+    """当前 SM 频率（MHz），拿不到返回 0。"""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=clocks.sm", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=(0x08000000 if os.name == "nt" else 0)).stdout
+        return int(out.strip().splitlines()[0].strip())
+    except Exception:                                          # noqa: BLE001
+        return 0
+
+
 @app.post("/warmup")
 def warmup():
     engine, error = load_engine()
     if engine is None:
         return jsonify({"ok": False, "error": error}), 500
+    boost = _gpu_burst()
     return jsonify({"ok": True, "load_seconds": _state["load_seconds"],
-                    "voices": sorted(_state["voices"])})
+                    "voices": sorted(_state["voices"]), "gpu_boost": boost})
+
+
+def _gpu_burst(seconds: float = 2.5) -> dict:
+    """系统待机/熄屏后，驱动会把显卡按在 500MHz 上下——自回归合成这种
+    利用率只有三成的负载根本拉不回来，直接让起播慢一倍多。跑几秒小矩阵
+    乘把 DVFS 顶上高频：占用极小，换之后整段合成的高速度。"""
+    before = _gpu_clock_mhz()
+    try:
+        import torch
+    except ImportError:
+        return {"clk": before, "burst": False}
+    a = torch.randn(2048, 2048, device="cuda", dtype=torch.float16)
+    t0 = time.time()
+    while time.time() - t0 < seconds:
+        for _ in range(20):
+            a @ a
+        torch.cuda.synchronize()
+    after = _gpu_clock_mhz()
+    return {"clk": before, "burst": True, "after": after}
 
 
 @app.get("/v1/models")
