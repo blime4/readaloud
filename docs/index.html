@@ -1140,11 +1140,43 @@ async function showOffline() {
     const el = document.createElement(href ? 'a' : 'button');
     el.className = cls;
     el.textContent = label;
-    if (href) { el.href = href; el.target = '_blank'; el.rel = 'noopener'; }
+    if (href) {
+      el.href = href;
+      // readaloud:// 是自定义协议，绝不能带 target=_blank —— 让浏览器"新开一个
+      // 标签页去打开未知协议"会被当成可疑导航直接丢掉，点完什么都不会发生。
+      if (!/^readaloud:/i.test(href)) { el.target = '_blank'; el.rel = 'noopener'; }
+    }
     if (onclick) el.onclick = onclick;
     $('#cxActions').appendChild(el);
     return el;
   };
+
+  /* 拉起本机引擎的按钮 —— 三种离线情况都要有。
+     以前只挂在"引擎没启动"那一张卡上，而权限提示卡先命中的时候（Edge 常报
+     prompt/unknown），页面上根本找不到能启动引擎的按钮，用户只能干瞪眼。 */
+  const launchBtn = (label = '▶ 一键启动本机引擎') => {
+    const el = addBtn(label, 'btn primary', 'readaloud://start');
+    el.onclick = () => {
+      let tries = 0;
+      el.textContent = '正在唤起…';
+      toast('若浏览器问「是否打开 ReadAloud」，请点「打开」；引擎启动约需 5～20 秒', 8000);
+      clearInterval(el._t);
+      el._t = setInterval(async () => {
+        tries++;
+        if (await connect({ manual: true })) {
+          clearInterval(el._t); toast('引擎已启动 ✓'); return;
+        }
+        el.textContent = `正在唤起…${tries * 2}s`;
+        if (tries >= 45) {
+          clearInterval(el._t);
+          el.textContent = label;
+          toast(`没能自动唤起：双击桌面上的「启动朗读」，或直接打开 http://127.0.0.1:${port()}/`, 12000);
+        }
+      }, 2000);
+    };
+    return el;
+  };
+  const localLink = () => addBtn('在本机页面打开', 'btn', `http://127.0.0.1:${port()}/`);
 
   /* 情况一：浏览器把本地网络访问拦下了 */
   if (perm.state === 'denied') {
@@ -1153,12 +1185,13 @@ async function showOffline() {
     $('#cxTitle').textContent = '浏览器拦住了「本地网络访问」';
     $('#cxDesc').innerHTML =
       '这个页面在 GitHub Pages 上，要读你电脑里的引擎，属于「公网 → 本机」的请求，' +
-      'Chrome 默认会拦一次。你已经把它拒绝了，手动放行一次即可：<ol>' +
+      '浏览器默认会拦一次。你已经把它拒绝了，手动放行一次即可：<ol>' +
       '<li>点地址栏左侧的 <b>⚙ / 🔒 图标</b> → <b>网站设置</b></li>' +
       '<li>找到 <b>本地网络访问</b>（Local network access），改成 <b>允许</b></li>' +
       '<li>回到本页 <b>刷新</b>，就会自动连上</li></ol>';
-    addBtn('我已放行，重试', 'btn primary', null, () => connect({ manual: true }));
-    addBtn('直接在本地打开引擎页面', 'btn', `http://127.0.0.1:${port()}/`);
+    launchBtn();
+    addBtn('我已放行，重试', 'btn', null, () => connect({ manual: true }));
+    localLink();
     return;
   }
 
@@ -1166,17 +1199,16 @@ async function showOffline() {
   if (perm.state === 'prompt' || perm.state === 'unknown') {
     $('#ccard').className = 'ccard warn';
     $('#cxIcon').textContent = '🔐';
-    $('#cxTitle').textContent = '点一下，连上你这台电脑的朗读引擎';
+    $('#cxTitle').textContent = '连上你这台电脑的朗读引擎';
     $('#cxDesc').innerHTML =
       '页面在云端（GitHub Pages），<b>朗读与 AI 全部在你本机运行</b>，文字不出你的电脑。' +
-      '首次连接浏览器会问一次是否允许访问本地网络，选「允许」即可。' +
-      '<div class="hint" style="margin-top:8px">如果你还没装过本机引擎，先看下面的第 2 步。</div>';
-    addBtn('🔐 连接本机引擎', 'btn primary', null, async () => {
-      const ok = await connect({ manual: true });
-      if (!ok) await showOffline();
-    });
-    $('#cxActions').appendChild(document.createTextNode(' '));
+      '<div class="hint" style="margin-top:8px">引擎没启动就点下面的「一键启动」；' +
+      '浏览器问「是否打开 ReadAloud」时点「打开」，问是否允许访问本地网络时点「允许」。</div>' +
+      '<div class="hint" style="margin-top:6px">如果点了既没有弹窗也没任何反应，' +
+      '说明浏览器把 readaloud:// 静默拦了 —— 直接双击桌面上的「启动朗读」。</div>';
+    launchBtn();
     addBtn('我要先安装引擎', 'btn', null, () => installGuide());
+    localLink();
     return;
   }
 
@@ -1193,26 +1225,7 @@ async function showOffline() {
     '这个协议，点了也毫无反应。</div>' +
     `<div class="hint" style="margin-top:6px">引擎起来后建议直接用 <code>http://127.0.0.1:${port()}/</code>：` +
     '和引擎同源，不用每次授权本地网络。</div>';
-  const btn = addBtn('▶ 一键启动本机引擎', 'btn primary', null, async () => {
-    btn.textContent = '正在唤起…';
-    location.href = 'readaloud://start';           // 自定义协议 → 唤起本地 launcher
-    // Windows 第一次唤起会先弹「是否打开 ReadAloud」，点了"打开"之后
-    // launcher 起来还要 3～10 秒。以前只等 24 秒就喊失败，用户看到的是
-    // "点了没反应" —— 其实引擎正在路上。给足 90 秒，并把等待原因说清楚。
-    toast('若浏览器问「是否打开 ReadAloud」，请点「打开」；引擎启动约需 5～20 秒', 8000);
-    let tries = 0;
-    const timer = setInterval(async () => {
-      tries++;
-      const ok = await connect({ manual: true });
-      if (ok) { clearInterval(timer); toast('引擎已启动 ✓'); return; }
-      btn.textContent = `正在唤起…${tries * 2}s`;
-      if (tries >= 45) {
-        clearInterval(timer);
-        btn.textContent = '▶ 一键启动本机引擎';
-        toast(`没能自动唤起：双击桌面上的「启动朗读」，或手动打开 http://127.0.0.1:${port()}/`, 12000);
-      }
-    }, 2000);
-  });
+  launchBtn();
   addBtn('怎么安装', 'btn', null, () => installGuide());
   addBtn('重试', 'btn', null, () => connect({ manual: true }));
 }
