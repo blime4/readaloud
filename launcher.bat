@@ -1,28 +1,38 @@
 ﻿@echo off
-chcp 65001 >nul
-setlocal
+setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-rem readaloud:// 协议的落地脚本：网页点「一键启动」时 Windows 会执行这里。
-rem 只做一件事 —— 找到 Python，把动作转交给 launcher.py。
-
+rem ---------------------------------------------------------------------
+rem  readaloud:// protocol landing script -- also the double-click starter.
+rem  Python lookup order: project .venv -> remembered python.path -> PATH.
+rem  (PATH 里常有个 WindowsApps 的商店占位 python.exe，选中它只会打开
+rem   微软商店，所以这里显式跳过。)
+rem ---------------------------------------------------------------------
 set "PY="
 if exist "%~dp0.venv\Scripts\python.exe" set "PY=%~dp0.venv\Scripts\python.exe"
-if not defined PY for /f "delims=" %%i in ('where python 2^>nul') do if not defined PY set "PY=%%i"
+if not defined PY if exist "%~dp0python.path" set /p PY=<"%~dp0python.path"
+if not defined PY for /f "delims=" %%i in ('where python 2^>nul ^| findstr /v /i WindowsApps') do if not defined PY set "PY=%%i"
 if not defined PY for /f "delims=" %%i in ('where py 2^>nul') do if not defined PY set "PY=%%i"
+if defined PY set "PY=!PY:pythonw.exe=python.exe!"
 
-if not defined PY (
-  echo [x] 没找到 Python。
-  echo     请先双击 install.bat 完成一次安装。
-  timeout /t 10 >nul
-  exit /b 1
-)
+if not defined PY goto nopython
 
-"%PY%" "%~dp0launcher.py" "%~1"
-if errorlevel 1 (
-  echo.
-  echo [!] 启动失败 —— 详情见 launcher.log / server.log
-  echo     若为首次使用，请先双击 install.bat。
-  timeout /t 10 >nul
-)
-endlocal
+set "ACT=%~1"
+if not defined ACT set "ACT=readaloud://open"
+
+"!PY!" "%~dp0launcher.py" "!ACT!"
+if errorlevel 1 goto failed
+if "%~1"=="" timeout /t 3 >nul
+exit /b 0
+
+:nopython
+echo [x] Python not found. Please run install.bat once.
+timeout /t 15 >nul
+exit /b 1
+
+:failed
+echo.
+echo [!] Startup failed -- see launcher.log / server.log
+echo     First time here? Run install.bat once.
+timeout /t 15 >nul
+exit /b 1

@@ -181,7 +181,9 @@ def stop(p: int) -> int:
 
 
 def main() -> int:
-    raw = (sys.argv[1] if len(sys.argv) > 1 else "readaloud://start").strip()
+    # 不带参数 = 用户双击了启动脚本：既起引擎也把页面打开。
+    # （以前默认 start，双击后引擎起来了但屏幕毫无变化，用户只会以为"没启动"。）
+    raw = (sys.argv[1] if len(sys.argv) > 1 else "readaloud://open").strip()
     act = re.sub(r"^readaloud://", "", raw, flags=re.I).strip("/ ").lower()
     act = act.split("/")[0]
     p = port()

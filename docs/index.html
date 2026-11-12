@@ -1186,9 +1186,12 @@ async function showOffline() {
   $('#cxTitle').textContent = '本机朗读引擎没有运行';
   $('#cxDesc').innerHTML =
     '权限没问题，只是你电脑上的引擎进程没启动。' +
-    '<div class="hint" style="margin-top:8px">装过引擎的话点「一键启动」；没装过点「怎么安装」。' +
-    '浏览器若弹出「是否打开 ReadAloud」，记得点「打开」。</div>' +
-    `<div class="hint" style="margin-top:6px">引擎起来后，建议直接用 <code>http://127.0.0.1:${port()}/</code>：` +
+    '<div class="hint" style="margin-top:8px">最稳的办法：双击桌面上的 <b>「启动朗读」</b> —— ' +
+    '它会拉起引擎并自动打开本地页面。</div>' +
+    '<div class="hint" style="margin-top:6px">也可以点下面的「一键启动」。浏览器若问' +
+    '「是否打开 ReadAloud」，必须点「打开」；一旦点过「取消」，Chrome 之后会一直静默拦掉' +
+    '这个协议，点了也毫无反应。</div>' +
+    `<div class="hint" style="margin-top:6px">引擎起来后建议直接用 <code>http://127.0.0.1:${port()}/</code>：` +
     '和引擎同源，不用每次授权本地网络。</div>';
   const btn = addBtn('▶ 一键启动本机引擎', 'btn primary', null, async () => {
     btn.textContent = '正在唤起…';
@@ -1206,7 +1209,7 @@ async function showOffline() {
       if (tries >= 45) {
         clearInterval(timer);
         btn.textContent = '▶ 一键启动本机引擎';
-        toast('没能自动唤起：请双击项目目录里的 launcher.bat（或 start-server.bat）', 8000);
+        toast(`没能自动唤起：双击桌面上的「启动朗读」，或手动打开 http://127.0.0.1:${port()}/`, 12000);
       }
     }, 2000);
   });
