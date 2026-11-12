@@ -1186,19 +1186,27 @@ async function showOffline() {
   $('#cxTitle').textContent = '本机朗读引擎没有运行';
   $('#cxDesc').innerHTML =
     '权限没问题，只是你电脑上的引擎进程没启动。' +
-    '<div class="hint" style="margin-top:8px">装过引擎的话点「一键启动」；没装过点「怎么安装」。</div>';
+    '<div class="hint" style="margin-top:8px">装过引擎的话点「一键启动」；没装过点「怎么安装」。' +
+    '浏览器若弹出「是否打开 ReadAloud」，记得点「打开」。</div>' +
+    `<div class="hint" style="margin-top:6px">引擎起来后，建议直接用 <code>http://127.0.0.1:${port()}/</code>：` +
+    '和引擎同源，不用每次授权本地网络。</div>';
   const btn = addBtn('▶ 一键启动本机引擎', 'btn primary', null, async () => {
     btn.textContent = '正在唤起…';
     location.href = 'readaloud://start';           // 自定义协议 → 唤起本地 launcher
+    // Windows 第一次唤起会先弹「是否打开 ReadAloud」，点了"打开"之后
+    // launcher 起来还要 3～10 秒。以前只等 24 秒就喊失败，用户看到的是
+    // "点了没反应" —— 其实引擎正在路上。给足 90 秒，并把等待原因说清楚。
+    toast('若浏览器问「是否打开 ReadAloud」，请点「打开」；引擎启动约需 5～20 秒', 8000);
     let tries = 0;
     const timer = setInterval(async () => {
       tries++;
       const ok = await connect({ manual: true });
       if (ok) { clearInterval(timer); toast('引擎已启动 ✓'); return; }
-      if (tries >= 12) {
+      btn.textContent = `正在唤起…${tries * 2}s`;
+      if (tries >= 45) {
         clearInterval(timer);
         btn.textContent = '▶ 一键启动本机引擎';
-        toast('没能自动唤起，请手动运行 start-server.bat', 5000);
+        toast('没能自动唤起：请双击项目目录里的 launcher.bat（或 start-server.bat）', 8000);
       }
     }, 2000);
   });
