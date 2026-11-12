@@ -441,12 +441,38 @@
   .qrbox{display:flex;align-items:center;gap:14px;margin-top:10px;padding:10px;
     border:1px solid var(--line);border-radius:8px}
   .qrbox svg{display:block;background:#fff;border-radius:6px;flex:none}
-  .tocitem{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;
-    cursor:pointer;font-size:13px}
-  .tocitem:hover{background:var(--btn-hover)}
-  .tocitem.cur{background:var(--accent-soft)}
-  .tocitem .tno{color:var(--txt-3);font-size:11px;min-width:36px;text-align:right;flex:none}
-  .tocitem .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .qr-center{display:flex;flex-direction:column;align-items:center;gap:14px;
+    padding:30px 18px;text-align:center}
+  .qr-center .qrbig svg{display:block;background:#fff;border-radius:8px;
+    box-shadow:0 4px 18px rgba(0,0,0,.18)}
+
+  /* ---------- 目录：WorkBuddy 式右侧飞出 + 逐条滑入 ---------- */
+  .tocmask{position:fixed;inset:0;z-index:69;background:rgba(0,0,0,.32);
+    opacity:0;pointer-events:none;transition:opacity .22s}
+  .tocmask.show{opacity:1;pointer-events:auto}
+  .tocfly{position:fixed;top:0;right:0;bottom:0;width:min(420px,94vw);z-index:70;
+    background:var(--panel);border-left:1px solid var(--line);
+    box-shadow:-18px 0 44px rgba(0,0,0,.28);
+    transform:translateX(103%);transition:transform .28s cubic-bezier(.22,.9,.26,1);
+    display:flex;flex-direction:column}
+  .tocfly.show{transform:translateX(0)}
+  .tocfly .tf-head{padding:14px 16px 12px;border-bottom:1px solid var(--line)}
+  .tocfly .tf-title{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+  .tocfly .tf-title h3{margin:0;font-size:16px;flex:1}
+  .tocfly .tf-list{flex:1;overflow-y:auto;padding:8px 8px 24px}
+  .tfitem{display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:8px;
+    cursor:pointer;font-size:13.5px;
+    animation:tfIn .3s cubic-bezier(.2,.8,.3,1) backwards;
+    animation-delay:calc(var(--i) * 22ms)}
+  @keyframes tfIn{from{opacity:0;transform:translateX(28px)}to{opacity:1;transform:none}}
+  .tfitem:hover{background:var(--btn-hover);transform:translateX(3px);transition:.12s}
+  .tfitem.cur{background:var(--accent-soft)}
+  .tfitem.cur .tt{color:var(--accent-2);font-weight:600}
+  .tfitem.active{outline:1px solid var(--accent);background:var(--accent-soft)}
+  .tfitem .tno{color:var(--txt-3);font-size:11px;min-width:40px;text-align:right;
+    flex:none;font-family:var(--mono);letter-spacing:.03em}
+  .tfitem .tt{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tocfly .sh-search{width:100%}
   #shelfSort{height:34px;background:var(--btn);color:var(--txt);border:1px solid var(--btn-bd);
     border-radius:8px;padding:0 6px;font:12px var(--ui)}
 
@@ -675,6 +701,7 @@
   </div>
   <div class="grow"></div>
   <span class="chip gray btnish" id="chipShelf" title="书架：导入过的书都在这儿，进度跟着书走">书架</span>
+  <span class="chip gray btnish" id="chipQR" title="手机扫码，接着听">📱</span>
   <span class="chip gray btnish" id="chipTheme" title="切换深色/浅色（朗读常在夜里用）">夜间</span>
   <span class="chip gray" id="chipMode" title="当前页面从哪里来 / 引擎在哪里">—</span>
   <span class="chip ok btnish" id="chipPre" hidden title="后台正在把全文提前合成进缓存（只在暂停/不播时干活，一开播就让路）；点一下可停止">预合成…</span>
@@ -912,11 +939,6 @@
           <button class="tiny" id="btnLanOff" hidden>只允许本机</button>
         </div>
         <div class="hint" id="lanUrl" style="margin-top:8px;word-break:break-all"></div>
-        <button class="tiny" id="btnQR" hidden style="margin-top:6px">📱 显示二维码</button>
-        <div class="qrbox" id="qrBox" hidden>
-          <div id="qrImg"></div>
-          <div class="hint">手机相机扫码直接打开 —— 要和这台电脑在同一个 WiFi，网址里自带访问码。</div>
-        </div>
       </div>
     </details>
     <details class="help" style="border-top:1px solid var(--line)">
@@ -952,25 +974,20 @@
   <button class="pb ghost" id="btnRepeat" title="重读当前句">↻</button>
 </div>
 
-<div class="shelfWrap" id="tocWrap">
-  <div class="shelfMask" id="tocMask"></div>
-  <aside class="shelf" role="dialog" aria-label="目录">
-    <div class="shelf-head">
-      <div class="sh-top">
-        <h3>目录</h3>
-        <span class="hint" id="tocStat"></span>
-        <span class="grow"></span>
-        <button class="ghost tiny" id="tocClose" title="关闭">✕</button>
-      </div>
-      <div class="sh-tools">
-        <label class="sh-search">
-          <span class="sic">/</span>
-          <input id="tocSearch" type="search" placeholder="搜章节标题" autocomplete="off" spellcheck="false">
-        </label>
-      </div>
+<div class="tocmask" id="tocMask"></div>
+<div class="tocfly" id="tocFly" role="dialog" aria-label="目录">
+  <div class="tf-head">
+    <div class="tf-title">
+      <h3>目录</h3>
+      <span class="hint" id="tocStat"></span>
+      <button class="ghost tiny" id="tocClose" title="关闭（Esc）">✕</button>
     </div>
-    <div class="shelf-list" id="tocList"></div>
-  </aside>
+    <label class="sh-search">
+      <span class="sic">/</span>
+      <input id="tocSearch" type="search" placeholder="搜章节标题" autocomplete="off" spellcheck="false">
+    </label>
+  </div>
+  <div class="tf-list" id="tocList"></div>
 </div>
 
 <div class="shelfWrap" id="shelfWrap">
@@ -1018,6 +1035,26 @@
       </div>
     </div>
     <div class="shelf-list" id="trashList"></div>
+  </aside>
+</div>
+
+<div class="shelfWrap" id="qrWrap">
+  <div class="shelfMask" id="qrMask"></div>
+  <aside class="shelf" role="dialog" aria-label="手机扫码收听">
+    <div class="shelf-head">
+      <div class="sh-top">
+        <h3>手机扫码收听</h3>
+        <span class="grow"></span>
+        <button class="ghost tiny" id="qrClose" title="关闭">✕</button>
+      </div>
+    </div>
+    <div class="qr-center">
+      <div class="qrbig" id="qrBigImg"></div>
+      <div class="hint" id="qrUrl" style="word-break:break-all;text-align:center"></div>
+      <div class="hint" id="qrHint">手机和这台电脑连同一个 WiFi，用相机扫码打开 —— 书架、进度都是同一份，随时接着听。</div>
+      <button class="primary" id="qrEnable" hidden>开启局域网访问并重启引擎</button>
+      <div class="hint" id="qrMsg"></div>
+    </div>
   </aside>
 </div>
 
@@ -3257,7 +3294,6 @@ async function loadLan() {
     $('#lanUrl').innerHTML = d.open && d.url
       ? `手机打开：<b>${esc(d.url)}</b><br>网址里的 <code>k=…</code> 是访问码，同一 WiFi 下别人没这个码就用不了你的书。`
       : '';
-    $('#btnQR').hidden = !(d.open && d.url);
   } catch (e) { /* 旧引擎 */ }
 }
 
@@ -3471,25 +3507,63 @@ $('#resumeBar').onclick = e => {
   if (RB) openBook(RB.id);
 };
 
-/* ---------- 手机收听二维码 ---------- */
+/* ---------- 手机扫码收听（顶栏 📱 入口） ---------- */
 let QR_URL = '';
-async function toggleQR() {
-  const box = $('#qrBox');
-  if (!box.hidden) { box.hidden = true; return; }
-  try {
-    const d = await (await fetch(API + '/api/lan')).json();
-    if (!d.ok || !d.open || !d.url) { toast('先点「允许手机访问」，重启引擎后再来生成'); return; }
+function qrModal(open) {
+  $('#qrWrap').classList.toggle('show', open);
+  if (open) prepQR();
+}
+async function renderQR() {
+  const d = await (await fetch(API + '/api/lan')).json();
+  const open = d.ok && d.open && d.url;
+  $('#qrEnable').hidden = !!open;
+  if (open) {
     if (QR_URL !== d.url) {
       const qr = qrcode(0, 'M');
       qr.addData(d.url);
       qr.make();
-      $('#qrImg').innerHTML = qr.createSvgTag(4, 8);
+      $('#qrBigImg').innerHTML = qr.createSvgTag(6, 10);
       QR_URL = d.url;
     }
-    box.hidden = false;
-  } catch (e) { toast('生成二维码失败：' + e.message); }
+    $('#qrBigImg').hidden = false;
+    $('#qrUrl').textContent = d.url;
+    $('#qrHint').hidden = false;
+  } else {
+    $('#qrBigImg').hidden = true;
+    $('#qrBigImg').innerHTML = '';
+    $('#qrUrl').textContent = '';
+    $('#qrHint').hidden = true;
+  }
 }
-$('#btnQR').onclick = toggleQR;
+async function prepQR() {
+  $('#qrMsg').textContent = '';
+  try { await renderQR(); } catch (e) { $('#qrMsg').textContent = '引擎没连上，等连接恢复再试'; }
+}
+$('#chipQR').onclick = () => qrModal(true);
+$('#qrClose').onclick = () => qrModal(false);
+$('#qrMask').onclick = () => qrModal(false);
+$('#qrEnable').onclick = async () => {
+  $('#qrMsg').textContent = '正在开启局域网访问…';
+  try {
+    await fetch(API + '/api/lan', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: '0.0.0.0' }),
+    });
+    $('#qrMsg').textContent = '正在重启引擎…（几秒后自动恢复）';
+    await fetch(API + '/api/restart', { method: 'POST' });
+    for (let i = 0; i < 30; i++) {           // 最多等 60 秒引擎回来
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const h = await (await fetch(API + '/api/health')).json();
+        if (h.ok) break;
+      } catch (e) { /* 重启中，继续等 */ }
+    }
+    await loadLan();
+    await renderQR();
+    $('#qrMsg').textContent = '已开启，扫码就能在手机上接着听。';
+  } catch (e) { $('#qrMsg').textContent = '开启失败：' + e.message; }
+};
+if (isMobile()) $('#chipQR').hidden = true;   // 手机上看这个入口没意义
 
 /* ---------- 目录（章节跳转） ---------- */
 const RE_TOC = /(?:第[0-9〇零一二三四五六七八九十百千万两]+\s*[章回卷节部篇话幕]|chapter\s+[0-9ivxl]+|序章|楔子|引子|尾声|终章|后记|番外)/i;
@@ -3503,37 +3577,76 @@ function chaptersOf(items) {
   return out;
 }
 let TOC_Q = '';
+let TOC_ACT = -1;                 // 键盘浏览的行（Enter 跳转）
 function tocOpen(open) {
-  $('#tocWrap').classList.toggle('show', open);
-  if (open) { renderToc(); setTimeout(() => { if (!isMobile()) $('#tocSearch').focus(); }, 60); }
+  $('#tocFly').classList.toggle('show', open);
+  $('#tocMask').classList.toggle('show', open);
+  if (open) {
+    TOC_Q = ''; $('#tocSearch').value = '';
+    renderToc();
+    setTimeout(() => { if (!isMobile()) $('#tocSearch').focus(); }, 180);
+  }
 }
 function renderToc() {
   const list = $('#tocList');
   const q = TOC_Q.trim().toLowerCase();
-  const chs = chaptersOf(S.items).filter(c => !q || String(c.title).toLowerCase().includes(q));
+  const all = chaptersOf(S.items);
+  const chs = all.filter(c => !q || String(c.title).toLowerCase().includes(q));
+  $('#tocStat').textContent = all.length ? `${chs.length}/${all.length} 章` : '';
   if (!chs.length) {
     list.innerHTML = `<div class="empty"><div class="ico">📖</div><b>没有识别出章节</b>
       <div class="hint">「第一章…」「Chapter N」这类独立成行的标题会自动进目录。</div></div>`;
+    TOC_ACT = -1;
     return;
   }
-  $('#tocStat').textContent = `${chs.length} 章 · 共 ${S.items.length} 句`;
   let curN = -1;
-  const all = chaptersOf(S.items);
   all.forEach((c, n) => { if (S.idx >= c.idx) curN = n; });
   list.innerHTML = '';
-  chs.forEach(c => {
+  chs.forEach((c, i) => {
     const n = all.indexOf(c);
     const el = document.createElement('div');
-    el.className = 'tocitem' + (S.idx >= 0 && n === curN ? ' cur' : '');
+    // 逐条从右滑入（WorkBuddy 会话选择那种节奏），条目太多时延迟封顶，别等半天
+    el.style.setProperty('--i', Math.min(i, 24));
+    el.className = 'tfitem' + (S.idx >= 0 && n === curN ? ' cur' : '');
     el.innerHTML = `<span class="tno">${c.idx + 1}</span><span class="tt">${esc(c.title)}</span>`;
     el.onclick = () => { tocOpen(false); seekReader(c.idx); };
     list.appendChild(el);
   });
+  // 默认落在当前章（键盘 ↑↓ 从这里开始）
+  TOC_ACT = chs.findIndex(c => S.idx >= 0 && all.indexOf(c) === curN);
+  const cur = list.children[TOC_ACT];
+  if (cur && cur.classList.contains('cur')) cur.scrollIntoView({ block: 'center' });
+  else TOC_ACT = -1;
 }
-$('#btnToc').onclick = () => tocOpen(!$('#tocWrap').classList.contains('show'));
+function tocMove(d) {
+  const list = $('#tocList');
+  const chs = list.querySelectorAll('.tfitem');
+  if (!chs.length) return;
+  TOC_ACT = Math.max(0, Math.min(chs.length - 1, (TOC_ACT < 0 ? 0 : TOC_ACT + d)));
+  chs.forEach(el => el.classList.remove('active'));
+  const el = chs[TOC_ACT];
+  el.classList.add('active');
+  el.scrollIntoView({ block: 'nearest' });
+}
+function tocJumpActive() {
+  const list = $('#tocList');
+  const el = list.querySelectorAll('.tfitem')[TOC_ACT];
+  if (!el) { const first = list.querySelector('.tfitem'); if (first) first.click(); return; }
+  el.click();
+}
+$('#btnToc').onclick = () => tocOpen(!$('#tocFly').classList.contains('show'));
 $('#tocClose').onclick = () => tocOpen(false);
 $('#tocMask').onclick = () => tocOpen(false);
 $('#tocSearch').addEventListener('input', e => { TOC_Q = e.target.value || ''; renderToc(); });
+/* 目录面板的键盘：Esc 关闭、↑↓ 浏览、Enter 跳转。
+   capture 阶段处理并拦下事件，别让全局 Esc 又把播放停了。 */
+document.addEventListener('keydown', e => {
+  if (!$('#tocFly').classList.contains('show')) return;
+  if (e.key === 'Escape') { e.stopPropagation(); tocOpen(false); }
+  else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault(); tocMove(e.key === 'ArrowDown' ? 1 : -1);
+  } else if (e.key === 'Enter') { e.preventDefault(); tocJumpActive(); }
+}, true);
 
 $('#mtabs').addEventListener('click', e => {
   const b = e.target.closest('button');
