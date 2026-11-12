@@ -122,7 +122,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.11.0"
+ENGINE_VERSION = "1.11.1"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -355,6 +355,21 @@ def _join_audio(a: bytes, b: bytes, mime: str) -> tuple:
     struct.pack_into("<I", head, off_a + 4, len(da) + len(db))       # data 块大小
     struct.pack_into("<I", head, 4, off_a + 8 + len(da) + len(db) - 8)  # RIFF 大小
     return bytes(head) + da + db, "audio/wav"
+
+
+def _silent_wav(seconds: float = 0.3, rate: int = 24000) -> bytes:
+    """一段静音 WAV。
+
+    给「没有可念内容」的文本用：纯标点的合成请求在 CosyVoice 上是 502
+    「模型没有产出音频」，而浏览器遇到非音频响应既不报错也不结束播放 ——
+    听感就是整本书卡在那一句上，再也翻不过去。返回静音让它当停顿走过去。
+    """
+    n = max(1, int(rate * seconds))
+    data = b"\x00\x00" * n
+    head = b"RIFF" + struct.pack("<I", 36 + len(data)) + b"WAVEfmt "
+    head += struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+    head += b"data" + struct.pack("<I", len(data))
+    return head + data
 
 
 def synth(text: str, voice: str, rate: str, pitch: str, volume: str,
@@ -873,18 +888,27 @@ def host_info(force: bool = False) -> dict:
             info["ram_gb"] = round(ms.ullTotalPhys / 1e9, 1)
     except Exception:
         pass
-    try:                                   # 显卡：装了 nvidia-smi 才有，没有就留空
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=4)
-        for line in out.stdout.strip().splitlines():
-            parts = [p.strip() for p in line.split(",")]
-            if parts and parts[0]:
-                info["gpus"].append({"name": parts[0],
-                                     "vram": parts[1] if len(parts) > 1 else "",
-                                     "driver": parts[2] if len(parts) > 2 else ""})
-    except Exception:
-        pass
+    # 显卡：装了 nvidia-smi 才有，没有就留空。
+    # 启动子进程偶尔会撞上「0x800700E8 没有足够内存完成此命令」（系统进程/句柄
+    # 一时吃紧），这是一次性的，重试一次基本就好 —— 否则页面会突然显示没有显卡。
+    for attempt in range(2):
+        try:
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
+                 "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=4)
+            for line in out.stdout.strip().splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if parts and parts[0]:
+                    info["gpus"].append({"name": parts[0],
+                                         "vram": parts[1] if len(parts) > 1 else "",
+                                         "driver": parts[2] if len(parts) > 2 else ""})
+            break
+        except Exception as e:             # noqa: BLE001
+            if attempt == 0:
+                time.sleep(0.4)
+                continue
+            log.info("查显卡信息失败（不影响朗读）：%s", e)
     _host_cache["data"], _host_cache["ts"] = info, time.time()
     return info
 
@@ -2043,7 +2067,19 @@ def _soft_restart() -> None:
     _srv_ref["srv"] = None
     _stop_extra_servers()
     try:
+        import importlib
         import runpy
+        # runpy 只重跑 server.py 自己：text_nlp / tts_engine / bookshelf 这些
+        # 兄弟模块还留在 sys.modules 里，磁盘上改了也不生效 —— 表现就是
+        # 「重启了，新逻辑却没上线」。这里把它们一并摘掉，让 runpy 重新导入。
+        here = os.path.dirname(os.path.abspath(__file__))
+        for name, mod in list(sys.modules.items()):
+            if name == "__main__":
+                continue
+            f = getattr(mod, "__file__", None)
+            if f and os.path.dirname(os.path.abspath(f)) == here:
+                sys.modules.pop(name, None)
+        importlib.invalidate_caches()
         _rlog("旧监听已关，开始跑新代码")
         runpy.run_path(str(BASE / "server.py"), run_name="__main__")
         _rlog("新代码已接管")
@@ -2756,6 +2792,11 @@ def api_tts():
     text = (body.get("text") or "").strip()
     if not text:
         return jsonify({"ok": False, "error": "text 为空"}), 400
+    if not NLP.speakable(text):
+        # 纯标点（第 118 句只有一个 "."）：没音可发。这里直接给一段静音，
+        # 而不是让合成器回 502 —— 浏览器拿到非音频响应会一直挂着不前进。
+        return Response(_silent_wav(), mimetype="audio/wav",
+                        headers={"Cache-Control": "public, max-age=604800"})
     voice = body.get("voice") or CFG["default_voice"]
     rate = body.get("rate") or CFG["rate"]
     pitch = body.get("pitch") or CFG["pitch"]

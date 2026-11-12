@@ -59,6 +59,16 @@ OPEN_PAIRS = {"“": "”", "‘": "’", "「": "」", "『": "』",
               "（": "）", "《": "》", "【": "】", "(": ")", "[": "]", "{": "}"}
 CLOSERS = set(OPEN_PAIRS.values()) | {'"'}
 
+# 真正能"念出来"的字符：汉字、字母、数字、日文假名、韩文。
+# 纯标点（单独的 "."、"…"、"——"）和分隔符（"***"）没有音，送去合成只会拿到
+# 「模型没有产出音频」，播放器就卡在那一句上再也不往前走。
+RE_SPEAKABLE = re.compile(r"[0-9A-Za-z\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]")
+
+
+def speakable(text: str) -> bool:
+    """这段文本有没有能念出来的内容（纯标点 / 纯符号返回 False）。"""
+    return bool(RE_SPEAKABLE.search(text or ""))
+
 # 解析阶段用到的标记
 RE_FENCE = re.compile(r"^\s*(```|~~~)")
 RE_HEADING = re.compile(r"^\s{0,3}(#{1,6})\s+(.*)$")
@@ -498,6 +508,12 @@ def split_items(text: str, max_len: int = 62, min_len: int = 9,
                          (PAUSE["soft"] if is_soft else PAUSE["sentence"]))
             if last and not is_last_block and kind == "paragraph":
                 pause = max(pause, PAUSE["paragraph"])
+            if not speakable(txt):
+                # 纯标点条目（英文句号被单独切开、目录里的点线……）：本来就不该读。
+                # 丢掉这一条，把它的停顿记到前一条上，既不出声也不丢呼吸感。
+                if items:
+                    items[-1]["pause"] = max(items[-1]["pause"], int(pause))
+                continue
             items.append({
                 "text": txt,
                 "kind": kind,
@@ -630,11 +646,13 @@ def prepare(raw: str, max_len: int = 62, min_len: int = 9, do_normalize: bool = 
         # 于是整段可能以逗号/顿号收尾。朗读时那是个"话没说完"的半截停顿，
         # 听起来很怪；补成句号，分句和停顿都干脆。
         t = re.sub(r"[，,、：:；;]+$", "。", t)
-        if t and t != "。":
+        # 纯标点/分隔线的 block（"."、*** 之后剩下的 "。"）没有可念的内容，
+        # 不进朗读稿：合成器会拒绝它，播放器还会卡死在这一句上。
+        if t and speakable(t):
             cooked.append({"kind": b["kind"], "text": t})
     text = "\n\n".join(b["text"] for b in cooked).strip()
     items = split_items("", max_len=max_len, min_len=min_len, blocks=cooked) if cooked else []
-    if not items and text:
+    if not items and text and speakable(text):
         items = [{"text": text, "kind": "para", "pause": PAUSE["paragraph"], "rate": 0}]
     return {"text": text, "items": items,
             "segments": [it["text"] for it in items], "blocks": cooked}

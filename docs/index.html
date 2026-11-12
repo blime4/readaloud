@@ -1891,6 +1891,11 @@ function maybeResume() {
   toast(`已定位到上次读到的第 ${r.next} 句，按「▶」接着听`, 4500);
 }
 
+/* 有能念出来的内容吗？纯标点（单独的 "."、"…"、目录点线）没有音，
+   送去合成会拿到 502，播放器就卡在这一句上再也翻不过去。 */
+const SPEAKABLE = /[0-9A-Za-z\u3400-\u9fff\u3040-\u30ff\uac00-\ud7af]/;
+function speakable(s) { return SPEAKABLE.test(s || ''); }
+
 function playAt(i, force) {
   clearTimeout(S.pauseTimer);
   clearTimeout(S.retryTimer);
@@ -1898,6 +1903,9 @@ function playAt(i, force) {
   const request = ++S.playRequest;
   if (i >= S.items.length) { finish(); return; }
   if (i < 0) i = 0;
+  // 纯标点条目直接当停顿跳过去：不出声、不发请求，更不会卡住。
+  while (i < S.items.length && !speakable(S.items[i].text)) i++;
+  if (i >= S.items.length) { finish(); return; }
   S.idx = i;
   highlight();
   saveResume();

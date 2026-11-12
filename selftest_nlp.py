@@ -171,6 +171,21 @@ check("标题停顿更长", items5[0]["pause"] > items5[-1]["pause"], True)
 check("标题语速更慢", items5[0]["rate"] < 0, True)
 check("段末停顿是段落级", items5[-1]["pause"] >= 600, True)
 
+# 回归：英文句号被单独切成一条 "."，送去合成会 502「模型没有产出音频」，
+# 播放器就卡死在这一句上再也读不下去。纯标点必须既不朗读也不阻塞。
+check("纯标点不成条", N.speakable("."), False)
+check("省略号/破折号不算可读", [N.speakable(x) for x in ("……", "——", "。。。")],
+      [False, False, False])
+check("有字才算可读", [N.speakable(x) for x in ("abc", "中文", "1")], [True, True, True])
+punct_mix = "他说完了。. 然后他走了。"
+check("句间孤立句号被丢掉",
+      [i["text"] for i in N.split_items("", blocks=[{"kind": "para", "text": punct_mix}])],
+      ["他说完了。", "然后他走了。"])
+punct_para = N.prepare("第一段内容。\n\n.\n\n第二段内容。")
+check("整段只有标点也不进朗读稿", punct_para["segments"], ["第一段内容。", "第二段内容。"])
+check("丢掉标点后不丢停顿",
+      N.split_items("", blocks=[{"kind": "para", "text": punct_mix}])[0]["pause"] >= 330, True)
+
 print("=== 5) 端到端 prepare ===")
 p = N.prepare(raw)
 check("产出 items 与 segments 一致", p["segments"] == [i["text"] for i in p["items"]], True)
