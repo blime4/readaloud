@@ -458,6 +458,14 @@
   .qralt .hint{flex-basis:100%}
   .qralt button.tiny{font-family:var(--mono);letter-spacing:.04em}
   .qralt button.tiny.on{border-color:var(--accent);color:var(--accent-2);background:var(--accent-soft)}
+  /* 异地入口：不在同一个 WiFi 时走 Tailscale 的 100.x 地址，页面和书架完全一样 */
+  .qrremote{width:100%;margin-top:4px;padding-top:14px;border-top:1px dashed var(--line);
+    display:flex;flex-direction:column;align-items:center;gap:8px}
+  .qrr-head{font-family:var(--mono);font-size:10px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--txt-3)}
+  .qrr-url{font-family:var(--mono);font-size:10.5px;line-height:1.6;word-break:break-all;
+    color:var(--accent);background:var(--accent-soft);padding:6px 9px;border:1px solid var(--line)}
+  .qrremote .row-btns{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}
 
   /* ---------- 目录：右侧飞出 + 逐条滑入（WorkBuddy 会话选择器手感） ---------- */
   .tocmask{position:fixed;inset:0;z-index:69;background:rgba(0,0,0,.34);
@@ -1092,7 +1100,11 @@
       <div class="qrbig" id="qrBigImg"></div>
       <div class="hint" id="qrUrl" style="word-break:break-all;text-align:center"></div>
       <div class="qralt" id="qrAlt" hidden></div>
-      <div class="hint" id="qrHint">手机和这台电脑连同一个 WiFi，用相机扫码打开 —— 书架、进度都是同一份，随时接着听。</div>
+      <div class="qrremote" id="qrRemote" hidden>
+        <div class="qrr-head">不在同一个 WiFi？</div>
+        <div id="qrRemoteBody"></div>
+      </div>
+      <div class="hint" id="qrHint">同一个 WiFi 直接扫上面的码 —— 书架、进度都是同一份，随时接着听。</div>
       <button class="primary" id="qrEnable" hidden>开启局域网访问并重启引擎</button>
       <div class="hint" id="qrMsg"></div>
     </div>
@@ -1502,8 +1514,8 @@ async function loadHealth() {
 /* 引擎跑的是旧代码就明确提示：改完 server.py 进程不会自己换代码，
    不提示的话会出现「页面是新的、引擎还是两天前的旧版」却没人察觉。 */
 const REQUIRED_FEATURES = ['structured-items', 'prosody-normalize', 'local-document-import',
-  'bookshelf', 'tts-provider', 'presynth-hold', 'presynth-resume'];
-const MIN_ENGINE = '1.11.12';   // 页面用到的引擎能力下限，升一次改一次
+  'bookshelf', 'tts-provider', 'presynth-hold', 'presynth-resume', 'remote-audio'];
+const MIN_ENGINE = '1.11.13';   // 页面用到的引擎能力下限，升一次改一次
 
 function cmpVer(a, b) {
   const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
@@ -3731,6 +3743,7 @@ $('#resumeBar').onclick = e => {
 
 /* ---------- 手机扫码收听（顶栏 📱 入口） ---------- */
 let QR_URL = '';
+let QR_LOCAL = '';          // 内网地址，异地码切过去后还能切回来
 function qrModal(open) {
   $('#qrWrap').classList.toggle('show', open);
   if (open) prepQR();
@@ -3743,6 +3756,87 @@ function paintQR(url) {
   $('#qrUrl').textContent = url;
   QR_URL = url;
 }
+/* 异地入口：不在同一个 WiFi（4G / 公司网）时，走 Tailscale 打通的 100.x 地址。
+   页面、书架、进度、TTS 全是同一份，不用额外部署任何东西。 */
+function renderQRRemote(d) {
+  const box = $('#qrRemote'), body = $('#qrRemoteBody');
+  if (!box || !body) return;
+  body.innerHTML = '';
+  const urls = d.remote_urls || [];
+  const state = d.tailscale || '';
+  if (urls.length) {
+    box.hidden = false;
+    const url = urls[0];
+    const tip = document.createElement('div');
+    tip.className = 'hint';
+    tip.textContent = '手机装 Tailscale 并登录同一账号，在任何网络下打开这个地址都和家里一模一样：';
+    const u = document.createElement('div');
+    u.className = 'qrr-url';
+    u.textContent = url;
+    const btns = document.createElement('div');
+    btns.className = 'row-btns';
+    const bCopy = document.createElement('button');
+    bCopy.className = 'tiny';
+    bCopy.textContent = '复制地址';
+    bCopy.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(url);
+        bCopy.textContent = '已复制 ✓';
+        setTimeout(() => { bCopy.textContent = '复制地址'; }, 1600);
+      } catch (e) {
+        const r = document.createRange();
+        r.selectNodeContents(u);
+        const s = getSelection();
+        s.removeAllRanges(); s.addRange(r);
+        toast('地址已选中，按 Ctrl+C 复制');
+      }
+    };
+    const bQR = document.createElement('button');
+    bQR.className = 'tiny';
+    bQR.textContent = '换成这个码';
+    bQR.onclick = () => {
+      if (QR_URL === url) { paintQR(QR_LOCAL); toast('已切回内网地址'); }
+      else { paintQR(url); toast('已换成异地地址的码'); }
+    };
+    btns.append(bCopy, bQR);
+    body.append(tip, u, btns);
+    return;
+  }
+  if (state === 'needs-login') {
+    box.hidden = false;
+    const p = document.createElement('div');
+    p.className = 'hint';
+    const a = document.createElement('a');
+    a.href = d.tailscale_login || 'https://login.tailscale.com';
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = '点这里登录';
+    p.append('电脑上 Tailscale 已装好但还没登录。', a,
+             '，手机也装 App 登录同一账号，之后在任何网络下都能听。');
+    body.appendChild(p);
+    return;
+  }
+  if (state === 'absent' || state === 'offline') {
+    box.hidden = false;
+    const p = document.createElement('div');
+    p.className = 'hint';
+    if (state === 'offline') {
+      p.textContent = 'Tailscale 服务没在跑，重启一下电脑上的 Tailscale 就能用异地地址。';
+    } else {
+      const a = document.createElement('a');
+      a.href = 'https://tailscale.com/download/windows';
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = '装 Tailscale';
+      p.append('想在外面（4G / 公司网）也能听？', a,
+               '（免费）：电脑和手机登录同一个账号即可，不用开放任何端口。');
+    }
+    body.appendChild(p);
+    return;
+  }
+  box.hidden = true;
+}
+
 async function renderQR(force) {
   const d = await (await fetch(API + '/api/lan')).json();
   const open = d.ok && d.open && d.url;
@@ -3753,10 +3847,12 @@ async function renderQR(force) {
     $('#qrUrl').textContent = '';
     $('#qrHint').hidden = true;
     $('#qrAlt').hidden = true;
+    $('#qrRemote').hidden = true;
     return;
   }
   const urls = (d.urls && d.urls.length ? d.urls : [d.url]);
   const cur = urls.indexOf(QR_URL) >= 0 && !force ? QR_URL : urls[0];
+  QR_LOCAL = urls[0];
   if (force || cur !== QR_URL) paintQR(cur);
   $('#qrBigImg').hidden = false;
   $('#qrHint').hidden = false;
@@ -3786,6 +3882,7 @@ async function renderQR(force) {
   } else {
     alt.hidden = true;
   }
+  renderQRRemote(d);
 }
 async function prepQR() {
   $('#qrMsg').textContent = '';

@@ -26,6 +26,7 @@ import platform
 import queue
 import re
 import secrets
+import shutil
 import struct
 import subprocess
 import sys
@@ -108,6 +109,10 @@ DEFAULT_CONFIG = {
     # 从 8.3 秒变成 10.2 秒，RTF 从 1.06 涨到 1.23 —— 本来刚好跟得上，一转码
     # 就跟不上了。WAV 体积大 5 倍，但走的是本机回环、又落在缓存里，不值一提。
     "tts_local_format": "wav",
+    # 异地（手机走流量 / 不在同一个 WiFi）时发什么格式：
+    # "auto" = 内网 WAV、异地 MP3（体积约 1/5，听书完全够）；也可强成 "wav"/"mp3"。
+    # 转码那 1.8 秒在家里是无谓开销，在外却是省下 5 倍流量的关键，所以按客户端分。
+    "remote_audio_format": "auto",
     # 本机 TTS 一键启动：切到 local 但服务没起来时，引擎帮忙拉起脚本
     "tts_local_autostart": True,
     "gpu_clock_lock": "1800",       # 启动 TTS 时把显卡锁到这个 MHz 以上（空=不锁）
@@ -126,7 +131,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.11.12"
+ENGINE_VERSION = "1.11.13"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -145,6 +150,8 @@ FEATURES = [
     "bookshelf",            # /api/books：书留在本机，电脑和手机共用进度
     "tts-provider",         # /api/tts 支持 provider=edge|local（本机 OpenAI 兼容 TTS）
     "lan-access",           # /api/lan：手机通过局域网访问本机引擎
+    "tailscale-lan",        # /api/lan 的 remote_urls：异地（4G/公司网）也能连
+    "remote-audio",         # 异地客户端自动发 MP3（WAV 现转，省 5 倍流量）
     "presynth",             # /api/presynth：整本后台预合成，播放句句命中缓存
     "presynth-hold",        # /api/presynth/hold：开播即让路，暂停从播放位置续备
     "presynth-resume",      # /api/presynth/resume：停下的任务一键从断点续上
@@ -388,27 +395,126 @@ def _silent_wav(seconds: float = 0.3, rate: int = 24000) -> bytes:
     return head + data
 
 
+def _ip_is_lan(ip: str) -> bool:
+    """这个来源地址是不是"就在身边"：回环 + 家庭/办公内网。
+
+    Tailscale 的 100.64/10 故意**不算**内网 —— 它走的是互联网，手机在 4G 上
+    看这本书，缓存里那点 WAV 体积乘以 5 倍就是流量账单。
+    """
+    ip = (ip or "").split("%")[0].strip()
+    if not ip:
+        return True                       # 拿不到就按本地处理，别误伤家里
+    if ip in ("::1", "localhost"):
+        return True
+    if ip.startswith("127.") or ip.startswith("fe80"):
+        return True
+    if ip.startswith("10.") or ip.startswith("192.168."):
+        return True
+    if ip.startswith("172."):
+        try:
+            return 16 <= int(ip.split(".")[1]) <= 31
+        except (IndexError, ValueError):
+            return False
+    return False
+
+
+def _client_is_remote() -> bool:
+    try:
+        return not _ip_is_lan(request.remote_addr or "")
+    except Exception:                                     # noqa: BLE001
+        return False
+
+
+def _audio_format_for_client() -> str:
+    """这台客户端该收什么格式：家里的 WAV，异地的 MP3。
+
+    家里转 MP3 要起 ffmpeg，实测每句多 1.0～1.8 秒，纯属白花；异地那 5 倍
+    体积却是实打实的流量。所以按来源地址分，`remote_audio_format` 可强制。
+    """
+    mode = str(CFG.get("remote_audio_format") or "auto").lower()
+    if mode in ("wav", "mp3"):
+        return mode
+    return "mp3" if _client_is_remote() else (str(CFG.get("tts_local_format") or "wav").lower())
+
+
+_ffmpeg_path = {"v": None, "ts": 0.0}
+
+
+def _ffmpeg() -> str:
+    """找 ffmpeg（没有就返回空 → 异地也只好发 WAV）。结果缓存 5 分钟。"""
+    now = time.time()
+    if _ffmpeg_path["v"] is not None and now - _ffmpeg_path["ts"] < 300:
+        return _ffmpeg_path["v"]
+    exe = shutil.which("ffmpeg") or ""
+    if not exe:
+        for cand in (r"C:\Users\bo\miniconda3\Library\bin\ffmpeg.exe",):
+            if os.path.exists(cand):
+                exe = cand
+                break
+    _ffmpeg_path["v"] = exe
+    _ffmpeg_path["ts"] = now
+    return exe
+
+
+def _wav_to_mp3(src) -> bytes | None:
+    """把已缓存的 WAV 转成 MP3。异地听家里预合成好的书时，这条路比重新
+    合成快得多（0.3 秒 vs 整句合成），也不用再抢一次显卡。"""
+    exe = _ffmpeg()
+    if not exe:
+        return None
+    try:
+        done = subprocess.run(
+            [exe, "-hide_banner", "-loglevel", "error", "-i", str(src),
+             "-ac", "1", "-b:a", "64k", "-f", "mp3", "pipe:1"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+            creationflags=NO_WINDOW)
+        if done.returncode == 0 and done.stdout:
+            return done.stdout
+        log.warning("WAV→MP3 转码失败：%s", done.stderr.decode("utf-8", "replace")[:200])
+    except Exception as e:                                # noqa: BLE001
+        log.warning("WAV→MP3 转码异常：%s", e)
+    return None
+
+
 def synth(text: str, voice: str, rate: str, pitch: str, volume: str,
-          provider: str | None = None, model: str | None = None) -> tuple:
+          provider: str | None = None, model: str | None = None,
+          fmt: str | None = None) -> tuple:
     """合成一段语音，带磁盘缓存。返回 (文件路径, mimetype)。
 
     两条路线共用一个缓存目录，但缓存键带上引擎与模型 —— 同一句话在两个
     引擎下必须是两份音频，否则切了引擎听到的还是老声音（调参也一样）。
+
+    `fmt` 只对 local 生效：异地客户端要 MP3（省 5 倍流量），家里要 WAV
+    （不启 ffmpeg）。默认取配置，调用方按来源地址决定即可。
     """
     provider = (provider or CFG.get("tts_provider") or "edge").strip().lower()
     if provider == "local":
         url = CFG.get("tts_local_url") or ""
         api_key = CFG.get("tts_local_key") or ""
-        fmt = (CFG.get("tts_local_format") or "wav").lower()
+        fmt = (fmt or CFG.get("tts_local_format") or "wav").lower()
         fmt = fmt if fmt in TTS.FORMAT_MIME else "wav"
         voice = voice or CFG.get("tts_local_voice") or ""
         model = model or CFG.get("tts_local_model") or ""
         speed = TTS.speed_from_rate(rate)
-        stamp = f"local|{TTS.normalize_base(url)}|{model}|{voice}|{speed}|{fmt}|{text}"
-        key = hashlib.sha1(stamp.encode("utf-8")).hexdigest()[:24]
-        path = TTS_CACHE / f"{key}.{fmt}"
+
+        def _ck(f: str) -> tuple:
+            stamp = f"local|{TTS.normalize_base(url)}|{model}|{voice}|{speed}|{f}|{text}"
+            k = hashlib.sha1(stamp.encode("utf-8")).hexdigest()[:24]
+            return TTS_CACHE / f"{k}.{f}", k
+
+        path, key = _ck(fmt)
         if path.exists() and path.stat().st_size > 0:
             return path, TTS.FORMAT_MIME[fmt]
+        # 异地要 MP3，但家里早把整本备成了 WAV：转码比重新合成快二十倍，
+        # 也不用再抢显卡（出门在外现合成 = 一句一卡）。
+        if fmt == "mp3":
+            wav_path, _ = _ck("wav")
+            if wav_path.exists() and wav_path.stat().st_size > 0:
+                data = _wav_to_mp3(wav_path)
+                if data:
+                    path.write_bytes(data)
+                    _trim_cache()
+                    return path, "audio/mpeg"
         # 长句切成两段并发合成（tts_cosy_server 允许 2 条并发，单条喂不饱
         # 显卡；长句本身还因流式分块而 RTF 翻倍）。两段各自落缓存——同一句
         # 倒回去重听时，段缓存直接命中，只差一次内存拼接。
@@ -418,7 +524,7 @@ def synth(text: str, voice: str, rate: str, pitch: str, volume: str,
 
             def _seg(k: int, s: str) -> None:
                 try:
-                    parts[k] = synth(s, voice, rate, pitch, volume, provider, model)
+                    parts[k] = synth(s, voice, rate, pitch, volume, provider, model, fmt)
                 except BaseException as e:                     # noqa: BLE001
                     parts[k] = e
 
@@ -1897,6 +2003,9 @@ def _presynth_worker(my_job: int, jobs: list, args: dict, base_at: int = 0) -> N
     volume = args["volume"]
     provider = args["provider"]
     model = args["model"]
+    # 发起整本预合成的那台设备决定音频格式：手机在外发起 → 备 MP3，
+    # 电脑在家发起 → 备 WAV。跟播放时的选择保持一致，才吃得到缓存。
+    fmt = args.get("fmt") or None
 
     def stale() -> bool:
         with _presynth_lock:
@@ -1915,7 +2024,7 @@ def _presynth_worker(my_job: int, jobs: list, args: dict, base_at: int = 0) -> N
             return
         try:
             synth(text, voice, _seg_rate(base_rate, off), pitch, volume,
-                  provider, model)
+                  provider, model, fmt)
             done += 1
         except BaseException as e:          # 单句失败不停整本书（含被安全策略拦下的删除）
             fail += 1
@@ -1993,6 +2102,8 @@ def api_presynth_start():
         "model": body.get("model") or "",
         "book": body.get("book") or "",
         "label": body.get("label") or "全文",
+        # 谁发起就按谁的带宽备：异地发起备 MP3（体积 1/5），家里发起备 WAV
+        "fmt": _audio_format_for_client(),
     }
     if args["provider"] not in TTS.PROVIDERS:
         return jsonify({"ok": False, "error": f"不认识的语音引擎：{args['provider']}"}), 400
@@ -2796,6 +2907,54 @@ def _lan_ips() -> list:
     return found
 
 
+_ts = {"ip": "", "state": "", "ts": 0.0, "login": ""}
+
+
+def _tailscale_state() -> dict:
+    """Tailscale 的 100.x 地址与状态，给「异地也能听」用。
+
+    state: ready（已登录拿到 IP）/ needs-login（装了没登录）/ absent（没装）/
+    offline（服务没起或查询失败）。缓存 60 秒 —— 用户在另一台设备上登录后，
+    页面最多一分钟就能自己变过来，不用重启引擎。
+    """
+    now = time.time()
+    if _ts["ts"] and now - _ts["ts"] < 60:
+        return {"ip": _ts["ip"], "state": _ts["state"], "login": _ts["login"]}
+    exe = ""
+    for cand in (r"C:\Program Files\Tailscale\tailscale.exe",
+                 r"C:\Program Files (x86)\Tailscale\tailscale.exe"):
+        if os.path.exists(cand):
+            exe = cand
+            break
+    if not exe:
+        exe = shutil.which("tailscale") or ""
+    if not exe:
+        _ts.update(ip="", state="absent", ts=now, login="")
+        return {"ip": "", "state": "absent", "login": ""}
+    ip, state, login = "", "offline", ""
+    try:
+        out = subprocess.run([exe, "ip", "-4"], capture_output=True, text=True,
+                             timeout=5, creationflags=NO_WINDOW)
+        first = (out.stdout or "").strip().splitlines()
+        ip = first[0].strip() if first else ""
+        if ip.startswith("100."):
+            state = "ready"
+        else:
+            st = subprocess.run([exe, "status", "--json"], capture_output=True,
+                                text=True, timeout=5, creationflags=NO_WINDOW)
+            raw = st.stdout or ""
+            state = "needs-login" if ("NeedsLogin" in raw) else "offline"
+            if state == "needs-login":
+                try:
+                    login = json.loads(raw).get("AuthURL") or ""
+                except Exception:                        # noqa: BLE001
+                    login = ""
+    except Exception:                                    # noqa: BLE001
+        ip, state = "", "offline"
+    _ts.update(ip=ip, state=state, ts=now, login=login)
+    return {"ip": ip, "state": state, "login": login}
+
+
 @app.get("/api/lan")
 def api_lan():
     host = (CFG.get("host") or "127.0.0.1")
@@ -2806,11 +2965,19 @@ def api_lan():
     urls = ([f"http://{ip}:{port}/?k={token}"]
             + [f"http://{a}:{port}/?k={token}" for a in _lan_ips() if a != ip]) \
         if (open_lan and ip) else []
+    ts = _tailscale_state()
+    # 异地的入口：Tailscale 打通的 100.x 地址。不在同一个 WiFi 时手机用它，
+    # 页面/接口完全一样（同一个引擎、同一份书架和进度）。
+    remote_urls = ([f"http://{ts['ip']}:{port}/?k={token}"]
+                   if (open_lan and ts["ip"]) else [])
     return jsonify({
         "ok": True, "host": host, "port": port, "ip": ip, "open": open_lan,
         "token": token,
         "url": urls[0] if urls else "",
         "urls": urls,                     # 多网卡时给备选，手机不在同一网段可换一个扫
+        "remote_urls": remote_urls,       # 异地（Tailscale）
+        "tailscale": ts["state"],
+        "tailscale_login": ts["login"],   # 没登录时给一条可点的登录链接
     })
 
 
@@ -3038,7 +3205,8 @@ def api_tts():
         _play_touch["ts"] = time.time()
         _synth_gate.notify_all()
     try:
-        path, mime = synth(text, voice, rate, pitch, volume, provider, model)
+        path, mime = synth(text, voice, rate, pitch, volume, provider, model,
+                           _audio_format_for_client())
     except TTS.TTSConfigError as e:
         # 本地 TTS 没起来：顺手拉起一个，并把"正在启动"这个事实告诉前端，
         # 而不是甩一句"连不上 127.0.0.1:8891"让用户自己去配环境。

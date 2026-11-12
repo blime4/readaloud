@@ -63,6 +63,17 @@
   手机上"添加到主屏幕"就是全屏应用（带 manifest 和图标）。
   这个码会被种成 Cookie（页面同源脚本因此拿得到数据），换 WiFi 后地址会变，重新扫一次即可；
   多网卡（同时接 WiFi 和有线/VPN）时弹窗里会多出备选地址，扫哪个通就用哪个。
+- **不在同一个 WiFi 也能听（Tailscale）**：弹窗下半部有「不在同一个 WiFi？」一栏。
+  电脑和手机各装一个 Tailscale（免费，个人 100 台设备），登录**同一个账号**，
+  手机就会拿到一个固定的 `100.x.y.z` 地址 —— 在 4G / 公司网 / 高铁上打开
+  `http://100.x.y.z:8759/?k=…`，页面、书架、进度、音色全部和家里一模一样，
+  不用开放任何端口、不用公网 IP。引擎会自动识别这个地址并显示在弹窗里
+  （`/api/lan` 的 `remote_urls`）；没登录时那一栏直接给登录链接。
+  Tailscale 打洞失败会走海外 DERP 中继，延迟高一点但听书完全够。
+- **异地自动降码率**：内网客户端发 WAV（不启 ffmpeg，快），异地客户端发 MP3
+  （64kbps，体积约 1/6）。若家里已把整本备成 WAV，异地首次请求会**现转码**
+  （实测 738KB → 123KB，0.15 秒）而不是重新合成 —— 出门在外不抢显卡也不会一句一卡。
+  `config.json` 的 `remote_audio_format` 可强制成 `wav` 或 `mp3`。
 - 手机端布局是重新做过的：单屏 + 底部分段（书架 / 文稿 / 逐句 / 设置），
   大按钮、安全区适配，播放条固定在底部。
 - **锁屏控制**（MediaSession）：锁屏通知栏显示书名和当前句，耳机线控 /
@@ -471,7 +482,7 @@ AI 功能额外需要 [Ollama](https://ollama.com)；没有也能正常朗读，
 | `GET /api/tts/local/status` | 本地 TTS 状态：`up`/`probe`（引擎名、模型、音色）/`starting`/`python`/`script`，以及 `config`（已自动写回的地址与音色）和 `log`（没起来时的 `tts.log` 尾巴） |
 | `GET /api/version` · `POST /api/restart` | 引擎版本与能力清单 / 原地热重启（进程号不变，先确认新代码能编译再关旧监听） |
 | `GET /api/update` · `POST /api/update` | 查有没有新版本（`behind` 落后几个提交）/ 升级（`git pull --ff-only` + 重启；工作区脏时拒绝，回 409） |
-| `GET\|POST /api/lan` | 手机访问：查询局域网地址与访问码；POST `{host:"0.0.0.0"}` 开启（需重启引擎生效） |
+| `GET\|POST /api/lan` | 手机访问：查询局域网地址与访问码（`urls`）+ 异地地址（`remote_urls`，Tailscale 的 100.x）+ 登录状态；POST `{host:"0.0.0.0"}` 开启（需重启引擎生效） |
 | `POST /api/agent` | 让会调工具的小模型主导取稿。body：`{url, clean, model, retry}`。先走零模型开销的规则抓取（通常 <1 秒）；抓得够干净就直接返回，彻底抓不到就直接报错（`retry:true` 才让模型硬试）；勾 `clean` 时直接深度清理。返回 `trace` 记录模型每一步动作 |
 | `GET\|POST /api/login` | 登录态管理。GET 返回各站配置状态与本机可借用的浏览器；POST 按 `action` 分派：`import`（从浏览器整套搬 cookie，可带 `warmup` 预热）/ `paste`（手工粘贴，支持纯 Cookie 头、Network 整行、Copy as cURL 三种粘法）/ `clear` / `open`（开一个带调试端口的登录窗口）/ `probe` / `test`（用当前登录态试抓一个链接） |
 | `POST /api/ai` | 总结 / 润色（`stream=true` 可流式，结果自动缓存） |
