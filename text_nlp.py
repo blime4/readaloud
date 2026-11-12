@@ -59,6 +59,25 @@ OPEN_PAIRS = {"“": "”", "‘": "’", "「": "」", "『": "』",
               "（": "）", "《": "》", "【": "】", "(": ")", "[": "]", "{": "}"}
 CLOSERS = set(OPEN_PAIRS.values()) | {'"'}
 
+# PDF / EPUB 抽出来的正文经常在书名号、引号中间留着换行空格：
+# 「《大 雪纷飞的日子》」「他说“ 我不去”」。这种空格会被切句逻辑当成断点，
+# 把《大|雪纷飞的日子》劈成两条。因此只在**成对符号内部**收掉它 ——
+# 全局删"汉字 空格 汉字"会误伤正文里本来就有的空格（「释义 喉结」「空 格」）。
+RE_CJK_SPACE = re.compile(
+    r"(?<=[\u3400-\u4dbf\u4e00-\u9fff\u3000-\u303f])\s+(?=[\u3400-\u4dbf\u4e00-\u9fff\u3000-\u303f])")
+
+# 成对符号：切超长句时绝不能从中间下刀（《大雪纷飞的日子》→《大 / 雪纷飞的日子》）
+RE_PAIRED = re.compile(
+    r"《[^》]{0,60}》|〈[^〉]{0,60}〉|「[^」]{0,80}」|『[^』]{0,80}』"
+    r"|“[^”]{0,140}”|‘[^’]{0,80}’|（[^）]{0,80}）|\([^)]{0,80}\)|【[^】]{0,80}】")
+
+
+def tighten_pairs(s: str) -> str:
+    """把成对符号内部被换行/排版塞进来的空格收掉（只动中文语境里的空格）。"""
+    if not any(b in s for b in "《〈「『“‘（(【"):
+        return s
+    return RE_PAIRED.sub(lambda m: RE_CJK_SPACE.sub("", m.group(0)), s)
+
 # 真正能"念出来"的字符：汉字、字母、数字、日文假名、韩文。
 # 纯标点（单独的 "."、"…"、"——"）和分隔符（"***"）没有音，送去合成只会拿到
 # 「模型没有产出音频」，播放器就卡在那一句上再也不往前走。
@@ -196,11 +215,34 @@ def apply_pron(text: str) -> str:
 
 # ---------------------------------------------------------------- 1) 结构解析
 
+RE_LINE_PARA_END = re.compile(r"[。！？…”’』」）)]\s*$")
+
+
+def _looks_like_line_paragraphs(s: str) -> bool:
+    """判断是不是"一行一段"的纯文本。
+
+    中文小说 TXT 常见排版：一行一段，段落之间没有空行。反过来，固定宽度硬折行的
+    文本每 40 字就换行，行尾基本不会落在句末标点上 —— 用它来区分，不会误伤。
+    """
+    lines = [l.strip() for l in s.split("\n") if l.strip()]
+    if len(lines) < 8:
+        return False
+    if s.count("\n\n") >= max(3, int(len(lines) * 0.1)):
+        return False                      # 本来就有空行分段，别再插一脚
+    hit = sum(1 for l in lines if RE_LINE_PARA_END.search(l))
+    return hit / len(lines) >= 0.75
+
+
 def parse_blocks(raw: str) -> list:
     """把原始文本切成有类型的块：[{kind, text}]，kind ∈ heading/list/quote/para。"""
     s = (raw or "").replace("\r\n", "\n").replace("\r", "\n")
     s = RE_FRONTMATTER.sub("", s)            # 去掉 YAML front matter
     s = RE_INVISIBLE.sub("", s)
+    if _looks_like_line_paragraphs(s):
+        # 一行一段（大量中文小说 TXT 就是这样，全文一个空行都没有）：
+        # 不补空行的话整本书会被拼成"一个段落"，段落停顿全丢，
+        # 目录/版权页的短行也会被缝成一句长话。
+        s = "\n\n".join(s.split("\n"))
 
     blocks, buf, kind, in_code = [], [], None, False
 
@@ -280,6 +322,8 @@ def clean_inline(text: str) -> str:
     s = RE_LINK.sub(r"\1", s)
     s = RE_EMOJI.sub(" ", s)
     s = s.replace("**", "").replace("~~", "")
+    # 书名号 / 引号里被换行塞进来的空格：先收掉，后面才不会在这里断句
+    s = tighten_pairs(s)
     # 删掉标记后常留下重复标点（「、^[脚注]、」-> 「、、」），收一下
     s = re.sub(r"([，。、；：,;])\s*\1+", r"\1", s)
     s = re.sub(r"([，、])\s*([，、])", r"\1", s)
@@ -451,6 +495,44 @@ def split_sentences(text: str) -> list:
     return [s for s in out if s]
 
 
+def _paired_spans(s: str) -> list:
+    """成对符号的区间 [start, end)，用来避开"从中劈开"的切点。"""
+    return [(m.start(), m.end()) for m in RE_PAIRED.finditer(s)]
+
+
+def _cut_is_safe(pos: int, spans: list) -> bool:
+    """pos 作为切点（前段 = s[:pos]）会不会把成对符号劈开。"""
+    return not any(st < pos < en for st, en in spans)
+
+
+def _best_cut(s: str, limit: int, spans: list) -> int:
+    """在 (0, limit] 内挑一个最靠后的"干净"断点。
+
+    优先顺序天然由位置决定：越靠后越好，但只认像样的断点（软标点 / 书名引号收尾 /
+    英文空格），而且不能落在成对符号内部。
+    """
+    cands = []
+    for i in range(min(limit, len(s) - 1)):
+        if s[i] in SOFT_BREAK or s[i] in CLOSERS or s[i] == " ":
+            pos = i + 1
+            if _cut_is_safe(pos, spans):
+                cands.append(pos)
+    if cands:
+        best = max(cands)
+        if best >= int(limit * 0.4):      # 太靠前的断点会切出碎句，宁可换个办法
+            return best
+    # 一个像样的断点都没有：只能硬切。若正好卡在书名号/引号中间，就把整个
+    # 成对符号留给下一段（略超几个字，好过把《大雪纷飞的日子》劈成两半）。
+    for st, en in spans:
+        if st < limit < en:
+            if en <= limit + max(8, limit // 4):
+                return en                    # 稍微超一点，保整个书名
+            if st >= int(limit * 0.4):
+                return st                    # 退回符号前面，别切出「《」这种碎片
+            break
+    return limit
+
+
 def _hard_split(s: str, limit: int) -> tuple:
     """超长句按软停顿处切开，返回 (片段列表, 是否发生过硬切)。"""
     if len(s) <= limit:
@@ -465,18 +547,12 @@ def _hard_split(s: str, limit: int) -> tuple:
         if buf:
             parts.append(buf)
         while len(token) > limit:
-            piece = token[:limit]
-            # 断在哪儿：优先软停顿（中文标点），其次英文空格，都没有才硬切。
-            # 以前只认软停顿，英文长句没有标点就会把单词拦腰斩断
-            # （"...to m" / "arry his son."）—— 必须回退到最近的空格。
-            cut_at = max((piece.rfind(m) for m in SOFT_BREAK), default=-1)
-            sp = piece.rfind(" ")
-            if sp > cut_at:
-                cut_at = sp
-            if cut_at >= int(limit * 0.4):      # 太靠前的断点会切出碎句，宁可直接硬切
-                piece = piece[: cut_at + 1]     # 空格/标点留在前段尾上，下段以完整词开头
-            parts.append(piece)
-            token = token[len(piece):]
+            # 断在哪儿：软标点 > 书名号/引号收尾 > 英文空格，且绝不劈开成对符号
+            # （以前只认软标点，英文空格是回退项，书名号里的空格又没设防，
+            # 于是「《大雪纷飞的日子》」被切成「《大」+「雪纷飞的日子》」）。
+            k = _best_cut(token, limit, _paired_spans(token))
+            parts.append(token[:k])
+            token = token[k:]
             cut = True
         buf = token
     if buf:

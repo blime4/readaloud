@@ -126,7 +126,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.11.8"
+ENGINE_VERSION = "1.11.10"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -1490,11 +1490,16 @@ def api_ai():
 
 
 def _nlp_fingerprint() -> str:
-    """读音词典的修改时间 —— 用户改了词典，分段缓存就得失效。"""
-    try:
-        return str(int((BASE / "pronounce.json").stat().st_mtime))
-    except Exception:
-        return "0"
+    """分段/读音逻辑的版本指纹 —— 改了词典**或分段代码**，分段缓存都得失效。
+    以前只算 pronounce.json 的 mtime，改完断句规则老书还在用旧分段，
+    看起来像"修了个寂寞"。"""
+    parts = []
+    for name in ("pronounce.json", "text_nlp.py"):
+        try:
+            parts.append(str(int((BASE / name).stat().st_mtime)))
+        except Exception:
+            parts.append("0")
+    return "-".join(parts)
 
 
 @app.post("/api/prepare")
