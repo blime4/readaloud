@@ -106,6 +106,8 @@ DEFAULT_CONFIG = {
     "tts_local_format": "wav",
     # 本机 TTS 一键启动：切到 local 但服务没起来时，引擎帮忙拉起脚本
     "tts_local_autostart": True,
+    "gpu_clock_lock": "1800",       # 启动 TTS 时把显卡锁到这个 MHz 以上（空=不锁）
+    "gpu_clock_elevate": True,      # 没权限时弹一次 UAC 提权（拒绝则下次再试）
     "tts_local_python": "",         # 留空自动探测（见 _tts_python）
     "tts_local_script": "",         # 留空按端口猜：8891=tts_cosy_server，8890=tts_qwen_server
     "tts_local_args": "",           # 额外启动参数，例如 "--fp16"（半精度，显存吃紧时可试）
@@ -120,7 +122,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.10.3"
+ENGINE_VERSION = "1.10.4"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -2282,10 +2284,80 @@ def _tts_script() -> Path:
     return BASE / ("tts_qwen_server.py" if _tts_port() == 8890 else "tts_cosy_server.py")
 
 
+def _gpu_query(args: list) -> str:
+    """nvidia-smi 单字段查询，提取行内第一个数字。
+    新驱动会往输出里混一行 "Requested functionality has been deprecated"
+    再跟实际值（如 "1800 MHz"），所以按整行找数字，别按行首判断。"""
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=15,
+                           creationflags=(0x08000000 if os.name == "nt" else 0))
+        m = re.search(r"(\d+)", r.stdout or "")
+        return m.group(1) if m else ""
+    except Exception:                                          # noqa: BLE001
+        return ""
+
+
+def _gpu_apply_lock(elevate: bool = True) -> dict:
+    """把显卡锁在高频（nvidia-smi -lgc）。启动本机 TTS 时调用：CosyVoice
+    跑起来利用率只有三成，DVFS 会把卡按在几百 MHz —— 锁住之后待机也高频，
+    换来的是合成全程满速。锁频要管理员：先直接试，没权限且允许提权就弹
+    一次 UAC（用户点一次"是"即可，锁频持续到重启，之后不再弹）。
+
+    「已经锁着」没法直接查（新驱动把 Applications Clocks 查询废弃了），
+    用静置频率推断：锁着待机也有 1800，没锁只有两三百。"""
+    val = str(CFG.get("gpu_clock_lock") or "").strip()
+    if not val or val.lower() in ("0", "off", "none", "reset"):
+        return {"applied": False, "reason": "gpu_clock_lock 未启用"}
+    try:
+        lo = max(1800, int(val))
+    except ValueError:
+        lo = 1800
+    cap = int(_gpu_clocks().get("clk_max") or 0)
+    hi = max(lo, cap)
+    clk = _gpu_query(["nvidia-smi", "--query-gpu=clocks.sm", "--format=csv,noheader,nounits"])
+    if clk.isdigit() and int(clk) >= lo:                       # 静置还这么高 = 锁着呢
+        return {"applied": True, "already": True, "clk": clk}
+    r = subprocess.run(["nvidia-smi", "-lgc", str(lo), str(hi)],
+                       capture_output=True, text=True, timeout=15,
+                       creationflags=(0x08000000 if os.name == "nt" else 0))
+    if r.returncode == 0:
+        log.info("已锁显卡频率 %d~%d MHz（合成全程满速；恢复用 nvidia-smi -rgc）", lo, hi)
+        return {"applied": True, "clk": f"{lo}~{hi}"}
+    if not elevate or not CFG.get("gpu_clock_elevate", True):
+        return {"applied": False, "error": "无权限", "hint": "管理员跑一次 lock-gpu-clock.bat"}
+    # 没权限：弹一次 UAC 提权。用户拒绝或超时就放弃，下次启动再试。
+    ps = (f"Start-Process nvidia-smi -ArgumentList '-lgc {lo},{hi}' "
+          f"-Verb RunAs -WindowStyle Hidden")
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                       capture_output=True, timeout=30,
+                       creationflags=(0x08000000 if os.name == "nt" else 0))
+    except subprocess.TimeoutExpired:
+        return {"applied": False, "error": "提权弹窗没人理（30 秒超时）"}
+    clk = _gpu_query(["nvidia-smi", "--query-gpu=clocks.sm", "--format=csv,noheader,nounits"])
+    if clk.isdigit() and int(clk) >= lo:
+        log.info("已锁显卡频率 %d~%d MHz（通过 UAC 提权）", lo, hi)
+        return {"applied": True, "clk": f"{lo}~{hi}", "elevated": True}
+    return {"applied": False,
+            "error": "需要管理员权限（UAC 未确认）",
+            "hint": "右键 lock-gpu-clock.bat 以管理员身份运行，或在弹窗里点「是」"}
+
+
 def start_local_tts() -> dict:
     """后台拉起本机 TTS，立刻返回。真正就绪要看 /health（模型要加载十几秒）。"""
+    lock = None
+    if os.name == "nt" and CFG.get("gpu_clock_lock"):
+        try:
+            lock = _gpu_apply_lock()               # 合成慢的头号原因就是掉频
+        except Exception as e:                     # noqa: BLE001
+            lock = {"applied": False, "error": str(e)}
+            log.warning("锁显卡频率失败: %s", e)
+        if not lock.get("applied"):
+            log.info("没锁成显卡频率：%s（%s）",
+                     lock.get("error"), lock.get("hint", ""))
     if _tts_local_report(force=True).get("ok"):
-        return {"ok": True, "already": True, "msg": "本机 TTS 已经在跑了"}
+        return {"ok": True, "already": True, "gpu_lock": lock,
+                "msg": "本机 TTS 已经在跑了"}
     proc = _tts_proc.get("popen")
     if proc and proc.poll() is None:
         return {"ok": True, "starting": True, "pid": proc.pid, "msg": "正在启动中…"}
@@ -2321,7 +2393,7 @@ def start_local_tts() -> dict:
     log.info("已拉起本机 TTS：%s（pid %s，端口 %s，解释器 %s）",
              script.name, popen.pid, port, py)
     return {"ok": True, "starting": True, "pid": popen.pid, "python": py,
-            "script": script.name, "port": port,
+            "script": script.name, "port": port, "gpu_lock": lock,
             "msg": f"正在启动 {script.stem}，第一次加载模型约 10～60 秒"}
 
 

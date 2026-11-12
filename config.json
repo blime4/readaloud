@@ -46,5 +46,7 @@
   "extra_ports": [
     8756
   ],
-  "lan_token": "9a8bd038"
+  "lan_token": "9a8bd038",
+  "gpu_clock_lock": "1800",
+  "gpu_clock_elevate": true
 }
