@@ -131,7 +131,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.11.13"
+ENGINE_VERSION = "1.11.14"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -155,6 +155,8 @@ FEATURES = [
     "presynth",             # /api/presynth：整本后台预合成，播放句句命中缓存
     "presynth-hold",        # /api/presynth/hold：开播即让路，暂停从播放位置续备
     "presynth-resume",      # /api/presynth/resume：停下的任务一键从断点续上
+    "task-monitor",         # /api/tasks：电脑/手机都能看到眼下在合成哪几句
+    "task-stop",            # /api/tasks/stop：一键停预合成 / 暂停后台 30 分钟
     "tts-bench",            # /api/tts/bench：量本机合成的 RTF，判断能不能跟上播放
     "tts-autostart",        # /api/tts/local：一键拉起本机大模型 TTS 并自动写回配置
     "engine-upgrade",       # /api/restart + /api/update：原地热重启、git pull 自升级
@@ -1854,6 +1856,74 @@ _presynth_lock = threading.Lock()
 _synth_gate = threading.Condition()     # 前台/预合成共用 GPU 的闸门
 _fg_busy = {"n": 0}                     # 正在跑的前台合成数
 _play_touch = {"ts": 0.0}               # 最近一次前台合成的时间；预合成见了要让路
+
+# --------------------------------------------------------------------------
+# 正在合成什么（电脑端/手机端都看得到，也能一键停）
+#
+# 本地大模型一次只同时合成 COSY_TTS_CONCURRENCY 句（默认 2）。手机"听着卡"
+# 最常见的原因不是网络，而是这台机器同时在替别的段落干活：预合成往后备整本、
+# 另一台设备开着页面在预取、测速还没跑完 —— 全在抢同两个槽位。以前这些只有
+# 一行"预合成 N/M"，看不到"眼下这一句是谁在要"。
+# 所以每句合成进来都登记一笔，前端轮询 /api/tasks 画成一张实时清单。
+# --------------------------------------------------------------------------
+_jobs = {}                       # jid -> {id, kind, text, t, ...}
+_jobs_lock = threading.Lock()
+_job_seq = [0]
+
+JOB_KINDS = {"fg": "播放", "pre": "预合成", "bench": "测速", "api": "接口"}
+
+# 暂停后台多久（秒）。到点自己恢复，不用用户记着回来点"继续"。
+_quiet = {"until": 0.0}
+
+
+def _job_open(kind: str, text: str, **meta) -> int:
+    with _jobs_lock:
+        _job_seq[0] += 1
+        jid = _job_seq[0]
+        _jobs[jid] = {
+            "id": jid, "kind": kind,
+            "text": (text or "").strip().replace("\n", " ")[:46],
+            "chars": len(text or ""), "t": time.time(), **meta,
+        }
+        return jid
+
+
+def _job_close(jid: int) -> None:
+    with _jobs_lock:
+        _jobs.pop(jid, None)
+
+
+def _jobs_rows() -> list:
+    now = time.time()
+    with _jobs_lock:
+        rows = [dict(r) for r in _jobs.values()]
+    for r in rows:
+        r["age"] = round(now - r["t"], 1)
+    rows.sort(key=lambda r: r["t"])
+    return rows
+
+
+def _client_of() -> dict:
+    """这一句是哪台设备要的：内网还是异地，手机还是电脑。
+
+    面板上分得清"谁的活"，才敢放心点停止 —— 停错设备比卡更难受。
+    """
+    ip = request.remote_addr or ""
+    ua = (request.headers.get("User-Agent") or "").lower()
+    phone = ("mobile" in ua or "android" in ua or "iphone" in ua)
+    return {"dev": "手机" if phone else "电脑",
+            "src": "lan" if _ip_is_lan(ip) else "remote"}
+
+
+def _quiet_left() -> int:
+    return max(0, int(round(_quiet["until"] - time.time())))
+
+
+def _pre_label() -> str:
+    with _presynth_lock:
+        return str(_presynth.get("label") or "全文")
+
+
 PRESYNTH_MAX_SEGS = 6000        # 一本书的合理上限，防误传整站文章
 PRESYNTH_IDLE = 25.0            # 前台安静这么久，预合成才动手（短暂停不打扰）
 
@@ -1974,6 +2044,7 @@ def _presynth_turn(stale) -> bool:
         with _synth_gate:
             busy = (_fg_busy["n"] > 0
                     or _presynth["hold"]
+                    or time.time() < _quiet["until"]
                     or (not _awake["on"]
                         and time.time() - _play_touch["ts"] < PRESYNTH_IDLE))
             if not busy:
@@ -2023,8 +2094,14 @@ def _presynth_worker(my_job: int, jobs: list, args: dict, base_at: int = 0) -> N
         if not _presynth_turn(stale):
             return
         try:
-            synth(text, voice, _seg_rate(base_rate, off), pitch, volume,
-                  provider, model, fmt)
+            jid = _job_open("pre", text, dev=args.get("dev") or "电脑",
+                            src=args.get("src") or "", label=_pre_label(),
+                            idx=base_at + k + 1, total=len(jobs))
+            try:
+                synth(text, voice, _seg_rate(base_rate, off), pitch, volume,
+                      provider, model, fmt)
+            finally:
+                _job_close(jid)
             done += 1
         except BaseException as e:          # 单句失败不停整本书（含被安全策略拦下的删除）
             fail += 1
@@ -2104,6 +2181,8 @@ def api_presynth_start():
         "label": body.get("label") or "全文",
         # 谁发起就按谁的带宽备：异地发起备 MP3（体积 1/5），家里发起备 WAV
         "fmt": _audio_format_for_client(),
+        # 面板上要能说清"这台手机要的"还是"家里电脑要的"
+        **_client_of(),
     }
     if args["provider"] not in TTS.PROVIDERS:
         return jsonify({"ok": False, "error": f"不认识的语音引擎：{args['provider']}"}), 400
@@ -2125,6 +2204,7 @@ def api_presynth_status():
     with _synth_gate:
         st["fg"] = _fg_busy["n"]
         st["idle"] = round(time.time() - _play_touch["ts"], 1)
+    st["quiet_left"] = _quiet_left()      # >0 表示"暂停后台"还在生效中
     return jsonify({"ok": True, **st})
 
 
@@ -2208,6 +2288,78 @@ def api_presynth_resume():
     _start_presynth(jobs, args, start_at=at)
     log.info("预合成继续：从第 %d/%d 句往后", at + 1, total)
     return jsonify({"ok": True, "running": True, "total": total, "from": at})
+
+
+@app.get("/api/tasks")
+def api_tasks():
+    """眼下这台机器在替谁合成什么 —— 面板用它画实时清单。
+
+    手机"卡"十有八九能在这里看出原因：明明只想听一句，下面却挂着预合成在备
+    整本、另一个页面在预取、或者上一次测速还没跑完。看到就能停。
+    """
+    rows = _jobs_rows()
+    with _presynth_lock:
+        pre = {k: _presynth[k] for k in
+               ("running", "hold", "done", "total", "at", "label", "book", "fail")}
+    with _synth_gate:
+        fg = _fg_busy["n"]
+    try:
+        conc = max(1, min(4, int(os.environ.get("COSY_TTS_CONCURRENCY", "2"))))
+    except (TypeError, ValueError):
+        conc = 2
+    if (CFG.get("tts_provider") or "") == "local":
+        gpu = _gpu_clocks()
+    else:
+        gpu = {}
+    return jsonify({
+        "ok": True, "now": time.time(), "jobs": rows, "fg": fg,
+        "conc": conc, "provider": CFG.get("tts_provider") or "edge",
+        "presynth": pre, "gpu": gpu, "quiet_left": _quiet_left(),
+    })
+
+
+@app.post("/api/tasks/stop")
+def api_tasks_stop():
+    """一键把不必要的活停掉。三种口径：
+
+    - presynth：停止整本预合成。进度留在断点，随时能「继续预合成」；
+    - pause   ：不取消任务，只是按住 minutes 分钟（到点自动继续）——
+                临时想安静听完一章，又不想丢掉已经备好的队列；
+    - all     ：停预合成 + 按住 30 分钟（"全都让路，只留我正在听的"）。
+    - resume  ：取消按住，立刻放行。
+    """
+    body = request.get_json(silent=True) or {}
+    scope = (body.get("scope") or "presynth").strip().lower()
+    stopped = 0
+    if scope in ("presynth", "all"):
+        with _presynth_lock:
+            if _presynth["running"]:
+                _presynth["job"] += 1      # 旧 worker 见号数变了自动退出
+                _presynth["running"] = False
+                _presynth["finished"] = time.time()
+                _presynth["error"] = "手动停止"
+                stopped += 1
+        with _synth_gate:
+            _presynth["hold"] = True       # 别让前端下一拍又把它勾起来
+            _synth_gate.notify_all()
+    if scope in ("pause", "all"):
+        try:
+            mins = float(body.get("minutes") or 30)
+        except (TypeError, ValueError):
+            mins = 30.0
+        mins = max(1.0, min(360.0, mins))
+        _quiet["until"] = time.time() + mins * 60
+        with _synth_gate:
+            _presynth["hold"] = True
+            _synth_gate.notify_all()
+        log.info("后台合成暂停 %d 分钟", int(mins))
+    elif scope == "resume":
+        _quiet["until"] = 0.0
+        with _synth_gate:
+            _presynth["hold"] = False
+            _synth_gate.notify_all()
+    return jsonify({"ok": True, "scope": scope, "stopped": stopped,
+                    "quiet_left": _quiet_left()})
 
 
 # ---------------------------------------------------------------- 版本 / 重启 / 升级
@@ -3132,6 +3284,7 @@ def api_tts_bench():
     base_gpu = _gpu_clocks() if provider == "local" else {}
     watch = _gpu_watch_start() if provider == "local" else None
     started = time.time()
+    jid = _job_open("bench", "（测速）" + text[:24], **_client_of())
     with _synth_gate:
         _fg_busy["n"] += 1
         _play_touch["ts"] = time.time()
@@ -3143,6 +3296,7 @@ def api_tts_bench():
         _gpu_watch_stop(watch, base_gpu)
         return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 502
     finally:
+        _job_close(jid)
         with _synth_gate:
             _fg_busy["n"] = max(0, _fg_busy["n"] - 1)
             _play_touch["ts"] = time.time()
@@ -3200,13 +3354,14 @@ def api_tts():
     if provider not in TTS.PROVIDERS:
         return jsonify({"ok": False, "error": f"不认识的语音引擎：{provider}"}), 400
     # 上闸门：前台请求期间预合成不许动手，否则这一句要排在它后面等一整句
+    fmt = _audio_format_for_client()
+    jid = _job_open("fg", text, fmt=fmt, **_client_of())
     with _synth_gate:
         _fg_busy["n"] += 1
         _play_touch["ts"] = time.time()
         _synth_gate.notify_all()
     try:
-        path, mime = synth(text, voice, rate, pitch, volume, provider, model,
-                           _audio_format_for_client())
+        path, mime = synth(text, voice, rate, pitch, volume, provider, model, fmt)
     except TTS.TTSConfigError as e:
         # 本地 TTS 没起来：顺手拉起一个，并把"正在启动"这个事实告诉前端，
         # 而不是甩一句"连不上 127.0.0.1:8891"让用户自己去配环境。
@@ -3220,6 +3375,7 @@ def api_tts():
         log.error("语音合成失败: %s", e)
         return jsonify({"ok": False, "error": f"语音合成失败：{e}"}), 502
     finally:
+        _job_close(jid)
         with _synth_gate:
             _fg_busy["n"] = max(0, _fg_busy["n"] - 1)
             _play_touch["ts"] = time.time()

@@ -511,6 +511,38 @@
     display:flex;gap:8px;align-items:center}
   .tocfly .tf-foot .hint{flex:1;font-size:11px}
   .tocfly .sh-search{flex:none;width:100%}
+  /* ---------- 「正在合成」面板：谁在占显卡，一眼看到，一键停 ---------- */
+  .chip#chipTask{gap:4px}
+  .chip#chipTask>b{font-weight:600;font-size:10.5px;letter-spacing:0}
+  .taskfly{width:min(460px,96vw)}
+  .taskfly .tk-conc{display:flex;gap:6px;flex-wrap:wrap;align-items:center;
+    font-family:var(--mono);font-size:10.5px;color:var(--txt-3);letter-spacing:.03em}
+  .taskfly .tk-conc b{color:var(--accent);font-weight:600}
+  .taskfly .tk-conc .sep{opacity:.35}
+  .tk-sec{padding:12px 14px 4px;font-size:9.5px;letter-spacing:.14em;
+    text-transform:uppercase;color:var(--txt-3);font-family:var(--mono)}
+  .tkrow{display:flex;align-items:center;gap:9px;padding:8px 12px;border-radius:8px;
+    font-size:13px;animation:tkIn .2s ease-out}
+  @keyframes tkIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+  .tkrow:hover{background:var(--btn-hover)}
+  .tkbadge{flex:none;font-size:9.5px;line-height:1.5;letter-spacing:.06em;
+    padding:1px 6px;border-radius:3px;font-family:var(--mono);
+    border:1px solid var(--line);color:var(--txt-3);white-space:nowrap}
+  .tkbadge.fg{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,var(--line));
+    background:var(--accent-soft)}
+  .tkbadge.pre{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 32%,var(--line))}
+  .tkbadge.bench{color:var(--txt-3)}
+  .tktext{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    color:var(--txt-2)}
+  .tkage{flex:none;font-family:var(--mono);font-size:11px;color:var(--txt-3);
+    letter-spacing:.02em;font-variant-numeric:tabular-nums}
+  .tkage.hot{color:var(--accent)}
+  .tk-empty{padding:34px 18px;text-align:center;color:var(--txt-3);font-size:12.5px;
+    line-height:1.95}
+  .tk-empty .big{display:block;font-size:24px;opacity:.35;margin-bottom:8px}
+  .taskfly .tf-foot .grow{flex:1}
+  .taskfly .tf-foot .hint{font-size:10.5px;text-align:right}
+  @media (max-width:520px){ .taskfly .tf-foot .hint{display:none} }
   @media (max-width:520px){ .tfitem .tmeta{display:none} }
   @media (prefers-reduced-motion:reduce){
     .tocfly{transition:none} .tfitem{animation:none}
@@ -743,6 +775,7 @@
   </div>
   <div class="grow"></div>
   <span class="chip gray btnish" id="chipToc" hidden title="章节目录：跳到某一篇 / 某一段">☰ 目录</span>
+  <span class="chip gray btnish" id="chipTask" hidden title="眼下这台电脑在替谁合成哪几句：点开看明细，可一键停掉不必要的">⚡<b id="tkN">0</b></span>
   <span class="chip gray btnish" id="chipShelf" title="书架：导入过的书都在这儿，进度跟着书走">书架</span>
   <span class="chip gray btnish" id="chipQR" title="手机扫码，接着听">📱</span>
   <span class="chip gray btnish" id="chipTheme" title="切换深色/浅色（朗读常在夜里用）">夜间</span>
@@ -1038,6 +1071,26 @@
   </div>
 </div>
 
+<div class="tocmask" id="tkMask"></div>
+<div class="tocfly taskfly" id="tkFly" role="dialog" aria-label="正在合成">
+  <div class="tf-head">
+    <div class="tf-title">
+      <h3>正在合成</h3>
+      <span class="tf-count" id="tkStat"></span>
+      <span class="grow"></span>
+      <button class="ghost tiny" id="tkClose" title="关闭（Esc）">✕</button>
+    </div>
+    <div class="tk-conc" id="tkConc"></div>
+  </div>
+  <div class="tf-list" id="tkList"></div>
+  <div class="tf-foot">
+    <button class="ghost tiny" id="tkPause" title="按住后台合成，到点自动继续，已备的队列不丢">暂停后台</button>
+    <button class="ghost tiny" id="tkStop" title="停止整本预合成，进度留在断点，随时能继续">停止预合成</button>
+    <span class="grow"></span>
+    <span class="hint" id="tkHint"></span>
+  </div>
+</div>
+
 <div class="shelfWrap" id="shelfWrap">
   <div class="shelfMask" id="shelfMask"></div>
   <aside class="shelf" role="dialog" aria-label="书架">
@@ -1305,6 +1358,7 @@ async function connect({ manual = false } = {}) {
   $('#chipMode').textContent = (servedByEngine() || isLocalHost()) ? '本地引擎模式' : 'GitHub Pages · 已连本机';
   $('#chipMode').className = 'chip ok';
   await loadAll();
+  taskTick();              // 开始盯着"眼下在合成哪几句"
   return true;
 }
 
@@ -1514,8 +1568,9 @@ async function loadHealth() {
 /* 引擎跑的是旧代码就明确提示：改完 server.py 进程不会自己换代码，
    不提示的话会出现「页面是新的、引擎还是两天前的旧版」却没人察觉。 */
 const REQUIRED_FEATURES = ['structured-items', 'prosody-normalize', 'local-document-import',
-  'bookshelf', 'tts-provider', 'presynth-hold', 'presynth-resume', 'remote-audio'];
-const MIN_ENGINE = '1.11.13';   // 页面用到的引擎能力下限，升一次改一次
+  'bookshelf', 'tts-provider', 'presynth-hold', 'presynth-resume', 'remote-audio',
+  'task-monitor', 'task-stop'];
+const MIN_ENGINE = '1.11.14';   // 页面用到的引擎能力下限，升一次改一次
 
 function cmpVer(a, b) {
   const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
@@ -2029,6 +2084,137 @@ function waitBlob(i, request, timeout) {
 function preload(i) { pfSeed(i); }
 function warmup(from, n) { pfSeed(from); }
 
+/* ---------- 「正在合成」实时清单 ----------
+   本地模型一次只同时合成 COSY_TTS_CONCURRENCY 句（默认 2）。手机听着听着卡住，
+   最常见的原因不是网络，而是这台机器同时在替别的段落干活：预合成在往后备整本、
+   另一台设备开着页面在预取、上一次测速还没跑完 —— 全在抢同两个槽位。
+   以前这些都藏在「预合成 N/M」一行字里，看不出到底是谁在要这一句。
+   引擎现在把每句合成登记下来，这里轮询成一列：谁要的、什么类型、跑了多久。
+   看到有人在抢，就能一键按住（不用去电脑上关页面）。 */
+const TK = { timer: null, open: false, data: null, quiet: 0 };
+
+function tkLeft(s) {
+  s = Math.max(0, s | 0);
+  const m = Math.floor(s / 60), r = s % 60;
+  return m ? `${m}:${String(r).padStart(2, '0')}` : `${r}s`;
+}
+
+const TK_SEC = [
+  ['fg', '正在播放 · 必须留'],
+  ['pre', '后台预合成 · 可停'],
+  ['bench', '测速'],
+  ['api', '其它'],
+];
+
+async function taskTick() {
+  clearTimeout(TK.timer);
+  const chip = $('#chipTask');
+  if (!ONLINE) { if (chip) chip.hidden = true; return; }
+  let next = TK.open ? 1100 : (document.hidden ? 12000 : 3000);
+  try {
+    const d = await (await fetch(API + '/api/tasks')).json();
+    if (d && d.ok) {
+      TK.data = d;
+      TK.quiet = d.quiet_left | 0;
+      paintTaskChip(d);
+      if (TK.open) paintTaskList(d);
+    }
+  } catch (e) { /* 旧引擎没这个接口：chip 保持 0，不打扰 */ }
+  TK.timer = setTimeout(taskTick, next);
+}
+
+function paintTaskChip(d) {
+  const el = $('#chipTask');
+  if (!el) return;
+  const n = (d.jobs || []).length;
+  const preBusy = (d.jobs || []).some(j => j.kind === 'pre')
+    || !!(d.presynth && d.presynth.running);
+  $('#tkN').textContent = n;
+  el.hidden = false;
+  el.className = 'chip btnish ' + (n ? (preBusy ? 'warn' : 'ok') : 'gray');
+  el.title = n
+    ? `眼下在合成 ${n} 句${preBusy ? '（含后台预合成）' : ''} · 点开看明细，可一键停`
+    : '本地模型现在闲着 · 点开看看后台在排队什么';
+}
+
+function paintTaskList(d) {
+  const jobs = d.jobs || [];
+  const pre = d.presynth || {};
+  const gpu = d.gpu || {};
+  const conc = d.conc || 2;
+  $('#tkStat').textContent = jobs.length ? `${jobs.length} 句在跑` : '';
+
+  // 顶栏：并发占用 / 显卡频率 / 后台是否被按住
+  const bits = [`本机并发 <b>${d.fg | 0}</b>/${conc}`];
+  if (gpu.clk) bits.push(`显卡 ${gpu.clk}MHz${gpu.clk_max ? '/' + gpu.clk_max : ''}`);
+  if (gpu.power) bits.push(`${gpu.power}W`);
+  if (TK.quiet > 0) bits.push(`后台已按住，还有 ${tkLeft(TK.quiet)}`);
+  $('#tkConc').innerHTML = bits.join(' <span class="sep">·</span> ');
+
+  // 清单
+  let html = '';
+  for (const [kind, title] of TK_SEC) {
+    const rows = jobs.filter(j => j.kind === kind);
+    if (!rows.length) continue;
+    html += `<div class="tk-sec">${title} · ${rows.length}</div>`;
+    for (const r of rows) {
+      const who = [r.dev || '', r.src === 'remote' ? '异地' : (r.src === 'lan' ? '家里' : '')]
+        .filter(Boolean).join('·');
+      const label = kind === 'pre' && r.idx
+        ? `第 ${r.idx}/${r.total} 句` : (kind === 'fg' ? '播放' : '');
+      const tip = `${who ? who + ' · ' : ''}${r.text}${r.chars ? `（${r.chars} 字）` : ''}`;
+      html += `<div class="tkrow" title="${esc(tip)}">
+        <span class="tkbadge ${kind}">${kind === 'pre' ? '预合成' : kind === 'fg' ? '播放' : kind === 'bench' ? '测速' : '接口'}</span>
+        <span class="tktext">${label ? label + ' · ' : ''}${esc(r.text)}</span>
+        <span class="tkage${r.age > 8 ? ' hot' : ''}">${who ? who + ' ' : ''}${(r.age || 0).toFixed(1)}s</span>
+      </div>`;
+    }
+  }
+
+  if (!html) {
+    const why = pre.running
+      ? (TK.quiet > 0 ? '后台合成被按住了' : '后台预合成在排队等显卡空出来（正在播 / 刚播过会让路）')
+      : '本地模型完全闲着';
+    html = `<div class="tk-empty"><span class="big">◍</span>
+      现在没有在合成任何句子。<br>${esc(why)}</div>`;
+  } else if (pre.running && pre.total) {
+    html += `<div class="tk-sec">预合成队列 · ${pre.done}/${pre.total}</div>
+      <div class="tk-empty" style="padding:12px 18px 22px;text-align:left;font-size:11.5px">
+        ${esc(pre.label || '当前文稿')}：已备 ${pre.done} 句${pre.fail ? `，失败 ${pre.fail}` : ''}，
+        停在断点第 ${Math.max(0, (pre.at | 0) + 1)} 句。点下面的「停止预合成」可以立刻腾出显卡，
+        进度不会丢，随时能继续。
+      </div>`;
+  }
+  $('#tkList').innerHTML = html;
+
+  // 底部按钮跟着状态变
+  const pz = $('#tkPause');
+  pz.textContent = TK.quiet > 0 ? `继续后台（剩 ${tkLeft(TK.quiet)}）` : '暂停后台 30 分钟';
+  pz.classList.toggle('on', TK.quiet > 0);
+  const st = $('#tkStop');
+  st.hidden = !pre.running;
+  $('#tkHint').textContent = pre.running ? '' : '预合成没在跑';
+}
+
+function taskOpen(open) {
+  TK.open = !!open;
+  $('#tkFly').classList.toggle('show', TK.open);
+  $('#tkMask').classList.toggle('show', TK.open);
+  $('#tkList').classList.toggle('show', TK.open);
+  if (TK.data) paintTaskList(TK.data);
+  taskTick();
+}
+
+async function taskStop(scope, minutes) {
+  try {
+    const r = await fetch(API + '/api/tasks/stop', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope, minutes }),
+    });
+    return await r.json();
+  } catch (e) { return { ok: false, error: String(e) }; }
+}
+
 /* ---------- 后台预合成全文 ----------
    本地大模型 RTF≈0.9：合成只比朗读快一点点，所以「边听边备」在物理上
    不成立 —— 想听就得独占 GPU。它的定位改成「不播的时候替你往后备」：
@@ -2138,6 +2324,10 @@ async function pollPresynth() {
         if (stuck) {
           paintPre(`预合成卡住 ${done}/${total}`,
                    '进度好一会儿没动了，点一下从这段重开', 'warn');
+        } else if ((d.quiet_left | 0) > 0) {
+          // 在「正在合成」面板里按了"暂停后台"：任务还在，只是被按住
+          paintPre(`预合成暂停 ${tkLeft(d.quiet_left)} · ${done}/${total}`,
+                   '你按住了后台合成，到点自动继续；点开 ⚡ 面板可以立刻恢复', 'gray');
         } else if (d.hold) {
           paintPre(`预合成让路 ${done}/${total}`,
                    '正在播，先把显卡留给耳朵；攒够缓冲会自己继续。点一下＝插队先备着', 'warn');
@@ -2148,7 +2338,7 @@ async function pollPresynth() {
         // 边听边备（CUDA Graph 后吞吐 2 倍实时，让路不再是"播着就全停"）：
         // 眼前缓冲 ≥6 句就放行后台往后备整本；缓冲见底（<3 句）再喊停，
         // 保证起播和追句时 GPU 只喂前台。迟滞区间防抖动。
-        if (S.playing) {
+        if (S.playing && !((d.quiet_left | 0) > 0)) {
           let ahead = 0;
           for (let i = S.idx + 1; i < S.items.length && PF.blobs.has(i); i++) ahead++;
           // 手动点了"继续"就把门槛降到 1 句：用户明说了要先备，别又立刻按住
@@ -3272,6 +3462,8 @@ $('#txt').addEventListener('keydown', e => {
 document.addEventListener('keydown', e => {
   const tag = (e.target.tagName || '').toUpperCase();
   if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'SELECT') return;
+  // 任务面板开着时，键盘只归它：不然空格会开始朗读、Esc 会停播
+  if (TK.open) { if (e.key === 'Escape') { e.preventDefault(); taskOpen(false); } return; }
   if (e.code === 'Space' && tag !== 'BUTTON' && tag !== 'SUMMARY') { e.preventDefault(); togglePlay(); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); nextSeg(); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); prevSeg(); }
@@ -3599,8 +3791,7 @@ $('#chipShelf').onclick = () => shelfOpen(true);
 /* 预合成 chip：点文字＝继续/插队，点右边的小 ✕＝停。
    旧版点整块就是"取消"，而且一取消 chip 就没了 —— 用户只看到
    「预合成已暂停 14/330」，点一下反而彻底关掉，再也找不回来。 */
-$('#chipPre').onclick = async () => {
-  const st = PRE.last || {};
+$('#chipPre').onclick = async () => {  const st = PRE.last || {};
   if (st.running && st.stuck) {
     // 卡住了：先作废这一轮，再从停下的那句重开
     try { await fetch(API + '/api/presynth/cancel', { method: 'POST' }); } catch (e) {}
@@ -3630,6 +3821,35 @@ $('#preStop').onclick = async (ev) => {
   pollPresynth();
   toast('已停止后台预合成');
 };
+
+/* ---------- 「正在合成」面板的事件 ---------- */
+$('#chipTask').onclick = () => taskOpen(!TK.open);
+$('#tkClose').onclick = () => taskOpen(false);
+$('#tkMask').onclick = () => taskOpen(false);
+
+$('#tkPause').onclick = async () => {
+  const on = !(TK.quiet > 0);
+  const d = await taskStop(on ? 'pause' : 'resume', 30);
+  if (!d.ok) { toast('引擎没响应（旧版本？）'); return; }
+  toast(on ? '后台合成暂停 30 分钟，到点自动继续' : '后台合成已恢复');
+  TK.quiet = d.quiet_left | 0;
+  if (!on) { PRE.auto = true; PRE.force = false; }
+  taskTick();
+  pollPresynth();
+};
+
+$('#tkStop').onclick = async () => {
+  const d = await taskStop('presynth');
+  if (!d.ok) { toast('引擎没响应（旧版本？）'); return; }
+  PRE.auto = false;              // 别让"播放→暂停"又把它勾回来
+  PRE.force = false;
+  PRE.on = false; PRE.key = '';
+  toast('已停止后台预合成（进度留在断点，随时能继续）');
+  taskTick();
+  pollPresynth();
+};
+
+/* ---------- 书架 ---------- */
 $('#shelfClose').onclick = () => shelfOpen(false);
 $('#shelfMask').onclick = () => shelfOpen(false);
 $('#shelfImport').onclick = () => $('#fileIn').click();
