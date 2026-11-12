@@ -34,6 +34,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 from urllib.parse import quote
 
@@ -124,6 +125,182 @@ def voice_catalog() -> dict:
     return out
 
 
+# ---------------------------------------------------------------- CUDA Graph 解码
+# LLM 是自回归逐 token 的：每步一次 forward，里面是几百个微小算子。Windows 的
+# WDDM 逐算子提交开销 ~0.1ms，24 层叠出来每步 50~90ms —— 显卡利用率只有三成，
+# 墙上时间全花在"把算子递给显卡"上（实测 GPU 满血 43 TFLOPS、硬件无恙）。
+# vLLM 在 Linux 上靠 CUDA Graph 解决同一件事；这里手动捕获"单步解码"成一张图：
+# 每步只做一次 fill_ + 一次 graph.replay()，实测 8.8ms/步，比 eager 快约 10 倍。
+# 静态 KV cache（StaticCache）让每步形状固定，图才能复用；prompt+正文（prefill）
+# 仍走 eager 一次性吃下。多请求并发时图只有一个，解码用锁串行 —— 解码快了 10
+# 倍之后串行也远快于以前的两路乱序争抢，flow/hift 照旧可以并行。
+class GraphDecoder:
+    def __init__(self, llm_obj):
+        import torch
+        from transformers import StaticCache
+
+        self.torch = torch
+        self.llm_obj = llm_obj
+        self.inner = llm_obj.llm.model.model          # Qwen2Model 本体
+        cfg = self.inner.config
+        self.hidden = int(cfg.hidden_size)
+        self.max_cache = 900                          # prefill(≤300) + 解码(≤600)
+        self.static = StaticCache(config=cfg, max_batch_size=1,
+                                  max_cache_len=self.max_cache,
+                                  device="cuda", dtype=torch.float32)
+        self.static_x = torch.zeros(1, 1, self.hidden, device="cuda")
+        self.cpos = torch.zeros(1, dtype=torch.long, device="cuda")
+        self.pids = torch.zeros(1, 1, dtype=torch.long, device="cuda")
+        self.lock = threading.Lock()                  # 图只有一份，解码串行
+        self._capture()
+
+    def _capture(self):
+        torch = self.torch
+        inner = self.inner
+
+        def body():
+            out = inner(inputs_embeds=self.static_x, attention_mask=None,
+                        position_ids=self.pids, use_cache=True,
+                        past_key_values=self.static,
+                        cache_position=self.cpos)
+            return out.last_hidden_state
+
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self.cpos.fill_(0)
+                self.pids.fill_(0)
+                body()
+        torch.cuda.current_stream().wait_stream(s)
+        self.cpos.fill_(0)
+        self.pids.fill_(0)
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self.out = body()                          # (1,1,hidden)
+
+    def generate(self, text, text_len, prompt_text, prompt_text_len,
+                 prompt_speech_token, prompt_speech_token_len, embedding,
+                 sampling=25, max_token_text_ratio=20, min_token_text_ratio=2,
+                 uuid=""):
+        """复刻 Qwen2LM.inference 的语义，解码循环换成 graph replay。"""
+        torch = self.torch
+        llm_obj = self.llm_obj
+        # llm_job 外层挂着 autocast(fp16)：图是按 fp32 权重捕获的，这里必须退出
+        with torch.autocast("cuda", enabled=False), torch.inference_mode():
+            with self.lock:
+                device = text.device
+                text_all = torch.concat([prompt_text, text], dim=1)
+                text_len_all = text_len + prompt_text_len
+                text_emb = llm_obj.llm.model.model.embed_tokens(text_all)
+                sos_emb = llm_obj.llm_embedding.weight[llm_obj.sos].reshape(1, 1, -1)
+                task_id_emb = llm_obj.llm_embedding.weight[llm_obj.task_id].reshape(1, 1, -1)
+                prompt_speech_token_emb = llm_obj.speech_embedding(prompt_speech_token)
+                lm_input = torch.concat(
+                    [sos_emb, text_emb, task_id_emb, prompt_speech_token_emb], dim=1)
+                min_len = int((text_len_all - prompt_text_len) * min_token_text_ratio)
+                max_len = int((text_len_all - prompt_text_len) * max_token_text_ratio)
+                # prefill：一次性吃下 prompt + 正文，KV 写进静态缓存
+                p = int(lm_input.shape[1])
+                cpos = torch.arange(p, device=device)
+                out = self.inner(inputs_embeds=lm_input, attention_mask=None,
+                                 position_ids=cpos.unsqueeze(0), use_cache=True,
+                                 past_key_values=self.static,
+                                 cache_position=cpos)
+                hidden = out.last_hidden_state[:, -1]      # (1,hidden) 末位
+                produced, pos = 0, p
+                out_tokens = []
+                while produced < max_len and pos < self.max_cache:
+                    logp = llm_obj.llm_decoder(hidden).log_softmax(dim=-1)
+                    top_ids = llm_obj.sampling_ids(
+                        logp.squeeze(dim=0), out_tokens, sampling,
+                        ignore_eos=produced < min_len)
+                    if top_ids in llm_obj.stop_token_ids:
+                        break
+                    yield top_ids
+                    out_tokens.append(top_ids)
+                    produced += 1
+                    pos += 1
+                    if produced >= max_len or pos >= self.max_cache:
+                        break
+                    # 把刚采出的 token 的 embedding 喂给图，算下一位置的隐状态
+                    emb = llm_obj.speech_embedding.weight[top_ids]
+                    self.static_x.copy_(emb.reshape(1, 1, self.hidden))
+                    self.cpos.fill_(pos)
+                    self.pids.fill_(pos)
+                    self.graph.replay()
+                    hidden = self.out[:, -1]
+
+
+def setup_graph_decode(engine):
+    """把 Qwen2LM.inference 换成 graph 版。失败就保持原样（eager 也能跑）。"""
+    if str(os.environ.get("COSY_TTS_GRAPH", "1")).lower() in ("0", "off", "false"):
+        log.info("COSY_TTS_GRAPH=0，保持 eager 解码")
+        return
+    try:
+        import torch
+
+        llm_obj = engine.model.llm
+        dec = GraphDecoder(llm_obj)
+        llm_obj._graph_dec = dec
+
+        def graph_inference(self, text, text_len, prompt_text, prompt_text_len,
+                            prompt_speech_token, prompt_speech_token_len,
+                            embedding, sampling=25, max_token_text_ratio=20,
+                            min_token_text_ratio=2, uuid=""):
+            return self._graph_dec.generate(
+                text, text_len, prompt_text, prompt_text_len,
+                prompt_speech_token, prompt_speech_token_len, embedding,
+                sampling=sampling, max_token_text_ratio=max_token_text_ratio,
+                min_token_text_ratio=min_token_text_ratio, uuid=uuid)
+
+        llm_obj.inference = types.MethodType(graph_inference, llm_obj)
+        _state["graph_decode"] = True
+        log.info("CUDA Graph 解码已启用（StaticCache %d 位，捕获完成）", dec.max_cache)
+    except Exception:                                     # noqa: BLE001
+        _state["graph_decode"] = False
+        log.exception("CUDA Graph 解码启用失败，退回 eager")
+
+
+def setup_fast_sampling(engine):
+    """把 ras_sampling 换成数学等价的向量化版。
+
+    原始的 nucleus_sampling 对 65k 词表整体排序，再用 Python 循环挑前 25 个、
+    逐个 append 到 list 再转回 tensor —— 每步 6ms 左右，和解码本身一样贵。
+    这里 topk(25) + cumsum 向量化，复读惩罚也从"每步造一个 GPU 张量"改成
+    纯 Python 比 int（top_ids 本来就是 int）。分布完全一致，只是更快。"""
+    if str(os.environ.get("COSY_TTS_FAST_SAMPLING", "1")).lower() in ("0", "off", "false"):
+        return
+    try:
+        import torch
+
+        llm_obj = engine.model.llm
+
+        def fast_sampling(weighted_scores, decoded_tokens, sampling,
+                          top_p=0.8, top_k=25, win_size=10, tau_r=0.1):
+            vals, idx = weighted_scores.softmax(dim=0).topk(min(top_k, weighted_scores.numel()))
+            keep = (vals.cumsum(dim=0) - vals) < top_p     # 与原循环的 cum_prob 判定一致
+            vals, idx = vals[keep], idx[keep]
+            if vals.numel() == 0:                          # 理论到不了，兜底取最大值
+                top_ids = int(weighted_scores.argmax())
+            else:
+                top_ids = int(idx[vals.multinomial(1, replacement=True)])
+            if decoded_tokens:                             # VALL-E 2 的复读惩罚
+                rep = sum(1 for t in decoded_tokens[-win_size:] if t == top_ids)
+                if rep >= win_size * tau_r:
+                    weighted_scores[top_ids] = -float("inf")
+                    top_ids = int(weighted_scores.softmax(dim=0)
+                                  .multinomial(1, replacement=True))
+            return top_ids
+
+        llm_obj.sampling = fast_sampling
+        _state["fast_sampling"] = True
+        log.info("采样已换成向量化版（数学等价）")
+    except Exception:                                      # noqa: BLE001
+        _state["fast_sampling"] = False
+        log.exception("向量化采样启用失败，保持原版")
+
+
 def load_engine(path: str = None, fp16: bool = False):
     """懒加载。失败时把原因留在 _state['error'] 里，接口直接透给前端。"""
     if _state["engine"] is not None:
@@ -144,6 +321,8 @@ def load_engine(path: str = None, fp16: bool = False):
                 raise RuntimeError("没有可用的 CUDA 显卡（CPU 上 RTF 会到十几，没法朗读）。")
             log.info("加载 CosyVoice2（%s，fp16=%s）…", path, fp16)
             engine = CosyVoice2(path, load_jit=False, load_trt=False, fp16=fp16)
+            setup_fast_sampling(engine)
+            setup_graph_decode(engine)
             _state["engine"] = engine
             _state["sample_rate"] = int(engine.sample_rate)
             _state["load_seconds"] = round(time.time() - started, 1)
@@ -226,6 +405,8 @@ def health():
         "error": _state["error"],
         "load_seconds": _state["load_seconds"],
         "spoken": _state["spoken"],
+        "graph_decode": bool(_state.get("graph_decode")),
+        "fast_sampling": bool(_state.get("fast_sampling")),
         "sample_rate": _state["sample_rate"],
         "text_frontend": (engine.frontend.text_frontend if engine else ""),
         "voices": sorted(_state["voices"]) if engine else sorted(voice_catalog()),
@@ -257,7 +438,12 @@ def warmup():
 def _gpu_burst(seconds: float = 2.5) -> dict:
     """系统待机/熄屏后，驱动会把显卡按在 500MHz 上下——自回归合成这种
     利用率只有三成的负载根本拉不回来，直接让起播慢一倍多。跑几秒小矩阵
-    乘把 DVFS 顶上高频：占用极小，换之后整段合成的高速度。"""
+    乘把 DVFS 顶上高频：占用极小，换之后整段合成的高速度。
+
+    例外：开了 CUDA Graph 解码后，解码循环把显卡真正喂饱了（实测合成期间
+    自动 boost 到 2600MHz），burst 反而会跟正在解码的第一句抢显卡 —— 跳过。"""
+    if _state.get("graph_decode"):
+        return {"clk": _gpu_clock_mhz(), "burst": False, "skipped": "graph"}
     before = _gpu_clock_mhz()
     try:
         import torch

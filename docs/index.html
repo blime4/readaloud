@@ -1626,9 +1626,9 @@ const PF = {
 
 function pfDepth() {
   const p = S.base && S.base.provider;
-  // 本机大模型备 9 句（约一分半音频）：它的合成速度只在 1.1 倍实时上下，
-  // 听久了必然慢慢落后，蓄得深一点，才不至于每句都补一次"等语音"。
-  return p && p !== 'edge' ? 9 : 3;
+  // 本机大模型：解码换成 CUDA Graph 后吞吐 ~2 倍实时（见 tts_cosy_server.py 的
+  // GraphDecoder），备 14 句 ≈ 一分半的余量，听再久也不会追上来。
+  return p && p !== 'edge' ? 14 : 3;
 }
 function pfParallel() {
   const p = S.base && S.base.provider;
@@ -2152,9 +2152,10 @@ async function play(requestedMode) {
     // 有断点就从断点接着读（maybeResume 已把位置写进 S.idx），否则从头开始。
     // 注意别写死 playAt(0) —— 那样刚弹完"已定位到第 N 句"就又跳回第一句了。
     const start = S.idx >= 0 ? S.idx + 1 : 0;
-    // 起播前先备两句：本地大模型合成 ≈ 实时，没有这一步就会一句一卡。
+    // 起播只等第一句：CUDA Graph 解码后单句 ~2 秒就绪，等第二句纯属白等 ——
+    // 第一句在播的这几秒里，后面十几句会顺着队列备上来（吞吐 2 倍实时）。
     // 系统语音（edge）几乎瞬时，primeFirst 直接放行。
-    await primeFirst(start, 2);
+    await primeFirst(start, 1);
     S.playing = true;
     playAt(start, true);
     // 注意：这里不再顺手开预合成。本地大模型合成一句 ≈ 听一句，
