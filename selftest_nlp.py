@@ -183,6 +183,14 @@ check("句间孤立句号被丢掉",
       ["他说完了。", "然后他走了。"])
 punct_para = N.prepare("第一段内容。\n\n.\n\n第二段内容。")
 check("整段只有标点也不进朗读稿", punct_para["segments"], ["第一段内容。", "第二段内容。"])
+
+# 英文长句超过 max_len 时必须断在空格上，不能把单词拦腰斩断。
+# 真实案例："...blue blood to m" / "arry his son." —— 用户听到的是"呃姆、阿瑞"。
+long_en = ("The earl refuses to allow anyone who is not of blue blood "
+           "to marry his son.")
+en_items = N.split_items(long_en)
+check("英文长句按空格切分", " ".join(i["text"] for i in en_items), long_en)
+check("第二段以完整词开头", en_items[-1]["text"].split()[0], "marry")
 check("丢掉标点后不丢停顿",
       N.split_items("", blocks=[{"kind": "para", "text": punct_mix}])[0]["pause"] >= 330, True)
 

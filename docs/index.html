@@ -1397,7 +1397,23 @@ async function loadTts() {
     $('#ttsModel').value = d.local.model || '';
     $('#ttsVoice').value = d.local.voice || '';
     applyProvider(d.provider || 'edge');
+    // 选了本机大模型但服务没起来：自动帮用户拉起，别等他自己发现
+    // "连不上 / 没有音色 / 试听失败"再去找按钮（以前就是这三条报错一起出现）。
+    if (TTS_PROVIDER === 'local' && d.local && !d.local.ok && ONLINE) maybeAutoStartTts();
   } catch (e) { /* 引擎老版本没有这个接口，按 edge 走 */ }
+}
+
+/* 本机 TTS 自动拉起：只对引擎自家默认地址（127.0.0.1:8891）生效 —— 用户配了
+   别的 OpenAI 兼容服务时，擅自起我们这份 CosyVoice 反而是打扰。每次页面
+   连接只试一次，避免失败后无限循环。 */
+let _ttsAutoTried = false;
+function maybeAutoStartTts() {
+  if (_ttsAutoTried) return;
+  const url = (($('#ttsUrl') && $('#ttsUrl').value) || '').trim();
+  if (url && !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/?$/i.test(url)) return;
+  _ttsAutoTried = true;
+  toast('本机 TTS 还没起来，正在自动启动（首次要读模型，约 1 分钟）…', 8000);
+  startLocalTts(true);
 }
 
 async function saveTts(patch = {}) {
@@ -1791,10 +1807,13 @@ function presynthKey() {
                          b.provider, b.model, S.book && S.book.id]);
 }
 
-/* 播放状态告诉引擎：hold=true 时预合成一句都不许合成 */
-function presynthHold(on, at) {
+/* 播放状态告诉引擎：hold=true 时预合成一句都不许合成。
+   playing 是独立的"还在播"信号（只管电源请求）——缓冲厚的时候我们会一边
+   播一边放行预合成，两个标志不能共用一个值。旧引擎不认识 playing，忽略即可。 */
+function presynthHold(on, at, playing) {
   if (!ONLINE) return;
   const body = { on: !!on };
+  if (playing != null) body.playing = !!playing;
   if (!on && at != null) body.at = Math.max(0, at | 0);
   fetch(API + '/api/presynth/hold', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1850,6 +1869,15 @@ async function pollPresynth() {
       el.textContent = d.hold
         ? `预合成已暂停 ${d.done}/${d.total}`
         : `预合成 ${d.done}/${d.total}（${pct}%）`;
+      // 边听边备（CUDA Graph 后吞吐 2 倍实时，让路不再是"播着就全停"）：
+      // 眼前缓冲 ≥6 句就放行后台往后备整本；缓冲见底（<3 句）再喊停，
+      // 保证起播和追句时 GPU 只喂前台。迟滞区间防抖动。
+      if (S.playing) {
+        let ahead = 0;
+        for (let i = S.idx + 1; i < S.items.length && PF.blobs.has(i); i++) ahead++;
+        if (ahead < 3 && !d.hold) presynthHold(true, null, true);
+        else if (ahead >= 6 && d.hold) presynthHold(false, null, true);
+      }
     }
   } catch (e) { /* 引擎没这个接口（旧版本），静默 */ }
   if (!running) {
@@ -2878,6 +2906,11 @@ $('#timer').onchange = e => setupTimer(e.target.value);
 $('#btnTry').onclick = async () => {
   if (!ONLINE) { toast('还没连上本机引擎'); return; }
   const b = baseStyle();
+  if (b.provider !== 'edge' && TTS_INFO && TTS_INFO.local && !TTS_INFO.local.ok) {
+    toast('本机 TTS 还没就绪 —— 可能正在启动（首次要读模型），稍等几秒再试', 6000);
+    maybeAutoStartTts();
+    return;
+  }
   const demo = '这是朗读试听，音色和语速听起来合适吗？';
   const q = new URLSearchParams({
     text: demo, voice: b.voice, rate: sgn(b.rate, '%'), pitch: sgn(b.pitch, 'Hz'),

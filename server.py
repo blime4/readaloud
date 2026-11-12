@@ -122,7 +122,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.11.3"
+ENGINE_VERSION = "1.11.4"
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -1598,12 +1598,11 @@ def api_book_delete(book_id):
 
 
 # ---------------------------------------------------------------- 后台预合成全文
-# 本地大模型 RTF≈0.9：合成比朗读快一点点，但只有一点点。也就是说
-# 「边听边备」在物理上是不成立的 —— 想听就必须独占这张卡。
-# 所以预合成的定位改成「不播的时候替你往后备」：一开播就让路，暂停/停止
-# 再从播放位置往后接着备。以前是只要前台 5 秒没动静就开工，而一句长句
-# 要听 12 秒 —— 每句之间它都能插进去干 7 秒活，前台请求就排在后面等，
-# 长文听感自然是一句一卡。
+# CUDA Graph 解码后吞吐 2 倍实时，「边听边备」重新成立 —— 但不能无脑并发：
+# 起播头几句、播放缓冲见底时必须独占 GPU（hold=true），否则前台请求排在
+# 预合成后面，又是一句一卡。所以把"何时让路"交给前端判断：它知道自己缓冲
+# 有多厚 —— 缓冲 <3 句喊停，≥6 句放行（见 docs 里的 pollPresynth）。
+# 没在播的时候维持老规矩：前台安静 PRESYNTH_IDLE 秒就往后备整本。
 
 _presynth = {
     "running": False, "job": 0, "total": 0, "done": 0,
@@ -1722,8 +1721,11 @@ def _cache_limit_now() -> int:
 def _presynth_turn(stale) -> bool:
     """等一个「GPU 闲着」的时机；返回 False 表示这个 job 已经作废。
 
-    条件是三件事同时成立：没有前台请求在跑、播放器没在播（hold）、
-    前台最近 PRESYNTH_IDLE 秒内没来过请求。
+    让路条件分两种：
+    - hold=true：前端明确喊停（起播头几句、缓冲见底），一句都不许合成；
+    - hold=false 且正在播放（电源请求按着）：CUDA Graph 后吞吐 2 倍实时，
+      缓冲够厚时可以见缝插针，只需避让正在跑的前台请求；
+    - hold=false 且没在播：维持老规矩 —— 前台安静 PRESYNTH_IDLE 秒才动手。
     """
     while True:
         if stale():
@@ -1731,7 +1733,8 @@ def _presynth_turn(stale) -> bool:
         with _synth_gate:
             busy = (_fg_busy["n"] > 0
                     or _presynth["hold"]
-                    or time.time() - _play_touch["ts"] < PRESYNTH_IDLE)
+                    or (not _awake["on"]
+                        and time.time() - _play_touch["ts"] < PRESYNTH_IDLE))
             if not busy:
                 return True
             _synth_gate.wait(0.5)
@@ -1884,9 +1887,14 @@ def api_presynth_hold():
     """播放器开播 → hold=true（预合成立刻让路）；暂停/停止 → hold=false。
 
     传了 at 就顺手把预合成队列挪到播放位置后面 —— 已经听过的不用再备。
+    playing 是独立的"还在播"信号（只管电源请求）：CUDA Graph 之后合成吞吐
+    2 倍实时，前端会在缓冲厚的时候主动 hold=false 让预合成见缝插针往后备，
+    但此时人还在听，电源请求必须继续按着 —— 所以两个标志不能共用一个值。
+    旧前端不带 playing，退回老语义（playing = on）。
     """
     body = request.get_json(silent=True) or {}
     on = bool(body.get("on"))
+    playing = bool(body["playing"]) if "playing" in body else on
     new_at = None
     if not on and body.get("at") is not None:
         try:
@@ -1896,7 +1904,7 @@ def api_presynth_hold():
     with _synth_gate:
         _presynth["hold"] = on
         _synth_gate.notify_all()
-    _awake_hold(on)
+    _awake_hold(playing)
     if new_at is not None:
         _presynth_seek(new_at)
     with _presynth_lock:

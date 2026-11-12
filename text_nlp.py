@@ -451,9 +451,15 @@ def _hard_split(s: str, limit: int) -> tuple:
             parts.append(buf)
         while len(token) > limit:
             piece = token[:limit]
-            idx = max((piece.rfind(m) for m in SOFT_BREAK), default=-1)
-            if idx > limit * 0.5:
-                piece = piece[: idx + 1]
+            # 断在哪儿：优先软停顿（中文标点），其次英文空格，都没有才硬切。
+            # 以前只认软停顿，英文长句没有标点就会把单词拦腰斩断
+            # （"...to m" / "arry his son."）—— 必须回退到最近的空格。
+            cut_at = max((piece.rfind(m) for m in SOFT_BREAK), default=-1)
+            sp = piece.rfind(" ")
+            if sp > cut_at:
+                cut_at = sp
+            if cut_at >= int(limit * 0.4):      # 太靠前的断点会切出碎句，宁可直接硬切
+                piece = piece[: cut_at + 1]     # 空格/标点留在前段尾上，下段以完整词开头
             parts.append(piece)
             token = token[len(piece):]
             cut = True
