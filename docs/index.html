@@ -543,6 +543,41 @@
   .taskfly .tf-foot .grow{flex:1}
   .taskfly .tf-foot .hint{font-size:10.5px;text-align:right}
   @media (max-width:520px){ .taskfly .tf-foot .hint{display:none} }
+
+  /* 手机上顶栏挤成一排小灰字，「⚡ N」根本找不着 —— 改成常驻浮动按钮：
+     听书时视线和手指都在屏幕下半部，贴在播放条上方才"一眼看到、一按就开"。 */
+  .tkFab{display:none}
+  @media(max-width:760px){
+    header #chipTask{display:none!important}
+    .tkFab{
+      display:none; align-items:center; justify-content:center; gap:2px;
+      position:fixed; right:14px; bottom:calc(70px + env(safe-area-inset-bottom));
+      width:52px; height:52px; min-height:0; padding:0; z-index:26;
+      background:var(--panel); color:var(--txt-3);
+      border:1px solid var(--line-strong);
+      font-family:var(--mono); font-size:17px; letter-spacing:0; line-height:1;
+      box-shadow:0 8px 26px #0000004d;
+      -webkit-tap-highlight-color:transparent; touch-action:manipulation;
+    }
+    .tkFab b{font-size:11px; font-weight:600; padding-top:2px}
+    .tkFab.on{display:flex}
+    .tkFab.idle{opacity:.5}
+    .tkFab.hide{display:none!important}
+    .tkFab.busy{
+      color:var(--accent); border-color:var(--accent);
+      background:color-mix(in srgb,var(--accent) 15%,var(--panel));
+      animation:tkPulse 1.9s ease-in-out infinite;
+    }
+    .tkFab.pre{
+      color:var(--warn); border-color:var(--warn);
+      background:color-mix(in srgb,var(--warn) 14%,var(--panel));
+    }
+    @keyframes tkPulse{
+      0%,100%{box-shadow:0 8px 26px #0000004d, 0 0 0 0 color-mix(in srgb,var(--accent) 46%,transparent)}
+      60%{box-shadow:0 8px 26px #0000004d, 0 0 0 11px transparent}
+    }
+    .taskfly .tf-foot button{min-height:40px;font-size:11.5px;padding:0 12px}
+  }
   @media (max-width:520px){ .tfitem .tmeta{display:none} }
   @media (prefers-reduced-motion:reduce){
     .tocfly{transition:none} .tfitem{animation:none}
@@ -1049,6 +1084,10 @@
   <button class="pb ghost" id="btnToc" title="目录：按章节跳转" hidden>☰</button>
   <button class="pb ghost" id="btnRepeat" title="重读当前句">↻</button>
 </div>
+
+<!-- 手机端的「正在合成」浮动按钮：不能放 header 里 —— 顶栏有 backdrop-filter，
+     会让 position:fixed 变成相对顶栏定位，按钮直接飞出屏幕。 -->
+<button class="tkFab" id="tkFab" aria-label="正在合成" title="正在合成：点开看明细">⚡<b id="tkFabN"></b></button>
 
 <div class="tocmask" id="tocMask"></div>
 <div class="tocfly" id="tocFly" role="dialog" aria-label="目录">
@@ -2109,7 +2148,12 @@ const TK_SEC = [
 async function taskTick() {
   clearTimeout(TK.timer);
   const chip = $('#chipTask');
-  if (!ONLINE) { if (chip) chip.hidden = true; return; }
+  if (!ONLINE) {
+    if (chip) chip.hidden = true;
+    const fab = $('#tkFab');
+    if (fab) fab.classList.remove('on');
+    return;
+  }
   let next = TK.open ? 1100 : (document.hidden ? 12000 : 3000);
   try {
     const d = await (await fetch(API + '/api/tasks')).json();
@@ -2124,17 +2168,31 @@ async function taskTick() {
 }
 
 function paintTaskChip(d) {
-  const el = $('#chipTask');
-  if (!el) return;
   const n = (d.jobs || []).length;
   const preBusy = (d.jobs || []).some(j => j.kind === 'pre')
     || !!(d.presynth && d.presynth.running);
-  $('#tkN').textContent = n;
-  el.hidden = false;
-  el.className = 'chip btnish ' + (n ? (preBusy ? 'warn' : 'ok') : 'gray');
-  el.title = n
+  const title = n
     ? `眼下在合成 ${n} 句${preBusy ? '（含后台预合成）' : ''} · 点开看明细，可一键停`
     : '本地模型现在闲着 · 点开看看后台在排队什么';
+
+  const el = $('#chipTask');
+  if (el) {
+    $('#tkN').textContent = n;
+    el.hidden = false;
+    el.className = 'chip btnish ' + (n ? (preBusy ? 'warn' : 'ok') : 'gray');
+    el.title = title;
+  }
+  // 手机端：贴在下半屏的浮动按钮，有活在跑就着色 + 脉动，闲着半透明不碍事
+  const fab = $('#tkFab');
+  if (fab) {
+    fab.classList.add('on');
+    fab.classList.toggle('busy', !!n && !preBusy);
+    fab.classList.toggle('pre', !!n && preBusy);
+    fab.classList.toggle('idle', !n);
+    fab.classList.toggle('quiet', TK.quiet > 0);
+    $('#tkFabN').textContent = n || '';
+    fab.title = title;
+  }
 }
 
 function paintTaskList(d) {
@@ -2201,6 +2259,9 @@ function taskOpen(open) {
   $('#tkFly').classList.toggle('show', TK.open);
   $('#tkMask').classList.toggle('show', TK.open);
   $('#tkList').classList.toggle('show', TK.open);
+  // 面板滑出来时把手机上的浮动按钮收起来，别压在面板边上
+  const fab = $('#tkFab');
+  if (fab) fab.classList.toggle('hide', TK.open);
   if (TK.data) paintTaskList(TK.data);
   taskTick();
 }
@@ -3824,6 +3885,7 @@ $('#preStop').onclick = async (ev) => {
 
 /* ---------- 「正在合成」面板的事件 ---------- */
 $('#chipTask').onclick = () => taskOpen(!TK.open);
+$('#tkFab').onclick = () => taskOpen(!TK.open);
 $('#tkClose').onclick = () => taskOpen(false);
 $('#tkMask').onclick = () => taskOpen(false);
 
