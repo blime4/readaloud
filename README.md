@@ -96,25 +96,29 @@
   走不通 —— 但同一台机器上跑一个本地 TTS 服务是同样的思路，这里就是为它留的口子。
   本机地址永远直连，系统代理（Clash 之类）不会掺和进来。
 
-### 两套本机引擎一键切换（1.12.0）
+### 三套本机引擎一键切换（1.12.0 / 1.12.2）
 
-设置 →「语音引擎」→「本机 TTS 连接设置」，最上面一行有两个按钮：
-**CosyVoice2 · GPU**（默认）和 **MOSS-Nano · ONNX**。点一下就切，不用手填地址、
-模型名或端口，也不会动到另一套的音频缓存（缓存键本来就带 url + model，切回来
-之前备好的书照样秒播）。按钮会标出各自有没有启动、缺哪些组件；⚡「正在合成」
-清单会显示当前后端（GPU / ONNX）和并发数。
+设置 →「语音引擎」→「本机 TTS 连接设置」，最上面一行有三个按钮：
+**CosyVoice2 · GPU**（默认）、**MOSS-Nano · ONNX**、**Qwen3-TTS · 1.7B**。
+点一下就切，不用手填地址、模型名或端口，也不会动到别的引擎的音频缓存
+（缓存键本来就带 url + model，切回来之前备好的书照样秒播）。按钮会标出各自
+有没有启动、缺哪些组件；⚡「正在合成」清单会显示当前后端（GPU / ONNX /
+Qwen3-TTS）和并发数。
 
-两套都说 OpenAI 兼容的 `/v1/audio/speech`，所以差异全在各自的服务进程里：
+三套都说 OpenAI 兼容的 `/v1/audio/speech`，所以差异全在各自的服务进程里：
 
 | 引擎 | 实测 RTF | 显存 | 输出 | 音色 |
 |---|---|---|---|---|
 | CosyVoice2-0.5B | 0.52 | ~6GB | 24kHz 单声道 | 内置参考音频「默认女声」 |
 | MOSS-TTS-Nano（CUDA） | 0.47 | ~1GB | 48kHz 立体声 | 官方内置 18 把 + 自定义 wav 克隆 |
 | MOSS-TTS-Nano（纯 CPU 回退） | 2.3 | 0 | 48kHz 立体声 | 同上 |
+| **Qwen3-TTS-1.7B-CustomVoice** | **≈3.0** | ~4GB | 24kHz 单声道 | 官方 9 把（中文 5 把） |
 
 RTF 用 `/api/tts/bench` 在同一台 4060 Ti 上量；数值随句子长度、显卡频率浮动，
-**< 1 才跟得上播放**。Nano 的 CPU 回退只在不具备 CUDA 环境时才走，那时建议
-只用「试听」或整本预合成，不要边听边备。
+**< 1 才跟得上播放**。Nano 的 CPU 回退只在不具备 CUDA 环境时才走；
+**Qwen3-TTS 的 RTF≈3 是整句自回归生成的代价，跟不上边听边合成，定位是
+「整本预合成专用」**——先让后台把书备完再听，音质优先。换音色后旧缓存
+自动作废；三套各自记住上次挑的声线，切回来不会串音。
 
 ### MOSS-Nano 的音色切换（1.12.1）
 
@@ -456,6 +460,36 @@ CUDA 起不来则自动回退 CPU。适配层实测最优参数：`thread_count=
 （官方内置音色连这一步都省了）；
 `threads=8` 和 `greedy` 都更慢（后者还会莫名生成满 30 秒音频）。
 
+## 可选：装第三套引擎 Qwen3-TTS（1.12.2）
+
+**先说实话**：1.7B 版在这台 4060 Ti 上整句自回归生成实测 **RTF≈3.0**，
+跟不上边听边合成。装它的理由不是快，而是**音质与音色**——官方调好的 9 把声线
+（中文 5 把）、文字描述造音色、3 秒声音克隆，适合「先整本预合成再听」。
+若你要的是边听边出声的好音质，下一步该接 CosyVoice 3（0.5B、流式）。
+
+1. `python -m venv .tts-venv && .tts-venv/Scripts/pip install qwen-tts`
+   （会带上 torch / soundfile / huggingface_hub；本机是 `torch 2.5.1+cu124`）。
+2. 把 `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` 整个仓库（约 4.3GB）放到
+   `models/Qwen3-TTS-12Hz-1.7B-CustomVoice/`。**本地有 config.json 就完全离线**，
+   启动时不再联网。国内直连 HF 不通时走本机 HTTP 代理，用
+   `huggingface_hub.snapshot_download(..., local_dir=...)` 拉；别用 hf-mirror
+   下大文件，曾把 `model.safetensors` 写一半卡住。
+3. 面板点「Qwen3-TTS · 1.7B」即自动拉起 `tts_qwen_server.py`（端口 8890）；
+   也可手动跑 `.tts-venv/Scripts/python.exe tts_qwen_server.py --port 8890 --preload`。
+   首次加载约 80 秒。环境变量 `QWEN_TTS_MODEL_DIR` 可改权重位置。
+
+两个坑：
+
+- 模型 `get_supported_speakers()` 返回的是**全小写** id（`serena` / `uncle_fu` …），
+  官方文档里的首字母大写只是展示写法。适配层已做大小写归一化 + 中文说明；
+  直接拿文档里的 `Serena` 当 speaker 会静默退回默认声线。
+- 日志里的 `flash-attn is not installed` 来自 25Hz tokenizer 的 whisper encoder，
+  当前 12Hz 模型不走它；HF 模型 `_supports_sdpa=True`，不必为此去装 Windows 上
+  极难编译的 flash-attn。
+
+输出 24kHz 单声道 WAV；`tts_local_split=0`（整句交给模型，切碎反而更慢），
+服务内部 `_model_lock` 串行，任务面板显示「Qwen3-TTS · 单句串行」。
+
 ## 边听边问（MiniCPM-o 4.5）
 
 使用 [Comni](https://github.com/tc-mb/llama.cpp-omni#-recommended-companion-demo--minicpm-o-demo-comni) 的 MiniCPM-o 4.5 量化模型启动本机推理 Worker 和网关。ReadAloud 连接网关的音频双工接口。网关需使用 HTTP 并仅监听 `127.0.0.1`，默认端口为 `8040`。从源码启动网关时，可使用 `python gateway.py --http --host 127.0.0.1 --port 8040`，Worker 的启动方式见 Comni 的部署说明。
@@ -572,8 +606,8 @@ AI 功能额外需要 [Ollama](https://ollama.com)；没有也能正常朗读，
 | `POST /api/books/<id>/progress` | 写进度 `{next,total}`（允许倒退），页面关闭时用 sendBeacon 兜底 |
 | `DELETE /api/books/<id>` | 从书架删掉一本书（正文一起删） |
 | `GET\|POST /api/tts/providers` | 语音引擎：查询/切换 `edge` 与 `local`，POST 带 `probe:true` 会探测本地 TTS 并返回模型与音色表 |
-| `GET\|POST /api/tts/engines` | 两套本机引擎：列出当前/是否启动/缺什么；GET 对 moss 额外返回官方音色目录 `voices`；POST `{engine:"cosy"\|"moss"}` 一键切换地址、模型、音色与启动脚本，并按需拉起服务（1.12.0） |
-| `POST /api/tts/voice` | 切换音色并同步给引擎 `{voice:"Weiguo"}`：让试听、后台预合成、其他设备用同一把声音（1.12.1） |
+| `GET\|POST /api/tts/engines` | 三套本机引擎：列出当前/是否启动/缺什么；GET 对 moss、qwen3 返回各自音色目录 `voices`；POST `{engine:"cosy"\|"moss"\|"qwen3"}` 一键切换地址、模型、音色与启动脚本，并按需拉起服务（1.12.0 / 1.12.2） |
+| `POST /api/tts/voice` | 切换音色并同步给引擎 `{voice:"Weiguo"}`：让试听、后台预合成、其他设备用同一把声音；按当前引擎记在 `cosy_voice`/`moss_voice`/`qwen3_voice`，切回来不串音（1.12.1 / 1.12.2） |
 | `POST /api/tts/local/start` | 一键拉起本机大模型 TTS：按脚本挑解释器（cosy→conda env，qwen→`.tts-venv`），状态机立即返回，就绪看下面的 status |
 | `GET /api/tts/local/status` | 本地 TTS 状态：`up`/`probe`（引擎名、模型、音色）/`starting`/`python`/`script`，以及 `config`（已自动写回的地址与音色）和 `log`（没起来时的 `tts.log` 尾巴） |
 | `GET /api/version` · `POST /api/restart` | 引擎版本与能力清单 / 原地热重启（进程号不变，先确认新代码能编译再关旧监听） |

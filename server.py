@@ -133,7 +133,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.12.1"
+ENGINE_VERSION = "1.12.2"
 
 # --------------------------------------------------------------------------
 # 本机引擎注册表：两套 TTS 都能用同一个 /v1/audio/speech 约定，切换只改配置
@@ -145,6 +145,22 @@ ENGINE_VERSION = "1.12.1"
 def _engine_profile(eid: str) -> dict:
     moss_py = Path.home() / "miniconda3" / "envs" / "moss-nano" / "python.exe"
     cosy_py = Path.home() / "miniconda3" / "envs" / "cosyvoice" / "python.exe"
+    qwen_py = BASE / ".tts-venv" / "Scripts" / "python.exe"
+    if eid == "qwen3":
+        weights = (BASE / "models" / "Qwen3-TTS-12Hz-1.7B-CustomVoice").resolve()
+        return {
+            "id": "qwen3", "label": "Qwen3-TTS · 1.7B",
+            "note": "1.7B / 约 4GB 显存，官方 9 把调好的音色（中文 5 把），"
+                    "支持文字描述造音色与 3 秒声音克隆；流式首包约 97ms。",
+            "url": "http://127.0.0.1:8890",
+            "model": "Qwen3-TTS-12Hz-1.7B-CustomVoice",
+            # 温暖柔和的中文女声，长篇朗读比明亮锐感的 vivian 耐听；id 必须是小写
+            "voice": "serena", "script": "tts_qwen_server.py",
+            "python": str(qwen_py) if qwen_py.exists() else "",
+            "args": "--preload",
+            "env": f"QWEN_TTS_MODEL_DIR={weights}",
+            "weights_dir": str(weights),
+        }
     if eid == "moss":
         nano = (Path(os.environ.get("MOSS_NANO_DIR") or (BASE.parent / "moss-tts-nano"))).resolve()
         voices_dir = (BASE / "assets" / "voices").resolve()
@@ -173,7 +189,26 @@ def _engine_profile(eid: str) -> dict:
     }
 
 
-LOCAL_ENGINES = ("cosy", "moss")
+LOCAL_ENGINES = ("cosy", "moss", "qwen3")
+
+
+# 与 tts_qwen_server.py 的 SPEAKER_LABELS 保持一致：8890 没启动时面板也能列出音色。
+QWEN_SPEAKER_LABELS = {
+    "vivian": "明亮、略带锐感的年轻女声（中文）",
+    "serena": "温暖、柔和的年轻女声（中文）",
+    "uncle_fu": "低沉醇厚的成熟男声（中文）",
+    "dylan": "年轻北京男声，清亮自然（中文）",
+    "eric": "活泼成都男声，略带沙哑亮感（中文）",
+    "ryan": "节奏感强的动态男声（英文）",
+    "aiden": "阳光美式男声，中频清晰（英文）",
+    "ono_anna": "俏皮日系女声，轻快灵动（日文）",
+    "sohee": "温暖韩系女声，情感丰富（韩文）",
+}
+
+
+def _qwen_voice_catalog() -> list[dict]:
+    return [{"id": k, "name": f"{k} · {v}", "builtin": True}
+            for k, v in QWEN_SPEAKER_LABELS.items()]
 
 
 def _moss_manifest(nano_dir) -> Path | None:
@@ -234,8 +269,9 @@ FEATURES = [
     "task-stop",            # /api/tasks/stop：一键停预合成 / 暂停后台 30 分钟
     "tts-bench",            # /api/tts/bench：量本机合成的 RTF，判断能不能跟上播放
     "tts-autostart",        # /api/tts/local：一键拉起本机大模型 TTS 并自动写回配置
-    "tts-engine-switch",    # /api/tts/engines：CosyVoice2(GPU) / MOSS-TTS-Nano(CPU) 一键切换
+    "tts-engine-switch",    # /api/tts/engines：CosyVoice2 / MOSS-Nano / Qwen3-TTS 三套一键切换
     "moss-voices",          # MOSS-Nano 官方内置 18 把音色 + 自定义 wav 克隆，可逐把切换
+    "qwen3-tts",            # 第三套本机引擎 Qwen3-TTS 1.7B：9 把官方音色，逐把可切
     "engine-upgrade",       # /api/restart + /api/update：原地热重启、git pull 自升级
 ]
 
@@ -2388,9 +2424,11 @@ def api_tasks():
         conc = max(1, min(4, int(os.environ.get("COSY_TTS_CONCURRENCY", "2"))))
     except (TypeError, ValueError):
         conc = 2
-    is_moss = (CFG.get("tts_engine") or "cosy") == "moss"
-    if is_moss:
-        conc = 1                     # ONNX session 串行，清单里别显示 GPU 的 2/2
+    engine = (CFG.get("tts_engine") or "cosy").lower()
+    is_moss = engine == "moss"       # ONNX session 串行
+    is_qwen3 = engine == "qwen3"     # 1.7B 整句生成，服务内 _model_lock 也是串行
+    if is_moss or is_qwen3:
+        conc = 1                     # 别在清单里显示 GPU 的 2/2
     if (CFG.get("tts_provider") or "") == "local" and not is_moss:
         gpu = _gpu_clocks()
     else:
@@ -2398,7 +2436,7 @@ def api_tasks():
     return jsonify({
         "ok": True, "now": time.time(), "jobs": rows, "fg": fg,
         "conc": conc, "provider": CFG.get("tts_provider") or "edge",
-        "backend": "onnx" if is_moss else "gpu",
+        "backend": "onnx" if is_moss else ("qwen3" if is_qwen3 else "gpu"),
         "presynth": pre, "gpu": gpu, "quiet_left": _quiet_left(),
     })
 
@@ -2974,6 +3012,53 @@ def start_local_tts() -> dict:
             "msg": f"正在启动 {script.stem}，第一次加载模型约 10～60 秒"}
 
 
+def _stop_other_tts(keep_port: int) -> list[int]:
+    """切引擎时停掉其它本机 TTS 服务，把显存留给当前引擎。
+
+    三套模型同时常驻会把 16GB 显存挤爆：实测 ONNX Runtime 报
+    CUBLAS_STATUS_NOT_INITIALIZED，正在听的那套每句都 502，可 /health 依旧
+    显示 ready —— 极具迷惑性。端口是本项目专用约定，只停这几个端口上的
+    LISTENING 进程，不碰用户自己的服务（比如本机跑着的 Comni / Ollama）。
+    """
+    from urllib.parse import urlparse
+    ports = set()
+    for eid in LOCAL_ENGINES:
+        try:
+            ports.add(int(urlparse(_engine_profile(eid)["url"]).port or 0))
+        except Exception:                                        # noqa: BLE001
+            pass
+    ports.discard(0)
+    targets = ports - {keep_port}
+    if not targets:
+        return []
+    flags = 0x08000000 if os.name == "nt" else 0
+    try:
+        out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True,
+                             text=True, timeout=15, creationflags=flags).stdout
+    except Exception:                                            # noqa: BLE001
+        return []
+    stopped = []
+    for line in (out or "").splitlines():
+        cols = line.split()
+        if len(cols) < 5 or cols[3].upper() != "LISTENING":
+            continue
+        try:
+            port = int(cols[1].rsplit(":", 1)[1])
+        except (ValueError, IndexError):
+            continue
+        pid = cols[4]
+        if port not in targets or port in stopped or not pid.isdigit():
+            continue
+        try:
+            subprocess.run(["taskkill", "/PID", pid, "/F", "/T"],
+                           capture_output=True, timeout=10, creationflags=flags)
+            stopped.append(port)
+            log.info("切引擎：停掉 %s 上的旧 TTS（pid %s）释放显存", port, pid)
+        except Exception as e:                                   # noqa: BLE001
+            log.warning("停掉 %s 上的旧 TTS 失败：%s", port, e)
+    return stopped
+
+
 def _tts_maybe_autostart() -> dict | None:
     """切到 local / 生成语音时顺手兜一下：没起来就拉起来。"""
     if not CFG.get("tts_local_autostart", True):
@@ -3054,15 +3139,16 @@ def api_tts_local_status():
 
 @app.get("/api/tts/engines")
 def api_tts_engines():
-    """本机两套 TTS 的现状：现在用哪个、各自起没起来、缺什么。"""
+    """本机三套 TTS 的现状：现在用哪个、各自起没起来、缺什么。"""
     cur = (CFG.get("tts_engine") or "cosy").lower()
     rows = []
     for eid in LOCAL_ENGINES:
         p = _engine_profile(eid)
         try:
-            up = bool(TTS.probe(p["url"], "", timeout=0.8).get("ok"))
+            probe = TTS.probe(p["url"], "", timeout=0.8)
+            up = bool(probe.get("ok"))
         except Exception:                                        # noqa: BLE001
-            up = False
+            probe, up = {}, False
         missing = []
         if eid == "moss":
             if not p["python"]:
@@ -3071,12 +3157,25 @@ def api_tts_engines():
                 missing.append("tts_moss_server.py")
             if not _moss_manifest(p["nano_dir"]):
                 missing.append("Nano ONNX 权重（含内置音色清单）")
+        elif eid == "qwen3":
+            if not p["python"]:
+                missing.append("Qwen3-TTS 环境（.tts-venv）")
+            if not (BASE / p["script"]).exists():
+                missing.append("tts_qwen_server.py")
+            if not (Path(p["weights_dir"]) / "model.safetensors").exists():
+                missing.append("Qwen3-TTS 1.7B 权重（models/）")
         row = {"id": eid, "label": p["label"], "note": p["note"],
                "url": p["url"], "up": up, "missing": missing,
-               "ready": up or not missing}
+               "ready": up or not missing,
+               "voices": [], "default_voice": p["voice"]}
         if eid == "moss":
             row["voices"] = _moss_voice_catalog(p["nano_dir"])
-            row["default_voice"] = p["voice"]
+        elif eid == "qwen3":
+            # 服务起来了用真实音色表；没起来时静态表兜底，面板才不会空白
+            names = probe.get("voices") or []
+            labels = probe.get("voice_labels") or {}
+            row["voices"] = ([{"id": n, "name": labels.get(n, n)} for n in names]
+                             if names else _qwen_voice_catalog())
         rows.append(row)
     return jsonify({"ok": True, "current": cur,
                     "voice": CFG.get("tts_local_voice") or "", "engines": rows})
@@ -3090,38 +3189,51 @@ def api_tts_engines_switch():
     if eid not in LOCAL_ENGINES:
         return jsonify({"ok": False, "error": f"不认识的本机引擎：{eid}"}), 400
     p = _engine_profile(eid)
+    absent = []
     if eid == "moss":
-        absent = []
         if not p["python"]:
             absent.append("moss-nano Python 环境（conda create -n moss-nano python=3.12）")
         if not _moss_manifest(p["nano_dir"]):
             absent.append("Nano ONNX 权重（models/ 里的 browser_poc_manifest.json）")
-        if absent:
-            return jsonify({"ok": False, "error": "MOSS-TTS-Nano 还没装好：" + "、".join(absent),
-                            "missing": absent}), 409
-    # 切走再切回来时记住上次挑的 MOSS 音色（cosy 的音色体系与它不相通）
-    voice = (CFG.get("moss_voice") or p["voice"]) if eid == "moss" else p["voice"]
+    elif eid == "qwen3":
+        if not p["python"]:
+            absent.append("Qwen3-TTS 环境（.tts-venv/Scripts/python.exe）")
+        if not (BASE / p["script"]).exists():
+            absent.append("tts_qwen_server.py")
+        if not (Path(p["weights_dir"]) / "model.safetensors").exists():
+            absent.append("Qwen3-TTS 1.7B 权重（models/Qwen3-TTS-12Hz-1.7B-CustomVoice/）")
+    if absent:
+        return jsonify({"ok": False, "error": p["label"] + " 还没装好：" + "、".join(absent),
+                        "missing": absent}), 409
+    # 三套的音色体系互不相通：切走再切回来时各自记住上次挑的那把
+    voice = CFG.get(f"{eid}_voice") or p["voice"]
     CFG.update({
         "tts_engine": eid, "tts_provider": "local",
         "tts_local_url": p["url"], "tts_local_model": p["model"],
         "tts_local_voice": voice,
-        # CosyVoice 靠 8891 端口就能自动猜到脚本/解释器；只有 Nano 的
-        # moss-nano 环境必须显式写，否则会被猜成 cosyvoice 环境。
+        # CosyVoice 靠 8891 端口就能自动猜到脚本/解释器；另两套必须显式写，
+        # 否则会被猜成 cosyvoice 环境，启动时第一行就 ModuleNotFoundError。
         "tts_local_script": "" if eid == "cosy" else p["script"],
         "tts_local_python": "" if eid == "cosy" else p["python"],
         "tts_local_args": p["args"],
         "tts_local_env": p["env"], "tts_local_format": "wav",
-        # Nano 自己会按 token 分块，主引擎再切两段反而会多一次克隆编码
-        "tts_local_split": 0 if eid == "moss" else 30,
+        # Nano 自己按 token 分块；Qwen3-TTS 整句生成慢，切太碎反而更慢
+        "tts_local_split": 0 if eid in ("moss", "qwen3") else 30,
     })
     save_config(CFG)
+    # 先停掉别的引擎释放显存，再探测/拉起新引擎：三套共存会挤爆 16GB，
+    # ONNX Runtime 会报 CUBLAS_STATUS_NOT_INITIALIZED 而 /health 仍显示 ready。
+    stopped = _stop_other_tts(_tts_port())
     report = _tts_local_report(force=True)
     started = None
     if not report.get("ok"):
         started = start_local_tts()
+    tail = "（正在启动…）" if started else "（已就绪）"
+    if stopped:
+        tail += f"，已停掉 {len(stopped)} 个旧服务释放显存"
     return jsonify({"ok": True, "engine": eid, "label": p["label"],
-                    "probe": report, "started": started,
-                    "msg": "切到 " + p["label"] + ("（正在启动…）" if started else "（已就绪）")})
+                    "probe": report, "started": started, "stopped": stopped,
+                    "msg": "切到 " + p["label"] + tail})
 
 
 @app.post("/api/tts/voice")
@@ -3136,9 +3248,10 @@ def api_tts_voice_set():
     voice = str(body.get("voice") or "").strip()
     if not voice or len(voice) > 120:
         return jsonify({"ok": False, "error": "音色名不合法"}), 400
+    engine = (CFG.get("tts_engine") or "cosy").lower()
     CFG["tts_local_voice"] = voice
-    if (CFG.get("tts_engine") or "cosy") == "moss":
-        CFG["moss_voice"] = voice
+    if engine in LOCAL_ENGINES:
+        CFG[f"{engine}_voice"] = voice
     save_config(CFG)
     return jsonify({"ok": True, "voice": voice})
 

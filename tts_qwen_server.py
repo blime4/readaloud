@@ -31,13 +31,15 @@ from pathlib import Path
 # ffmpeg 等子进程隐藏控制台，避免黑框闪烁。
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
-os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")   # 直连 huggingface.co 在这台机器上不通
+# 本地权重优先；真要联网时用 HF 官方 + 本机代理（hf-mirror 曾把大文件写一半卡住）
+os.environ.setdefault("HF_ENDPOINT", "https://huggingface.co")
 
 from flask import Flask, Response, jsonify, request   # noqa: E402
 
 DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 BASE_DIR = Path(__file__).resolve().parent
-LOCAL_MODEL = BASE_DIR / "models" / "Qwen3-TTS-12Hz-1.7B-CustomVoice"
+LOCAL_MODEL = Path(os.environ.get("QWEN_TTS_MODEL_DIR")
+                   or (BASE_DIR / "models" / "Qwen3-TTS-12Hz-1.7B-CustomVoice"))
 
 
 def default_model() -> str:
@@ -48,18 +50,21 @@ def default_model() -> str:
 LANGUAGES = ["Auto", "Chinese", "English", "Japanese", "Korean", "German",
              "French", "Russian", "Portuguese", "Spanish", "Italian"]
 
-# 加载完成前也要有音色表，不然面板探测会显示"没有音色"
-FALLBACK_SPEAKERS = {
-    "Vivian": "明亮、略带锐感的年轻女声（中文）",
-    "Serena": "温暖、柔和的年轻女声（中文）",
-    "Uncle_Fu": "低沉醇厚的成熟男声（中文）",
-    "Dylan": "年轻北京男声，清亮自然（中文）",
-    "Eric": "活泼成都男声，略带沙哑亮感（中文）",
-    "Ryan": "节奏感强的动态男声（英文）",
-    "Aiden": "阳光美式男声，中频清晰（英文）",
-    "Ono_Anna": "俏皮日系女声，轻快灵动（日文）",
-    "Sohee": "温暖韩系女声，情感丰富（韩文）",
+# 注意：模型 get_supported_speakers() 返回的是全小写 id（serena / uncle_fu …），
+# 官方文档里的首字母大写只是展示写法。key 必须对齐小写，否则中文说明全丢、
+# 请求里的 "Serena" 也匹配不上，会静默退回默认声线。
+SPEAKER_LABELS = {
+    "vivian": "明亮、略带锐感的年轻女声（中文）",
+    "serena": "温暖、柔和的年轻女声（中文）",
+    "uncle_fu": "低沉醇厚的成熟男声（中文）",
+    "dylan": "年轻北京男声，清亮自然（中文）",
+    "eric": "活泼成都男声，略带沙哑亮感（中文）",
+    "ryan": "节奏感强的动态男声（英文）",
+    "aiden": "阳光美式男声，中频清晰（英文）",
+    "ono_anna": "俏皮日系女声，轻快灵动（日文）",
+    "sohee": "温暖韩系女声，情感丰富（韩文）",
 }
+DEFAULT_VOICE = "serena"
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024
@@ -114,14 +119,21 @@ def load_model(path: str):
 
 
 def speakers() -> dict:
+    """返回 {模型实际 id: 中文说明}。加载前用静态表兜底，面板才不会显示"没有音色"。"""
     model = _state["model"]
-    if model is None:
-        return dict(FALLBACK_SPEAKERS)
-    try:
-        names = model.get_supported_speakers()
-    except Exception:                                    # noqa: BLE001
-        return dict(FALLBACK_SPEAKERS)
-    return {str(name): FALLBACK_SPEAKERS.get(str(name), "") for name in names or []}
+    names = None
+    if model is not None:
+        try:
+            names = model.get_supported_speakers()
+        except Exception:                                # noqa: BLE001
+            names = None
+    if not names:
+        return dict(SPEAKER_LABELS)
+    rows = {}
+    for name in names:
+        key = str(name).strip()
+        rows[key] = SPEAKER_LABELS.get(key.lower(), "")
+    return rows
 
 
 def guess_language(text: str) -> str:
@@ -199,8 +211,10 @@ def models():
 @app.get("/v1/voices")
 def voices():
     rows = speakers()
+    # name 里带上中文说明：主引擎 probe 只读 name 做下拉标签，读 id 做 value。
     return jsonify({"object": "list", "voices": [
-        {"id": name, "name": name, "description": note} for name, note in rows.items()
+        {"id": name, "name": f"{name} · {note}" if note else name,
+         "description": note} for name, note in rows.items()
     ]})
 
 
@@ -217,11 +231,14 @@ def speech():
     if model is None:
         return jsonify({"ok": False, "error": error}), 500
 
-    voice = str(body.get("voice") or "Serena").strip()
+    voice = str(body.get("voice") or DEFAULT_VOICE).strip()
     known = speakers()
     if voice not in known:
-        # 面板里可能填的是中文描述，或者上一次用别的引擎留下的音色名
-        voice = next((k for k, v in known.items() if voice in v), "Serena")
+        # 面板里可能填的是首字母大写、中文描述，或别的引擎遗留的音色名
+        low = voice.lower()
+        voice = (next((k for k in known if k.lower() == low), "")
+                 or next((k for k, v in known.items() if voice in v), "")
+                 or (DEFAULT_VOICE if DEFAULT_VOICE in known else next(iter(known), DEFAULT_VOICE)))
     language = str(body.get("language") or "").strip() or guess_language(text)
     instruct = str(body.get("instruct") or "").strip()
     if language not in LANGUAGES:
