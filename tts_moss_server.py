@@ -10,10 +10,17 @@ Nano 官方的 `moss-tts-nano serve` 是给浏览器 demo 用的 FastAPI，端�
 不需要 torch —— 见下面 _load_reference_numpy 的说明）：
     .\\miniconda3\\envs\\moss-nano\\python.exe tts_moss_server.py --port 8892 --preload
 
+音色（1.12.1 起）：
+    Nano 的 ONNX 权重里自带 18 把官方内置音色（manifest 的 builtin_voices，
+    参考音频已预编码成 prompt_audio_codes），传 voice 名字即可切换，不额外耗时的
+    参考音频编码；中文 6 把里有「说书」「深夜电台」这类专为长篇朗读准备的声线。
+    另外扫描 assets/voices/*.wav，用户丢一段 3~15 秒真人录音进去就是一把新音色。
+
 环境变量：
-    MOSS_NANO_DIR  Nano 仓库目录（默认项目同级的 moss-tts-nano）
-    MOSS_REF        参考音频 wav（默认 assets/reference_zh.wav）
-    MOSS_THREADS    onnxruntime 线程数（默认 4）
+    MOSS_NANO_DIR      Nano 仓库目录（默认项目同级的 moss-tts-nano）
+    MOSS_VOICES_DIR    自定义参考音频目录（默认 assets/voices）
+    MOSS_DEFAULT_VOICE 默认音色 id（默认 Lingyu · 深夜电台）
+    MOSS_THREADS       onnxruntime 线程数（默认 4）
 """
 from __future__ import annotations
 
@@ -35,7 +42,8 @@ from flask import Flask, Response, jsonify, request
 
 BASE = Path(__file__).resolve().parent
 NANO_DIR = Path(os.environ.get("MOSS_NANO_DIR") or (BASE.parent / "moss-tts-nano")).resolve()
-REF = Path(os.environ.get("MOSS_REF") or (BASE / "assets" / "reference_zh.wav")).resolve()
+VOICES_DIR = Path(os.environ.get("MOSS_VOICES_DIR") or (BASE / "assets" / "voices")).resolve()
+LEGACY_REF = (BASE / "assets" / "reference_zh.wav").resolve()
 THREADS = int(os.environ.get("MOSS_THREADS") or 4)
 # 本机的 CUDA 12 DLL 由 cosyvoice 环境的 torch 自带（没装独立 CUDA Toolkit）。
 # ONNX Runtime 的 CUDA provider 要能 LoadLibrary 到它们，PATH 与 add_dll_directory
@@ -49,8 +57,72 @@ if CUDA_DLL.is_dir():
     except (AttributeError, OSError):
         pass
 MODEL = "MOSS-TTS-Nano-100M-ONNX"
-VOICE = "readaloud-zh"          # 用现有女声生成的 7.5 秒参考音频克隆出来的音色
+# 中文 6 把里「深夜电台」最贴长篇听书，且延续原来的女声（不擅自换成男声）。
+DEFAULT_VOICE = (os.environ.get("MOSS_DEFAULT_VOICE") or "Lingyu").strip()
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+_GROUP_CN = {"Chinese Male": "中文男声", "Chinese Female": "中文女声",
+             "English Male": "英文男声", "English Female": "英文女声",
+             "Japanese Female": "日文女声", "Japanese Male": "日文男声"}
+
+
+def _catalog() -> list[dict]:
+    """官方内置音色 + 旧版兼容音色 + 用户自建的克隆音色。"""
+    rows: list[dict] = []
+
+    # 1) 官方内置：manifest 里的 prompt_audio_codes 是预编码好的，选它不用每句
+    #    重跑 codec_encode（实测省约 1.2s/句），音色也比二次生成的克隆干净。
+    for mf in sorted((NANO_DIR / "models").glob("**/browser_poc_manifest.json")):
+        try:
+            data = json.loads(mf.read_text(encoding="utf-8"))
+        except Exception:                                           # noqa: BLE001
+            continue
+        for v in data.get("builtin_voices") or []:
+            vid = str(v.get("voice") or "").strip()
+            if not vid or any(r["id"] == vid for r in rows):
+                continue
+            disp = str(v.get("display_name") or vid)
+            tag = disp.split(" ", 1)[-1] if disp[:3] in ("CN ", "EN ", "JP ") else disp
+            group = str(v.get("group") or "")
+            rows.append({"id": vid, "group": group, "ref": None, "builtin": True,
+                         "name": f"{tag} · {_GROUP_CN.get(group, group or '其他')}（{vid}）"})
+        if rows:
+            break
+
+    # 2) 1.12.0 的老配置仍写 readaloud-zh，留一把兼容音色免得切过来报错。
+    if LEGACY_REF.is_file():
+        rows.append({"id": "readaloud-zh", "group": "自定义", "ref": LEGACY_REF,
+                     "builtin": False, "name": "ReadAloud 女声 · 旧版克隆"})
+
+    # 3) 自定义：往 assets/voices/ 丢 3~15 秒干净人声 wav，刷新服务即多一把音色。
+    #    空目录不进 git，服务起来时顺手建好，用户不用自己 mkdir。
+    try:
+        VOICES_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    if VOICES_DIR.is_dir():
+        for w in sorted(VOICES_DIR.glob("*.wav")):
+            rows.append({"id": "ref:" + w.stem, "group": "自定义", "ref": w,
+                         "builtin": False, "name": f"自定义 · {w.stem}"})
+    return rows
+
+
+CATALOG = _catalog()
+
+
+def _resolve_voice(vid: str) -> dict:
+    """未知/已删除的音色静默回退默认，别让整本书因为一个旧配置停在那句。"""
+    want = str(vid or "").strip().lower()
+    if want:
+        for row in CATALOG:
+            if row["id"].lower() == want:
+                return row
+        log.warning("未知音色 %s，回退默认", vid)
+    for row in CATALOG:
+        if row["id"].lower() == DEFAULT_VOICE.lower():
+            return row
+    return CATALOG[0] if CATALOG else {"id": "", "name": "", "ref": None,
+                                       "builtin": True, "group": ""}
 
 sys.path.insert(0, str(NANO_DIR))
 
@@ -147,8 +219,10 @@ def _runtime_get():
         t0 = time.time()
         _state.update(loading=True, error="")
         try:
-            if not REF.is_file():
-                raise FileNotFoundError(f"找不到参考音频：{REF}")
+            if not CATALOG:
+                raise FileNotFoundError(
+                    f"没有可用音色：既没读到 Nano manifest 内置音色（{NANO_DIR}/models），"
+                    f"也找不到参考音频（{LEGACY_REF} 或 {VOICES_DIR}/*.wav）")
             provider = _pick_provider()
             try:
                 _runtime = _make_runtime(provider)
@@ -161,8 +235,9 @@ def _runtime_get():
             _state.update(provider=provider,
                           backend="onnx-cuda" if provider == "cuda" else "onnx-cpu",
                           load_seconds=round(time.time() - t0, 1))
-            log.info("Nano ONNX 就绪：%s，用时 %.1fs，参考音频 %s",
-                     _state["backend"], _state["load_seconds"], REF)
+            log.info("Nano ONNX 就绪：%s，用时 %.1fs，共 %d 把音色（默认 %s）",
+                     _state["backend"], _state["load_seconds"], len(CATALOG),
+                     DEFAULT_VOICE)
         except BaseException as e:                              # noqa: BLE001
             _state["error"] = f"{type(e).__name__}: {e}"
             log.exception("Nano 模型加载失败")
@@ -241,7 +316,10 @@ def health():
                     "loading": bool(_state["loading"]), "error": _state["error"],
                     "ready": _runtime is not None, "load_seconds": _state["load_seconds"],
                     "done": _state["done"], "backend": _state["backend"] or "onnx-auto",
-                    "provider": _state["provider"], "voices": [VOICE]})
+                    "provider": _state["provider"], "default_voice": DEFAULT_VOICE,
+                    "voices": [r["id"] for r in CATALOG],
+                    "voice_detail": [{k: r[k] for k in ("id", "name", "group", "builtin")}
+                                     for r in CATALOG]})
 
 
 @app.get("/v1/models")
@@ -253,7 +331,9 @@ def models():
 @app.get("/v1/voices")
 @app.get("/v1/audio/voices")
 def voices():
-    return jsonify({"voices": [{"id": VOICE, "name": "ReadAloud 中文女声（克隆）"}]})
+    return jsonify({"voices": [{"id": r["id"], "name": r["name"],
+                                "group": r["group"], "builtin": r["builtin"]}
+                               for r in CATALOG]})
 
 
 @app.post("/warmup")
@@ -284,13 +364,20 @@ def speech():
     if rt is None:
         return jsonify({"ok": False, "error": f"模型没加载好：{_state['error']}"}), 500
 
+    row = _resolve_voice(str(body.get("voice") or ""))
+    if row["builtin"]:
+        # 官方内置：传名字，runtime 直接用 manifest 里预编码好的 prompt codes
+        clone = {"voice": row["id"], "prompt_audio_path": None}
+    else:
+        # 自定义克隆：runtime 现场编码参考音频（按路径缓存，一句只编一次）
+        clone = {"voice": None, "prompt_audio_path": str(row["ref"])}
+
     t0 = time.time()
     try:
         with _synth_lock:
             result = rt.synthesize(
                 text=text,
-                voice=None,
-                prompt_audio_path=str(REF),
+                **clone,
                 sample_mode="fixed",
                 do_sample=True,
                 streaming=False,              # 实测比流式解码快 ~1.8 倍
@@ -302,8 +389,8 @@ def speech():
         wav = _wav_bytes(result["waveform"], int(result["sample_rate"]))
         data, mime = _convert(wav, fmt, speed)
         _state["done"] += 1
-        log.info("合成 %d 字 %.1fs → %d KB（%s）", len(text), time.time() - t0,
-                 len(data) // 1024, mime)
+        log.info("合成 %d 字 %.1fs → %d KB（%s，音色 %s）", len(text),
+                 time.time() - t0, len(data) // 1024, mime, row["id"])
         return Response(data, mimetype=mime)
     except Exception as e:                                      # noqa: BLE001
         log.exception("合成失败")

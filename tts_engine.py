@@ -87,7 +87,7 @@ def probe(url: str, key: str = "", timeout: float = 3.0) -> dict:
     """
     base = normalize_base(url)                     # 地址不合法直接抛，调用方转 400
     report = {"ok": False, "base": base, "models": [], "voices": [],
-              "engine": "", "error": ""}
+              "voice_labels": {}, "engine": "", "error": ""}
 
     def _get(path: str):
         try:
@@ -131,13 +131,18 @@ def probe(url: str, key: str = "", timeout: float = 3.0) -> dict:
         except ValueError:
             continue
         rows = payload.get("voices") if isinstance(payload, dict) else payload
-        names = []
+        names, labels = [], {}
         for row in rows or []:
             if isinstance(row, str):
                 names.append(row)
             elif isinstance(row, dict):
-                names.append(str(row.get("id") or row.get("name") or row.get("voice") or ""))
+                vid = str(row.get("id") or row.get("name") or row.get("voice") or "")
+                names.append(vid)
+                label = str(row.get("name") or "")
+                if vid and label and label != vid:
+                    labels[vid] = label
         report["voices"] = [n for n in names if n][:200]
+        report["voice_labels"] = labels
         report["ok"] = True
         break
 

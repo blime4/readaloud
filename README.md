@@ -109,12 +109,37 @@
 | 引擎 | 实测 RTF | 显存 | 输出 | 音色 |
 |---|---|---|---|---|
 | CosyVoice2-0.5B | 0.52 | ~6GB | 24kHz 单声道 | 内置参考音频「默认女声」 |
-| MOSS-TTS-Nano（CUDA） | 0.47 | ~1GB | 48kHz 立体声 | 由现有女声生成的 7.5 秒参考音频克隆 |
+| MOSS-TTS-Nano（CUDA） | 0.47 | ~1GB | 48kHz 立体声 | 官方内置 18 把 + 自定义 wav 克隆 |
 | MOSS-TTS-Nano（纯 CPU 回退） | 2.3 | 0 | 48kHz 立体声 | 同上 |
 
 RTF 用 `/api/tts/bench` 在同一台 4060 Ti 上量；数值随句子长度、显卡频率浮动，
 **< 1 才跟得上播放**。Nano 的 CPU 回退只在不具备 CUDA 环境时才走，那时建议
 只用「试听」或整本预合成，不要边听边备。
+
+### MOSS-Nano 的音色切换（1.12.1）
+
+MOSS-TTS-Nano **没有官方「预设音色」接口，但 ONNX 权重的
+`browser_poc_manifest.json` 里自带 18 把预编码内置音色** —— 每把都是一段真人
+参考音频预先编码好的 `prompt_audio_codes`，点名就能用，不必每句再跑一次音频编码
+（实测省约 1.2s/句）。中文 6 把最贴听书：
+
+| id | 声线 | 特点 | 单句实测 RTF |
+|---|---|---|---|
+| `Weiguo` | 说书 · 男声 | 节奏稳、适合长篇 | 1.08 |
+| `Lingyu` | 深夜电台 · 女声 | 默认，延续原来的女声 | 0.91 |
+| `Zhiming` | 京味胡同闲聊 · 男声 | 口语感强、最快之一 | 0.57 |
+| `Xiaoyu` | 明星 · 女声 | 明亮 | 0.93 |
+| `Yuewen` | 机车 · 女声 | 干脆、最快之一 | 0.60 |
+| `Junhao` | 欢迎播报 · 男声 | 播报腔 | 1.22 |
+
+其余 12 把是英文/日文声线。设置 → 音色下拉里直接挑、点「试听」逐把对比。
+换音色时前端会同步给引擎（`/api/tts/voice`），所以**试听、后台预合成、手机端
+用的是同一把声音**；音频缓存键本来就带 voice，换音色自动另起一份、不会串音，
+但整本书需要重新备一次。
+
+自定义音色：把 3~15 秒干净人声 wav 放进 `assets/voices/`，重启 8892 服务后会以
+`ref:<文件名>` 出现。1.12.0 那把用 CosyVoice 二次生成的克隆保留为
+`readaloud-zh`，仅供兼容旧配置，音质不如官方内置音色。
 
 ### 后台预合成全文（1.7.0 引入，1.10.0 重做，1.11.4 改为可边播边备）
 
@@ -414,16 +439,21 @@ RTF 也远大于 1），所以第二引擎选的是 **MOSS-TTS-Nano 0.1B 的 ONN
 4. 把 `OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX` 与
    `MOSS-Audio-Tokenizer-Nano-ONNX` 两个仓库的文件下到
    `../moss-tts-nano/models/<同名目录>/`（国内可走 hf-mirror；大文件用代理更快）。
-5. 参考音频 `assets/reference_zh.wav`：让 CosyVoice 的「默认女声」读 7.5 秒中文，
-   ffmpeg 转成 48kHz 立体声。换音色只要换这个文件（或改 `MOSS_REF`）。
+5. **不用另备参考音频**：第 4 步下下来的 `browser_poc_manifest.json` 里已经带
+   18 把官方内置音色（预编码 prompt codes），点名即用。可选：把 3~15 秒干净人声
+   wav 放进 `assets/voices/` 加自定义克隆音色；`assets/reference_zh.wav` 是 1.12.0
+   留下的兼容音色，音色不佳，不建议当默认。
 6. 面板点「MOSS-Nano · ONNX」即自动拉起 `tts_moss_server.py`（端口 8892）；
    也可以手动跑 `moss-nano/python.exe tts_moss_server.py --port 8892 --preload`。
+   环境变量：`MOSS_NANO_DIR`、`MOSS_VOICES_DIR`、`MOSS_DEFAULT_VOICE`（默认
+   `Lingyu`）、`MOSS_THREADS`、`MOSS_EXEC_PROVIDER`。
 
 CUDA 后端：`onnxruntime-gpu 1.20.0` 要 CUDA 12 + cuDNN 9 的 DLL，本机没有独立
 CUDA Toolkit，用的是 cosyvoice 环境里 torch 自带的那些。启动时会把
 `torch/lib` 同时加进 `PATH` 和 `os.add_dll_directory`（只给一个会报 126），
 CUDA 起不来则自动回退 CPU。适配层实测最优参数：`thread_count=4`、
-`sample_mode=fixed`、`streaming=False`、参考音频 codes 缓存；
+`sample_mode=fixed`、`streaming=False`、自定义参考音频 codes 按路径缓存
+（官方内置音色连这一步都省了）；
 `threads=8` 和 `greedy` 都更慢（后者还会莫名生成满 30 秒音频）。
 
 ## 边听边问（MiniCPM-o 4.5）
@@ -542,7 +572,8 @@ AI 功能额外需要 [Ollama](https://ollama.com)；没有也能正常朗读，
 | `POST /api/books/<id>/progress` | 写进度 `{next,total}`（允许倒退），页面关闭时用 sendBeacon 兜底 |
 | `DELETE /api/books/<id>` | 从书架删掉一本书（正文一起删） |
 | `GET\|POST /api/tts/providers` | 语音引擎：查询/切换 `edge` 与 `local`，POST 带 `probe:true` 会探测本地 TTS 并返回模型与音色表 |
-| `GET\|POST /api/tts/engines` | 两套本机引擎：列出当前/是否启动/缺什么；POST `{engine:"cosy"\|"moss"}` 一键切换地址、模型、音色与启动脚本，并按需拉起服务（1.12.0） |
+| `GET\|POST /api/tts/engines` | 两套本机引擎：列出当前/是否启动/缺什么；GET 对 moss 额外返回官方音色目录 `voices`；POST `{engine:"cosy"\|"moss"}` 一键切换地址、模型、音色与启动脚本，并按需拉起服务（1.12.0） |
+| `POST /api/tts/voice` | 切换音色并同步给引擎 `{voice:"Weiguo"}`：让试听、后台预合成、其他设备用同一把声音（1.12.1） |
 | `POST /api/tts/local/start` | 一键拉起本机大模型 TTS：按脚本挑解释器（cosy→conda env，qwen→`.tts-venv`），状态机立即返回，就绪看下面的 status |
 | `GET /api/tts/local/status` | 本地 TTS 状态：`up`/`probe`（引擎名、模型、音色）/`starting`/`python`/`script`，以及 `config`（已自动写回的地址与音色）和 `log`（没起来时的 `tts.log` 尾巴） |
 | `GET /api/version` · `POST /api/restart` | 引擎版本与能力清单 / 原地热重启（进程号不变，先确认新代码能编译再关旧监听） |

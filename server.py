@@ -133,7 +133,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.12.0"
+ENGINE_VERSION = "1.12.1"
 
 # --------------------------------------------------------------------------
 # 本机引擎注册表：两套 TTS 都能用同一个 /v1/audio/speech 约定，切换只改配置
@@ -147,17 +147,20 @@ def _engine_profile(eid: str) -> dict:
     cosy_py = Path.home() / "miniconda3" / "envs" / "cosyvoice" / "python.exe"
     if eid == "moss":
         nano = (Path(os.environ.get("MOSS_NANO_DIR") or (BASE.parent / "moss-tts-nano"))).resolve()
-        ref = (BASE / "assets" / "reference_zh.wav").resolve()
+        voices_dir = (BASE / "assets" / "voices").resolve()
         return {
             "id": "moss", "label": "MOSS-TTS-Nano · ONNX",
-            "note": "0.1B / 48kHz 立体声，音色由参考音频克隆；CUDA 可用时 RTF≈0.9，"
+            "note": "0.1B / 48kHz 立体声，官方内置 18 把音色（中文 6 把，含「说书」"
+                    "「深夜电台」），也可放 wav 自定义克隆；CUDA 可用时 RTF≈0.9，"
                     "自动回退 CPU（RTF≈2.3）。",
             "url": "http://127.0.0.1:8892", "model": "MOSS-TTS-Nano-100M-ONNX",
-            "voice": "readaloud-zh", "script": "tts_moss_server.py",
+            # 深夜电台是女声、专为长篇朗读准备，比 1.12.0 那把二次克隆干净
+            "voice": "Lingyu", "script": "tts_moss_server.py",
             "python": str(moss_py) if moss_py.exists() else "",
             "args": "--preload",
-            "env": f"MOSS_NANO_DIR={nano};MOSS_REF={ref}",
-            "nano_dir": str(nano), "ref": str(ref),
+            "env": f"MOSS_NANO_DIR={nano};MOSS_VOICES_DIR={voices_dir};"
+                   f"MOSS_DEFAULT_VOICE=Lingyu",
+            "nano_dir": str(nano), "voices_dir": str(voices_dir),
         }
     return {
         "id": "cosy", "label": "CosyVoice2 · GPU",
@@ -171,6 +174,39 @@ def _engine_profile(eid: str) -> dict:
 
 
 LOCAL_ENGINES = ("cosy", "moss")
+
+
+def _moss_manifest(nano_dir) -> Path | None:
+    """Nano 的 ONNX 权重清单，里面带官方 18 把预编码内置音色。"""
+    try:
+        return next((Path(nano_dir) / "models").glob("**/browser_poc_manifest.json"))
+    except (StopIteration, OSError):
+        return None
+
+
+def _moss_voice_catalog(nano_dir) -> list[dict]:
+    """主引擎不依赖 8892 是否启动，也能把可选音色列给前端。"""
+    mf = _moss_manifest(nano_dir)
+    if not mf:
+        return []
+    try:
+        data = json.loads(mf.read_text(encoding="utf-8"))
+    except Exception:                                            # noqa: BLE001
+        return []
+    group_cn = {"Chinese Male": "中文男声", "Chinese Female": "中文女声",
+                "English Male": "英文男声", "English Female": "英文女声",
+                "Japanese Female": "日文女声"}
+    rows = []
+    for v in data.get("builtin_voices") or []:
+        vid = str(v.get("voice") or "").strip()
+        if not vid:
+            continue
+        disp = str(v.get("display_name") or vid)
+        tag = disp.split(" ", 1)[-1] if disp[:3] in ("CN ", "EN ", "JP ") else disp
+        group = str(v.get("group") or "")
+        rows.append({"id": vid, "group": group,
+                     "name": f"{tag} · {group_cn.get(group, group or '其他')}（{vid}）"})
+    return rows
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -199,6 +235,7 @@ FEATURES = [
     "tts-bench",            # /api/tts/bench：量本机合成的 RTF，判断能不能跟上播放
     "tts-autostart",        # /api/tts/local：一键拉起本机大模型 TTS 并自动写回配置
     "tts-engine-switch",    # /api/tts/engines：CosyVoice2(GPU) / MOSS-TTS-Nano(CPU) 一键切换
+    "moss-voices",          # MOSS-Nano 官方内置 18 把音色 + 自定义 wav 克隆，可逐把切换
     "engine-upgrade",       # /api/restart + /api/update：原地热重启、git pull 自升级
 ]
 
@@ -3032,16 +3069,17 @@ def api_tts_engines():
                 missing.append("moss-nano Python 环境")
             if not (BASE / p["script"]).exists():
                 missing.append("tts_moss_server.py")
-            if not Path(p["ref"]).exists():
-                missing.append("参考音频 assets/reference_zh.wav")
-            if not (Path(p["nano_dir"]) / "models" / "browser_poc_manifest.json").exists() \
-               and not (Path(p["nano_dir"]) / "models" / "MOSS-TTS-Nano-100M-ONNX"
-                        / "browser_poc_manifest.json").exists():
-                missing.append("Nano ONNX 权重")
-        rows.append({"id": eid, "label": p["label"], "note": p["note"],
-                     "url": p["url"], "up": up, "missing": missing,
-                     "ready": up or not missing})
-    return jsonify({"ok": True, "current": cur, "engines": rows})
+            if not _moss_manifest(p["nano_dir"]):
+                missing.append("Nano ONNX 权重（含内置音色清单）")
+        row = {"id": eid, "label": p["label"], "note": p["note"],
+               "url": p["url"], "up": up, "missing": missing,
+               "ready": up or not missing}
+        if eid == "moss":
+            row["voices"] = _moss_voice_catalog(p["nano_dir"])
+            row["default_voice"] = p["voice"]
+        rows.append(row)
+    return jsonify({"ok": True, "current": cur,
+                    "voice": CFG.get("tts_local_voice") or "", "engines": rows})
 
 
 @app.post("/api/tts/engines")
@@ -3056,18 +3094,17 @@ def api_tts_engines_switch():
         absent = []
         if not p["python"]:
             absent.append("moss-nano Python 环境（conda create -n moss-nano python=3.12）")
-        if not Path(p["ref"]).exists():
-            absent.append("参考音频 assets/reference_zh.wav")
-        nano_models = Path(p["nano_dir"]) / "models"
-        if not list(nano_models.glob("**/browser_poc_manifest.json")):
-            absent.append("Nano ONNX 权重（models/）")
+        if not _moss_manifest(p["nano_dir"]):
+            absent.append("Nano ONNX 权重（models/ 里的 browser_poc_manifest.json）")
         if absent:
             return jsonify({"ok": False, "error": "MOSS-TTS-Nano 还没装好：" + "、".join(absent),
                             "missing": absent}), 409
+    # 切走再切回来时记住上次挑的 MOSS 音色（cosy 的音色体系与它不相通）
+    voice = (CFG.get("moss_voice") or p["voice"]) if eid == "moss" else p["voice"]
     CFG.update({
         "tts_engine": eid, "tts_provider": "local",
         "tts_local_url": p["url"], "tts_local_model": p["model"],
-        "tts_local_voice": p["voice"],
+        "tts_local_voice": voice,
         # CosyVoice 靠 8891 端口就能自动猜到脚本/解释器；只有 Nano 的
         # moss-nano 环境必须显式写，否则会被猜成 cosyvoice 环境。
         "tts_local_script": "" if eid == "cosy" else p["script"],
@@ -3087,6 +3124,25 @@ def api_tts_engines_switch():
                     "msg": "切到 " + p["label"] + ("（正在启动…）" if started else "（已就绪）")})
 
 
+@app.post("/api/tts/voice")
+def api_tts_voice_set():
+    """前端换音色时同步给引擎。
+
+    只写 localStorage 的话，服务端发起的预合成和另一台设备还会用旧音色，
+    会出现「试听是说书、整本备成了别的声音」。缓存键本来就带 voice，
+    换音色自动另起一份，不会串音。
+    """
+    body = request.get_json(silent=True) or {}
+    voice = str(body.get("voice") or "").strip()
+    if not voice or len(voice) > 120:
+        return jsonify({"ok": False, "error": "音色名不合法"}), 400
+    CFG["tts_local_voice"] = voice
+    if (CFG.get("tts_engine") or "cosy") == "moss":
+        CFG["moss_voice"] = voice
+    save_config(CFG)
+    return jsonify({"ok": True, "voice": voice})
+
+
 @app.get("/api/tts/providers")
 def api_tts_providers():
     """面板要显示"有哪些引擎、现在用哪个、本地那个通不通"。"""
@@ -3101,6 +3157,7 @@ def api_tts_providers():
             "voice": CFG.get("tts_local_voice") or "",
             "has_key": bool(CFG.get("tts_local_key")),
             "format": CFG.get("tts_local_format") or "mp3",
+            "voice_labels": local.get("voice_labels") or {},
             **{k: local.get(k) for k in ("ok", "error", "models", "voices", "base", "engine")},
         },
     })
