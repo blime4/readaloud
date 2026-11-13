@@ -497,6 +497,21 @@
   ::-webkit-scrollbar-thumb:hover{background:var(--btn-bd);background-clip:content-box}
   ::selection{background:var(--accent-soft); color:var(--txt)}
 
+  /* ---------- 对话模式（Haru-4B 打电话）：全屏内嵌通话界面 ---------- */
+  .talkwrap{
+    position:fixed; inset:0; z-index:110;
+    background:var(--bg-canvas);
+    display:flex; flex-direction:column;
+  }
+  .talkwrap[hidden]{display:none}
+  .talkbar{
+    display:flex; align-items:center; gap:10px;
+    padding:9px 14px; border-bottom:1px solid var(--line);
+    font-family:var(--mono); font-size:12px;
+  }
+  .talkbar .t{color:var(--txt-2); letter-spacing:.04em}
+  #talkFrame{flex:1; border:0; width:100%; background:var(--bg-canvas)}
+
   /* ---------- 继续听横幅 / 二维码 / 目录 ---------- */
   .resumebar{display:flex;align-items:center;gap:10px;margin:10px 16px 0;padding:9px 12px;
     border:1px solid var(--accent);border-radius:10px;background:var(--accent-soft);
@@ -1010,6 +1025,12 @@
         <span class="hint" id="engMsg" style="flex:1;min-width:0"></span>
       </div>
       <div class="hint" id="engVoiceHint" style="margin:0 0 6px"></div>
+      <div class="row" style="border:0;padding:0 0 8px;gap:8px">
+        <label style="width:44px">对话</label>
+        <button class="tiny" id="btnTalk" title="Haru-4B 全双工语音对话：听与说并行、可随时插话，像打电话。占约 13GB 显存，启动会自动停本机 TTS；停止后点「一键启动本机 TTS」恢复听书">📞 对话模式 · Haru-4B</button>
+        <button class="ghost tiny" id="btnTalkStop" hidden title="停掉对话模式释放显存">■ 停止</button>
+        <span class="hint" id="talkMsg" style="flex:1;min-width:0"></span>
+      </div>
       <div class="cactions" style="padding:6px 0 8px;gap:8px">
         <button class="primary tiny" id="btnTtsStart" title="引擎会自己挑选环境并拉起本机 TTS 服务">▶ 一键启动本机 TTS</button>
         <button class="ghost tiny" id="btnPresetCosy" title="填入 CosyVoice2 的默认地址与音色">CosyVoice2 预设</button>
@@ -1281,6 +1302,16 @@
   </aside>
 </div>
 
+<div class="talkwrap" id="talkWrap" hidden>
+  <div class="talkbar">
+    <span class="t">📞 Haru-4B · 全双工对话</span>
+    <span class="hint" id="talkState">戴上耳机再通话（避免回声）；想插话直接说。</span>
+    <span style="flex:1"></span>
+    <button class="ghost tiny" id="btnTalkOpen" title="浏览器没弹麦克风权限时，在新标签页打开">↗ 新窗口</button>
+    <button class="ghost tiny" id="btnTalkClose">✕ 收起</button>
+  </div>
+  <iframe id="talkFrame" title="Haru 对话界面" allow="microphone; autoplay"></iframe>
+</div>
 <div class="toast" id="toast"></div>
 <div class="overlay" id="overlay"><div class="box"><div class="spin"></div><span id="ovText">AI 正在处理…</span>
   <div class="sbar"><i id="ovBar"></i></div>
@@ -1688,8 +1719,8 @@ async function loadHealth() {
 const REQUIRED_FEATURES = ['structured-items', 'prosody-normalize', 'local-document-import',
   'bookshelf', 'tts-provider', 'presynth-hold', 'presynth-resume', 'remote-audio',
   'task-monitor', 'task-stop', 'tts-engine-switch', 'moss-voices', 'qwen3-tts',
-  'markdown-readaloud', 'en-semantic-split', 'pdf-text-cleanup'];
-const MIN_ENGINE = '1.13.2';    // 页面用到的引擎能力下限，升一次改一次
+  'markdown-readaloud', 'en-semantic-split', 'pdf-text-cleanup', 'haru-talk-mode'];
+const MIN_ENGINE = '1.13.3';    // 页面用到的引擎能力下限，升一次改一次
 
 function cmpVer(a, b) {
   const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
@@ -1820,6 +1851,7 @@ async function loadTts() {
     // "连不上 / 没有音色 / 试听失败"再去找按钮（以前就是这三条报错一起出现）。
     if (TTS_PROVIDER === 'local' && d.local && !d.local.ok && ONLINE) maybeAutoStartTts();
     loadEngines();                 // 两套本机引擎的按钮状态（旧引擎无此接口时静默跳过）
+    talkStatus();                  // 对话模式（Haru-4B）的安装/运行状态
   } catch (e) { /* 引擎老版本没有这个接口，按 edge 走 */ }
 }
 
@@ -1881,6 +1913,71 @@ async function switchEngine(id) {
 $('#btnEngCosy').onclick = () => switchEngine('cosy');
 $('#btnEngMoss').onclick = () => switchEngine('moss');
 $('#btnEngQwen').onclick = () => switchEngine('qwen3');
+
+/* ---------- 对话模式（Haru-4B 打电话） ----------
+   全双工：听与说并行、可随时插话。显存与本机 TTS 互斥，两个方向都自动谦让：
+   启动对话先停 TTS，点「一键启动本机 TTS」会先停对话。通话界面由 Haru
+   自带的 Web 客户端提供（跨源 iframe，allow=microphone 授权麦克风）。 */
+const TALK = { starting: false, timer: null, url: '' };
+async function talkStatus() {
+  try {
+    const d = await (await fetch(signed(API + '/api/talk/status'))).json();
+    if (d.ok) TALK.url = d.url || TALK.url;
+    paintTalk(d);
+    return d;
+  } catch (e) { return { ok: false }; }
+}
+function paintTalk(d) {
+  const btn = $('#btnTalk'), stop = $('#btnTalkStop'), msg = $('#talkMsg');
+  if (!btn) return;
+  if (!d || !d.ok) { msg.textContent = '接口不可用（升级引擎后刷新）'; return; }
+  if (!d.installed) { btn.disabled = true; stop.hidden = true;
+    msg.textContent = '未装好：' + (d.missing || []).join('、'); return; }
+  btn.disabled = TALK.starting;
+  stop.hidden = !d.running;
+  if (d.ready) msg.textContent = '已就绪，点按钮进入通话';
+  else if (d.running) msg.textContent = '模型加载中…';
+  else if (d.installed) msg.textContent = '点按钮启动（约 20~40 秒，会先停听书引擎）';
+}
+async function talkStart() {
+  if (TALK.starting) return;
+  TALK.starting = true;
+  $('#btnTalk').disabled = true;
+  $('#talkMsg').textContent = '正在停听书引擎、加载 Haru-4B（约 20~40 秒）…';
+  try {
+    const d = await (await fetch(signed(API + '/api/talk/start'), { method: 'POST' })).json();
+    if (!d.ok) { $('#talkMsg').textContent = d.error || '启动失败'; TALK.starting = false; return; }
+    if (d.ready) { TALK.starting = false; openTalk(); return; }
+    const t0 = Date.now();
+    TALK.timer = setInterval(async () => {
+      const s = await talkStatus();
+      if (s.ready) { clearInterval(TALK.timer); TALK.starting = false; openTalk(); }
+      else if (Date.now() - t0 > 150000) {
+        clearInterval(TALK.timer); TALK.starting = false;
+        $('#talkMsg').textContent = '150 秒还没就绪，看看 Haru 目录的 talk.log';
+      }
+    }, 2500);
+  } catch (e) {
+    TALK.starting = false;
+    $('#talkMsg').textContent = '启动请求失败：' + e;
+  }
+}
+function openTalk() {
+  if (!TALK.url) return;
+  $('#talkWrap').hidden = false;
+  $('#talkFrame').src = TALK.url + '/?t=' + Date.now();
+  $('#talkState').textContent = '戴耳机再通话（避免回声）；想插话直接开口说。';
+}
+async function talkStop() {
+  try { await (await fetch(signed(API + '/api/talk/stop'), { method: 'POST' })).json(); } catch (e) {}
+  $('#talkWrap').hidden = true;
+  $('#talkFrame').src = 'about:blank';
+  talkStatus();
+}
+$('#btnTalk').onclick = talkStart;
+$('#btnTalkStop').onclick = talkStop;
+$('#btnTalkOpen').onclick = () => { if (TALK.url) window.open(TALK.url + '/?t=' + Date.now(), '_blank'); };
+$('#btnTalkClose').onclick = () => { $('#talkWrap').hidden = true; $('#talkFrame').src = 'about:blank'; };
 
 /* 本机 TTS 自动拉起：只对引擎自家默认地址（127.0.0.1:8891）生效 —— 用户配了
    别的 OpenAI 兼容服务时，擅自起我们这份 CosyVoice 反而是打扰。每次页面

@@ -133,7 +133,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.13.2"
+ENGINE_VERSION = "1.13.3"
 
 # --------------------------------------------------------------------------
 # 本机引擎注册表：两套 TTS 都能用同一个 /v1/audio/speech 约定，切换只改配置
@@ -275,6 +275,7 @@ FEATURES = [
     "markdown-readaloud",   # .md 导入 + 结构渲染 + 通勤/平衡/精读三档朗读稿
     "en-semantic-split",    # 英文按词折算长度 + 语义断点打分；英文段落不套中文读音规整
     "pdf-text-cleanup",     # 英文 PDF 断词/折行修复 + 英文章节目录 + 页码页眉噪音清除
+    "haru-talk-mode",       # /api/talk/*：Haru-4B 全双工对话（打电话），显存与 TTS 互斥自动调度
     "engine-upgrade",       # /api/restart + /api/update：原地热重启、git pull 自升级
 ]
 
@@ -2989,6 +2990,9 @@ def _gpu_apply_lock(elevate: bool = True) -> dict:
 
 def start_local_tts() -> dict:
     """后台拉起本机 TTS，立刻返回。真正就绪要看 /health（模型要加载十几秒）。"""
+    # 对话模式（Haru-4B）占 ~13GB 显存，与本机 TTS 互斥：听书优先，先停它
+    if _talk_stop_running():
+        log.info("本机 TTS 启动：Haru 对话模式占着显存，已先停掉")
     lock = None
     # Nano 是纯 CPU 引擎，别为了它去锁显卡频率（还可能弹一次 UAC）
     if (os.name == "nt" and CFG.get("gpu_clock_lock")
@@ -3271,6 +3275,143 @@ def api_tts_engines_switch():
     return jsonify({"ok": True, "engine": eid, "label": p["label"],
                     "probe": report, "started": started, "stopped": stopped,
                     "msg": "切到 " + p["label"] + tail})
+
+
+# ---------------------------------------------------------------- Haru-4B 对话模式
+# 全双工语音对话（"打电话"）：听和说并行、可随时插话，由外部项目 Haru-4B
+# 提供（Qwen3.5-4B 骨干 + MeanFlow 音频头，Apache-2.0）。它约占 13GB 显存，
+# 与三套本机 TTS 互斥 —— 所以两个方向都要自动谦让：
+#   · /api/talk/start   先停本机 TTS（只动 8890/8891/8892 约定端口）再拉 Haru
+#   · start_local_tts   先停 Haru（8998 约定端口）再拉 TTS
+# Haru 服务只绑 127.0.0.1，无鉴权也不出网；对话界面由其自带 Web 客户端提供。
+
+def _talk_cfg() -> dict:
+    hdir = Path(CFG.get("talk_haru_dir") or "")
+    port = int(CFG.get("talk_port") or 8998)
+    return {"dir": hdir,
+            "python": hdir / ".venv" / "Scripts" / "python.exe",
+            "model": hdir / "models" / "Haru-4B",
+            "port": port}
+
+
+def _talk_url(c: dict | None = None) -> str:
+    return f"http://127.0.0.1:{(c or _talk_cfg())['port']}"
+
+
+def _talk_installed() -> dict:
+    c = _talk_cfg()
+    missing = []
+    if not c["python"].is_file():
+        missing.append("Haru Python 环境（.venv）")
+    if not (c["model"] / "model.safetensors").is_file():
+        missing.append("Haru-4B 权重（models/Haru-4B）")
+    return {"ok": not missing, "missing": missing}
+
+
+def _talk_port_pids() -> list[str]:
+    """谁在 8998 上 LISTEN（约定端口，不碰用户自己的服务）。"""
+    port = _talk_cfg()["port"]
+    pids = []
+    try:
+        out = subprocess.run(["netstat", "-ano", "-p", "TCP"], capture_output=True,
+                             text=True, timeout=15, creationflags=NO_WINDOW).stdout
+    except Exception:                                            # noqa: BLE001
+        return pids
+    for line in (out or "").splitlines():
+        cols = line.split()
+        if len(cols) < 5 or cols[3].upper() != "LISTENING":
+            continue
+        try:
+            if int(cols[1].rsplit(":", 1)[1]) == port and cols[4].isdigit():
+                pids.append(cols[4])
+        except (ValueError, IndexError):
+            continue
+    return pids
+
+
+def _talk_ready() -> bool:
+    """模型载入完成才算就绪：/api/ready 由 Haru 服务在模型加载后置 true。"""
+    if not _talk_port_pids():
+        return False
+    try:
+        import urllib.request
+        with urllib.request.urlopen(_talk_url() + "/api/ready", timeout=1.5) as r:
+            return bool(json.loads(r.read().decode("utf-8")).get("ready"))
+    except Exception:                                            # noqa: BLE001
+        return False
+
+
+def _talk_stop_running() -> int:
+    """杀掉 8998 上的 Haru 进程释放显存，返回杀掉的进程数。"""
+    killed = 0
+    for pid in _talk_port_pids():
+        try:
+            subprocess.run(["taskkill", "/PID", pid, "/F", "/T"],
+                           capture_output=True, timeout=10, creationflags=NO_WINDOW)
+            killed += 1
+            log.info("停掉 Haru 对话模式（pid %s）释放显存", pid)
+        except Exception as e:                                   # noqa: BLE001
+            log.warning("停掉 Haru 失败：%s", e)
+    return killed
+
+
+@app.get("/api/talk/status")
+def api_talk_status():
+    inst = _talk_installed()
+    ready = _talk_ready()
+    return jsonify({"ok": True,
+                    "installed": inst["ok"], "missing": inst["missing"],
+                    "running": ready or bool(_talk_port_pids()),
+                    "ready": ready, "url": _talk_url()})
+
+
+@app.post("/api/talk/start")
+def api_talk_start():
+    inst = _talk_installed()
+    if not inst["ok"]:
+        return jsonify({"ok": False, "missing": inst["missing"],
+                        "error": "Haru-4B 还没装好：" + "、".join(inst["missing"])}), 409
+    if _talk_ready():
+        return jsonify({"ok": True, "ready": True, "url": _talk_url(),
+                        "msg": "对话模式已经在跑了"})
+    c = _talk_cfg()
+    busy = _talk_port_pids()
+    if busy:                       # 在加载模型的半路上：别重复拉进程
+        return jsonify({"ok": True, "starting": True, "url": _talk_url(),
+                        "msg": "Haru-4B 正在加载模型…"})
+    stopped = _stop_other_tts(0)   # 释放显存（三套本机 TTS 全停）
+    try:
+        out = open(c["dir"] / "talk.log", "ab")
+        env = dict(os.environ)
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        # 用 venv 的 haru-server.exe 入口，不用 `python -m haru.server`：
+        # -m 会把 cwd 塞进 sys.path，Haru 根目录下的同名源码目录会被当成
+        # 命名空间包，importlib.resources 随即解析错 assets 路径直接崩。
+        exe = c["python"].parent / "haru-server.exe"
+        if exe.is_file():
+            cmd = [str(exe), "--model", str(c["model"]), "--language", "zh"]
+        else:                                   # 兜底：源码包没装 console 脚本
+            cmd = [str(c["python"]), "-m", "haru.server",
+                   "--model", str(c["model"]), "--language", "zh"]
+        subprocess.Popen(cmd, cwd=str(BASE), env=env,
+                         stdout=out, stderr=subprocess.STDOUT,
+                         stdin=subprocess.DEVNULL, creationflags=NO_WINDOW,
+                         close_fds=True)
+    except Exception as e:                                       # noqa: BLE001
+        log.error("拉起 Haru 失败: %s", e)
+        return jsonify({"ok": False, "error": f"启动失败：{e}"}), 500
+    msg = "正在加载 Haru-4B（约 20～40 秒）"
+    if stopped:
+        msg += f"，已停掉 {len(stopped)} 个本机 TTS 释放显存"
+    return jsonify({"ok": True, "starting": True, "url": _talk_url(),
+                    "stopped": stopped, "msg": msg})
+
+
+@app.post("/api/talk/stop")
+def api_talk_stop():
+    killed = _talk_stop_running()
+    return jsonify({"ok": True, "stopped": bool(killed),
+                    "msg": "已释放显存" if killed else "本来就没在跑"})
 
 
 @app.post("/api/tts/voice")

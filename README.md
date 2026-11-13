@@ -126,6 +126,29 @@ ONNX Runtime 会报 `CUBLAS_STATUS_NOT_INITIALIZED`、正在听的那套每句�
 所以切换时统一停掉旧服务释放显存，接口返回的 `stopped` 会列出被停掉的端口。
 需要三套并存做 A/B 时，自己手动起服务即可。
 
+
+### 对话模式：Haru-4B 全双工「打电话」（1.13.3）
+
+设置 →「语音引擎」→「对话」行，点 **📞 对话模式 · Haru-4B**：
+
+- **全双工**：听与说并行，不用等它念完，随时插话它会停下改答，你说到一半
+  它也不抢；用户说完接话延迟实测 0 帧，还会「嗯，」附和。
+- 启动流程全自动：先停三套本机 TTS 释放显存（~13GB 给 Haru），再拉起
+  Haru 服务（模型加载约 20～40 秒），就绪后工作台内嵌通话界面；浏览器会
+  弹麦克风权限，没弹就点「↗ 新窗口」打开。
+- **戴耳机**（最好是 wired）：外放会被麦克风收回去造成回声，蓝牙 +100ms。
+- 音色：通话界面里上传 3 秒～3 分钟干净人声即可克隆（书架里的
+  `assets/reference_zh.wav` 就是现成的参考音色）；角色卡决定人设。
+- 定位差异：它是**研究基座**，时机行为（接话/附和/打断）像人，但知识问答
+  明显弱于成品助手——听书还用 TTS 引擎，闲聊/陪伴才用它。点「■ 停止」
+  释放显存，再点「一键启动本机 TTS」恢复听书（反过来启动 TTS 也会自动停它）。
+
+装在哪：`config.json` 的 `talk_haru_dir` 指向 Haru 项目目录
+（含 `.venv/` 与 `models/Haru-4B/`），`talk_port` 默认 8998；只绑
+127.0.0.1，不出网、无鉴权也安全。实测 4060 Ti：平均 128ms/帧（预算
+133ms/帧，勉强实时），Windows 缺 flash-linear-attention 内核会略卡，
+偶尔掉帧属正常。
+
 ### MOSS-Nano 的音色切换（1.12.1）
 
 MOSS-TTS-Nano **没有官方「预设音色」接口，但 ONNX 权重的
@@ -699,6 +722,9 @@ AI 功能额外需要 [Ollama](https://ollama.com)；没有也能正常朗读，
 | `GET\|POST /api/tts/providers` | 语音引擎：查询/切换 `edge` 与 `local`，POST 带 `probe:true` 会探测本地 TTS 并返回模型与音色表 |
 | `GET\|POST /api/tts/engines` | 三套本机引擎：列出当前/是否启动/缺什么；GET 对 moss、qwen3 返回各自音色目录 `voices`；POST `{engine:"cosy"\|"moss"\|"qwen3"}` 一键切换地址、模型、音色与启动脚本，并按需拉起服务（1.12.0 / 1.12.2） |
 | `POST /api/tts/voice` | 切换音色并同步给引擎 `{voice:"Weiguo"}`：让试听、后台预合成、其他设备用同一把声音；按当前引擎记在 `cosy_voice`/`moss_voice`/`qwen3_voice`，切回来不串音（1.12.1 / 1.12.2） |
+| `GET /api/talk/status` | 对话模式（Haru-4B）状态：`installed`/`missing`/`running`/`ready`/`url`（1.13.3） |
+| `POST /api/talk/start` | 启动对话模式：先停三套本机 TTS 释放显存（约定端口 8890/8891/8892），再子进程拉起 haru-server（8998，只绑 127.0.0.1）；就绪看 `GET /api/ready`（1.13.3） |
+| `POST /api/talk/stop` | 停掉对话模式释放显存；反向互斥：`/api/tts/local/start` 启动时也会自动停它（1.13.3） |
 | `POST /api/tts/local/start` | 一键拉起本机大模型 TTS：按脚本挑解释器（cosy→conda env，qwen→`.tts-venv`），状态机立即返回，就绪看下面的 status |
 | `GET /api/tts/local/status` | 本地 TTS 状态：`up`/`probe`（引擎名、模型、音色）/`starting`/`python`/`script`，以及 `config`（已自动写回的地址与音色）和 `log`（没起来时的 `tts.log` 尾巴） |
 | `GET /api/version` · `POST /api/restart` | 引擎版本与能力清单 / 原地热重启（进程号不变，先确认新代码能编译再关旧监听） |
