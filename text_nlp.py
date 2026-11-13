@@ -122,6 +122,12 @@ RE_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 RE_WIKI_ALIAS = re.compile(r"\[\[[^\]|]*\|([^\]]*)\]\]")
 RE_WIKI = re.compile(r"\[\[([^\]]*)\]\]")
 RE_HTML_TAG = re.compile(r"</?[a-zA-Z][^<>]{0,80}>")
+# 技术文本里 <int> / <vector> / <T> 是模板参数，不是 HTML 标签。
+# 通用 RE_HTML_TAG 会把它们连内容一起删掉（max<int> 只剩 max），
+# 所以 tech 模式只认一份明确的 HTML 标签白名单。
+RE_HTML_TAG_STRICT = re.compile(
+    r"</?(?:br|p|div|span|code|pre|em|strong|a|img|ul|ol|li|table|thead|tbody|tr|td|th|"
+    r"h[1-6]|blockquote|hr|sup|sub|small|b|i|u|del|mark)\b[^<>]{0,80}>", re.I)
 RE_FOOTNOTE = re.compile(r"\[\^[^\]]*\]|\^\[[^\]]*\]")
 RE_CITE = re.compile(r"\[\d{1,3}(?:[,\-–]\s?\d{1,3})*\]")
 RE_HIGHLIGHT = re.compile(r"==([^=]+)==")
@@ -161,6 +167,11 @@ RE_SLASH_MIX = re.compile(r"(?<=[A-Za-z])/(?=\d)|(?<=\d)/(?=[A-Za-z])")
 RE_SYMBOLS = [("→", "到"), ("->", "到"), ("×", "乘"), ("≈", "约等于"),
               ("≥", "大于等于"), ("≤", "小于等于"), ("≠", "不等于"), ("±", "正负"),
               ("&", "和"), ("@", "艾特"), ("°", "度")]
+# 技术文本专用符号表：刻意不把 & / -> 翻成「和 / 到」——T& 是引用、-> 是退化/指向，
+# 全局替换会把讲 decay 的一整段念反。这些符号由 tech_inline() 按语境先转写好。
+TECH_SYMBOLS = [("→", "变为"), ("->", "变为"), ("×", "乘"), ("≈", "约等于"),
+                ("≥", "大于等于"), ("≤", "小于等于"), ("≠", "不等于"),
+                ("±", "正负"), ("@", "艾特"), ("°", "度")]
 RE_HASH_NUM = re.compile(r"#\s*(\d+)")
 RE_CN_PAREN = re.compile(r"[（(]\s*([^（()）]*?)\s*[)）]")
 RE_PLUS_SIGN = re.compile(r"(?<![\w\d.])\+\s*(?=[\d０-９]|百分之)")
@@ -178,6 +189,18 @@ DEFAULT_PRON = {
     "C#": "C 井",
     ".NET": "道耐特",
     "iOS": "iOS",
+}
+
+# 技术文档里的「念不出来」或一定念错的缩写，只在 Markdown 模式叠加。
+# 英文术语（lambda / template / concepts…）刻意保留：技术读者习惯听原词，
+# TTS 的中英混排也能吃下；真正需要改的只有符号和缩写。
+TECH_PRON = {
+    "e.g.": "例如", "i.e.": "也就是", "etc.": "等等", "vs.": "对比",
+    "cf.": "参见", "aka": "也就是", "std::": "标准库 ", "nullptr": "空指针",
+    "constexpr": "const expr", "SFINAE": "S F I N A E", "RAII": "R A I I",
+    "CRTP": "C R T P", "CLI": "C L I", "GUI": "G U I", "AST": "A S T",
+    "sizeof": "size of", "decltype": "decl type", "typedef": "type def",
+    "w/": "with ", "w/o": "without ", "C++20": "C 加加 20",
 }
 
 _pron_cache = {"stamp": None, "data": {}}
@@ -205,8 +228,10 @@ def load_pron() -> dict:
     return data
 
 
-def apply_pron(text: str) -> str:
-    d = load_pron()
+def apply_pron(text: str, tech: bool = False) -> str:
+    d = dict(load_pron())
+    if tech:
+        d.update(TECH_PRON)
     if not d:
         return text
     pat = re.compile("|".join(re.escape(k) for k in sorted(d, key=len, reverse=True)))
@@ -468,8 +493,11 @@ def parse_blocks(raw: str) -> list:
 
 # ---------------------------------------------------------------- 行内清洗
 
-def clean_inline(text: str) -> str:
-    """只处理行内标记，不动结构（结构在上一步已经认出来了）。"""
+def clean_inline(text: str, tech: bool = False) -> str:
+    """只处理行内标记，不动结构（结构在上一步已经认出来了）。
+
+    tech=True 时只删明确的 HTML 标签，保留 <int> / <vector> 这类模板尖括号。
+    """
     s = html.unescape(text)
     s = RE_IMG.sub(" ", s)
     s = RE_CODE_INLINE.sub(r"\1", s)
@@ -480,7 +508,7 @@ def clean_inline(text: str) -> str:
     s = RE_UNDER.sub(r"\1", s)
     s = RE_ITALIC.sub(r"\1", s)
     s = RE_STRIKE.sub(r"\1", s)
-    s = RE_HTML_TAG.sub(" ", s)
+    s = (RE_HTML_TAG_STRICT if tech else RE_HTML_TAG).sub(" ", s)
     s = RE_WIKI_ALIAS.sub(r"\1", s)
     s = RE_WIKI.sub(r"\1", s)
     s = RE_LINK.sub(r"\1", s)
@@ -517,11 +545,16 @@ def _num_cn_group(raw: str) -> str:
     return raw
 
 
-def normalize(text: str, enabled: bool = True) -> str:
+def normalize(text: str, enabled: bool = True, tech: bool = False) -> str:
     """把符号/数字/日期读法规整成"念出来自然"的样子。
 
     刻意保守：只处理"朗读必定出问题"的写法，且每条规则都可解释。
     真正的疑难杂症交给 pronounce.json 用户词典。
+
+    tech=True 是 Markdown/技术笔记模式：跳过会毁掉 C++ 记号的几条全局替换
+    （& -> 和、-> -> 到、* / ^ 删掉、括号改逗号、AI/ML -> AI和ML），
+    这些已由 tech_inline() 按语境转写过；数字/日期/百分号/中英空格等
+    通用规则照常复用。小说路径 tech=False，行为完全不变。
     """
     if not text:
         return ""
@@ -582,19 +615,23 @@ def normalize(text: str, enabled: bool = True) -> str:
     s = RE_VERSION.sub(lambda m: "版本" + m.group(1), s)
 
     # 7) 符号
-    for a, b in RE_SYMBOLS:
+    for a, b in (TECH_SYMBOLS if tech else RE_SYMBOLS):
         s = s.replace(a, b)
     s = RE_HASH_NUM.sub(r"第\1", s)
     s = re.sub(r"(?<=\d)\s*\+\s*(?=\d)", "加", s)     # 3 + 2 -> 3加2
     s = RE_PLUS_SIGN.sub("", s)                      # 「同比 +30%」的加号念不出意思，去掉
-    s = s.replace("*", " ").replace("^", " ")
+    if not tech:
+        s = s.replace("*", " ").replace("^", " ")     # 技术文本的 * 是指针/解引用，^ 是异或，不能删
 
     # 8) 斜杠：AI/ML -> AI和ML ；HTTP/2 -> HTTP 2
-    s = RE_SLASH_ALPHA.sub("和", s)
+    if not tech:
+        s = RE_SLASH_ALPHA.sub("和", s)               # 技术文本的 and/or、std/boost 不能变「和」
     s = RE_SLASH_MIX.sub(" ", s)
 
     # 9) 括号内容前后改成逗号，念起来有停顿（这是"像人念"的关键细节）
-    s = RE_CN_PAREN.sub(lambda m: "，" + m.group(1) + "，", s)
+    #    技术文本里 (T&&) / (std::function) 被拆成逗号会把类型念散，跳过。
+    if not tech:
+        s = RE_CN_PAREN.sub(lambda m: "，" + m.group(1) + "，", s)
 
     # 10) 中英之间插空格：让 TTS 正确切语言，避免「AI产品」糊成一坨
     s = RE_CJK_LATIN.sub(" ", s)
@@ -607,8 +644,8 @@ def normalize(text: str, enabled: bool = True) -> str:
     s = re.sub(r"，\s*([。！？；])", r"\1", s)
     s = RE_MULTI_SPACE.sub(" ", s)
 
-    # 12) 用户发音词典
-    s = apply_pron(s)
+    # 12) 用户发音词典（技术模式再叠加缩写表）
+    s = apply_pron(s, tech=tech)
 
     # 13) 还原 URL / 邮箱
     for i, u in enumerate(urls):
@@ -892,10 +929,362 @@ def recommend_voice(text: str, available: list | None = None) -> dict:
             "reason": "通用内容，用温暖自然的女声", "lang": lang}
 
 
+# ---------------------------------------------------------------- 5) Markdown
+# 技术笔记跟小说是两种材料：小说只要「把字念顺」，技术文档要先决定
+# 「哪些该读、哪些该改写、哪些该跳过」。这里保留完整的 Markdown 结构块，
+# 同一份 blocks 同时投影成「渲染视图」和「三档朗读稿」——不是两件事。
+#
+# 三档听法：
+#   commute  通勤：代码块全跳，只听讲解与任务单（闭眼听）
+#   balanced 平衡：代码块改读中文注释（作者自己写好的讲解稿），默认档
+#   study    精读：代码块逐行符号转写（对着屏幕学）
+# 后 20% 的代码讲解可以用 LLM 离线改写一次存进 prep.json，不必实时调用。
+
+MD_MODES = {
+    "commute": {"name": "通勤", "desc": "代码块全跳，只听讲解与任务单"},
+    "balanced": {"name": "平衡", "desc": "代码块改读中文注释（默认）"},
+    "study": {"name": "精读", "desc": "代码块逐行符号转写，对着屏幕学"},
+}
+CIRCLED = str.maketrans("①②③④⑤⑥⑦⑧⑨⑩", "一二三四五六七八九十")
+CN_DIGIT = "零一二三四五六七八九十"
+RE_MD_TABLE_SEP = re.compile(r"^:?-{2,}:?$")
+RE_MD_CODE_COMMENT = re.compile(r"//\s*(.+)$")
+
+
+def cn_num(n: int) -> str:
+    return CN_DIGIT[n] if 0 <= n <= 10 else str(n)
+
+
+def looks_like_markdown(raw: str) -> bool:
+    """粘进来的纯文本是不是 Markdown 源码（导入 .md 时会由调用方直接指定）。
+
+    只认「结构标记」的组合信号：# 标题 / ``` 围栏 / | 表格。小说正文里
+    几乎不会出现这些，所以误判概率很低；单个信号不算数，避免网页残留。
+    """
+    s = (raw or "")[:200_000]
+    lines = s.split("\n")[:600]
+    heads = sum(1 for l in lines if RE_HEADING.match(l))
+    fences = sum(1 for l in lines if RE_FENCE.match(l))
+    tables = sum(1 for l in lines if RE_TABLE.match(l))
+    lists = sum(1 for l in lines if RE_LIST.match(l))
+    score = (2 if heads >= 2 else 1 if heads == 1 else 0) \
+        + (2 if fences >= 2 else 0) \
+        + (1 if tables >= 2 else 0) \
+        + (1 if lists >= 2 and heads else 0)
+    return score >= 2
+
+
+def parse_markdown_blocks(raw: str) -> list:
+    """MD 源码 -> [{bid, kind, raw, level?/rows?/lang?/ordered?}]。
+
+    跟 parse_blocks 最大的区别：**结构块不再被丢弃**。代码块、表格、分隔线
+    过去直接 continue，信息只往朗读一条路流，前端拿不到任何可渲染的东西。
+    """
+    s = (raw or "").replace("\r\n", "\n").replace("\r", "\n")
+    s = RE_FRONTMATTER.sub("", s)
+    s = RE_INVISIBLE.sub("", s)
+    lines = s.split("\n")
+    out, para = [], []
+    i = 0
+
+    def add(kind, **kw):
+        rec = {"bid": len(out), "kind": kind}
+        rec.update(kw)
+        out.append(rec)
+
+    def flush():
+        if para:
+            add("para", raw=" ".join(x.strip() for x in para).strip())
+            para.clear()
+
+    while i < len(lines):
+        line = lines[i]
+        fm = RE_FENCE.match(line)
+        if fm:
+            flush()
+            fence = fm.group(1)[0] * 3
+            lang = line.strip().lstrip("`~").strip()
+            buf = []
+            i += 1
+            while i < len(lines) and not lines[i].lstrip().startswith(fence):
+                buf.append(lines[i])
+                i += 1
+            add("code", raw="\n".join(buf), lang=lang)
+            i += 1
+            continue
+        m = RE_HEADING.match(line)
+        if m:
+            flush()
+            add("heading", raw=m.group(2).strip(), level=len(m.group(1)))
+            i += 1
+            continue
+        if RE_TABLE.match(line):
+            flush()
+            rows = []
+            while i < len(lines) and RE_TABLE.match(lines[i]):
+                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                if not all(RE_MD_TABLE_SEP.fullmatch(c or "") for c in cells):
+                    rows.append(cells)
+                i += 1
+            if rows:
+                add("table", rows=rows, raw="\n".join(" | ".join(r) for r in rows))
+            continue
+        if RE_HR.match(line):
+            flush()
+            add("hr", raw=line.strip())
+            i += 1
+            continue
+        m = RE_QUOTE.match(line)
+        if m:
+            flush()
+            body = []
+            while i < len(lines):
+                q = RE_QUOTE.match(lines[i])
+                if not q:
+                    break
+                body.append(q.group(1).strip())
+                i += 1
+            add("quote", raw=" ".join(body).strip())
+            continue
+        m = RE_LIST.match(line)
+        if m:
+            flush()
+            add("list", raw=m.group(3).strip(),
+                ordered=bool(re.match(r"\d", m.group(2))))
+            i += 1
+            continue
+        if not line.strip():
+            flush()
+            i += 1
+            continue
+        para.append(line)
+        i += 1
+    flush()
+    return [b for b in out if str(b.get("raw") or "").strip()]
+
+
+def tidy_tech(s: str) -> str:
+    """收掉规整过程留下的怪空格：只保留「中文 ↔ 拉丁/数字」之间必要的空隙。"""
+    s = re.sub(r"\s+([，。！？；：、）】」》])", r"\1", s)
+    s = re.sub(r"([（【「《，。！？；：、])\s+", r"\1", s)
+    s = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", s)
+    s = re.sub(r"([，。！？；：、])\s*([，。！？；：、])", r"\1", s)
+    # 「第 3 天」「大约 60 分钟」「第 7 到 8 章」里数字两侧的空格会被中文 TTS
+    # 念成不必要的碎停顿；只收「中文量词 ↔ 数字」，中英之间的空隙保留。
+    s = re.sub(r"第\s*(\d+)\s*(到|至)\s*(\d+)\s*(章|节|页|天|讲)", r"第\1\2\3\4", s)
+    s = re.sub(r"第\s*(\d+)\s*(章|节|页|天|讲|行|句|版)", r"第\1\2", s)
+    s = re.sub(r"(大约|总共|约|共|到|至)\s+(\d)", r"\1\2", s)
+    s = re.sub(r"(\d)\s+(天|章|节|分钟|秒|个|行|句|页|版|倍|次)", r"\1\2", s)
+    s = re.sub(r"第\s+(\d)", r"第\1", s)
+    s = re.sub(r"\s{2,}", " ", s)
+    return s.strip()
+
+
+def tech_inline(s: str) -> str:
+    """行内技术符号 → 口语。英文术语一律保留，只换「念不出来/会念错」的符号。
+
+    这一层必须在 normalize(tech=True) 之前跑：先把 T& / -> / :: / ... 按语境
+    转写掉，通用规整才不会再把它们当成小说的「和 / 到」。
+    """
+    s = clean_inline(s, tech=True).translate(CIRCLED)
+    s = s.replace("#include", "include ")          # 行首 # 没声音，念成 include 就行
+    s = re.sub(r"§\s*(\d+(?:\.\d+)*)", r"第 \1 节", s)
+    s = re.sub(r"\bDay\s*(\d+)\b", r"第 \1 天", s, flags=re.I)
+    s = re.sub(r"(?<![A-Za-z])ch\s*(\d+)\s*[-–~]\s*(\d+)", r"第 \1 到 \2 章", s, flags=re.I)
+    s = re.sub(r"(?<![A-Za-z])ch\s*(\d+)\b", r"第 \1 章", s, flags=re.I)
+    s = re.sub(r"[~～]\s*(\d+)\s*(min|分钟)", r"大约 \1 分钟", s)
+    s = re.sub(r"\b(\d+)\s*min\b", r"\1 分钟", s)
+    s = s.replace("——", "，").replace("·", "、")
+    s = s.replace("::", " ")
+    s = s.replace("->", " 变为 ").replace("→", " 变为 ")
+    s = s.replace("&&", " 双引用 ")
+    s = re.sub(r"(?<=[A-Za-z0-9_\]])&", " 的引用", s)      # T& / auto&& 的后半
+    s = re.sub(r"\.{3}", " 参数包展开 ", s)
+    # 模板尖括号只留里面的标识符，不硬塞「版/类型」这种会念错的语义：
+    # max<int> → max int，#include <vector> → include vector。
+    s = re.sub(r"<\s*([A-Za-z_][^<>\n]{0,30})\s*>", r" \1 ", s)
+    s = re.sub(r"char\s*\[\s*(\d+)\s*\]", r"\1 元素 char 数组", s)
+    s = re.sub(r"char\s*\*", "char 指针", s)
+    s = re.sub(r"(?<=[\u4e00-\u9fff])(?=[A-Za-z0-9])", " ", s)
+    s = re.sub(r"(?<=[A-Za-z0-9])(?=[\u4e00-\u9fff])", " ", s)
+    return tidy_tech(s)
+
+
+def speak_heading_tech(s: str) -> str:
+    t = tech_inline(s)
+    t = re.sub(r"（(第 [\d.]+ 节)）", r"，见 \1", t)
+    t = t.replace("（", "，").replace("）", "")
+    t = t.replace("、", "，")
+    t = re.sub(r"[，]{2,}", "，", t)
+    t = re.sub(r"总\s*大约", "总共大约", t)
+    return tidy_tech(t).strip("，。 ") + "。"
+
+
+def clean_para_tech(s: str) -> str:
+    t = tech_inline(s).replace("（", "，").replace("）", "，")
+    t = re.sub(r"，{2,}", "，", t)
+    t = re.sub(r"，\s*([。！？])", r"\1", t)
+    return tidy_tech(t).strip("， ")
+
+
+def table_speech(rows: list) -> str:
+    """表格不能线性念「30 min ch 7 ...」，要按列名重组成自然句。
+
+    通用做法：先念表头，再逐行「列名是值」。不假设列语义，
+    所以任何 Markdown 表格都能读，不会把 tech 笔记里的三列表格念串。
+    """
+    rows = [r for r in (rows or []) if any(str(c or "").strip() for c in r)]
+    if not rows:
+        return ""
+    head = [tech_inline(str(c or "").strip()) for c in rows[0]]
+    lines = ["表格：" + "、".join(h for h in head if h) + "。"]
+    for n, row in enumerate(rows[1:], 1):
+        pairs = []
+        for j, cell in enumerate(row):
+            v = tech_inline(str(cell or "").strip()).replace("/", "、")
+            if not v:
+                continue
+            label = head[j] if j < len(head) and head[j] else f"第{cn_num(j + 1)}列"
+            pairs.append(f"{label}是{v}")
+        if pairs:
+            lines.append(f"第{cn_num(n)}行，" + "，".join(pairs) + "。")
+    return tidy_tech("".join(lines))
+
+
+def code_comments_speech(raw: str) -> str:
+    """平衡档：技术文档的代码注释，天然就是作者写好的朗读讲解稿。
+
+    不逐字念 C++，也不整段跳过 —— 只把 // 后面的中文串起来。
+    纯规则就能拿到 80 分，不必实时调 LLM。
+    """
+    parts = []
+    for line in (raw or "").splitlines():
+        m = RE_MD_CODE_COMMENT.search(line)
+        if not m:
+            continue
+        c = tech_inline(m.group(1).strip())
+        c = re.sub(r"^[\s—-]+", "", c).replace("#include", "include")
+        if c:
+            parts.append(c.rstrip("。！？，"))
+    if not parts:
+        return ""
+    return tidy_tech("看一段示例：" + "。".join(parts) + "。")
+
+
+def code_lines_speech(raw: str) -> str:
+    """精读档：逐行符号转写。规则生成的是粗稿，生产环境可用 LLM 离线改写一次。"""
+    parts = []
+    for line in (raw or "").splitlines():
+        l = line.strip()
+        if not l:
+            continue
+        m = RE_MD_CODE_COMMENT.match(l)
+        t = tech_inline(m.group(1) if m else l)
+        t = t.replace("{", "，").replace("}", "").replace(";", "，")
+        t = t.replace("(", "，").replace(")", "，")
+        t = re.sub(r"\s{2,}", " ", t).strip("， ")
+        if t:
+            parts.append(t)
+    return tidy_tech("逐行精读：" + "。".join(parts) + "。") if parts else ""
+
+
+def md_block_speech(b: dict, mode: str) -> tuple:
+    """返回 (处置策略, 朗读文本)。策略会透给前端，让「哪些该读」看得见。"""
+    k = b["kind"]
+    if k == "heading":
+        return "转写", speak_heading_tech(b.get("raw", ""))
+    if k == "para":
+        return "直读", clean_para_tech(b.get("raw", ""))
+    if k in ("list", "quote"):
+        return "直读", tech_inline(b.get("raw", ""))
+    if k == "table":
+        t = table_speech(b.get("rows"))
+        return ("改写", t) if t else ("跳过", "")
+    if k == "code":
+        if mode == "commute":
+            return "跳过", ""
+        if mode == "balanced":
+            t = code_comments_speech(b.get("raw", ""))
+            return ("改写", t) if t else ("跳过", "")
+        t = code_lines_speech(b.get("raw", ""))
+        return ("精读", t) if t else ("跳过", "")
+    return "跳过", ""                       # hr / 纯格式
+
+
+def build_md_items(blocks: list, speech: dict, mode: str,
+                   max_len: int, min_len: int, do_normalize: bool) -> list:
+    """把某一档的朗读文本切成逐句条目，并打上 bid / si 双层定位。"""
+    items = []
+    for b in blocks:
+        bid = b["bid"]
+        _policy, txt = speech[bid][mode]
+        if not txt:
+            continue
+        txt = normalize(txt, do_normalize, tech=True)
+        txt = re.sub(r"[，,、：:；;]+$", "。", txt)
+        if not speakable(txt):
+            continue
+        kind = b["kind"] if b["kind"] in ("heading", "list", "quote") else "para"
+        sub = split_items("", max_len=max_len, min_len=min_len,
+                          blocks=[{"kind": kind, "text": txt}])
+        for si, it in enumerate(sub):
+            it["bid"] = bid
+            it["si"] = si
+            items.append(it)
+        if sub:
+            # 块与块之间要有一次完整换气，否则表格紧接正文会糊成一团
+            sub[-1]["pause"] = max(sub[-1]["pause"],
+                                   PAUSE["heading"] if kind == "heading" else PAUSE["paragraph"])
+    return items
+
+
+def md_payload(blocks: list, max_len: int, min_len: int,
+               do_normalize: bool, mode: str) -> dict:
+    """一次性生成三档朗读稿 + 渲染视图，全部塞进 prep.json 缓存。"""
+    speech = {b["bid"]: {m: md_block_speech(b, m) for m in MD_MODES} for b in blocks}
+    modes = {}
+    for m in MD_MODES:
+        items = build_md_items(blocks, speech, m, max_len, min_len, do_normalize)
+        modes[m] = {
+            "items": items,
+            "segments": [it["text"] for it in items],
+            "count": len(items),
+            "chars": sum(len(it["text"]) for it in items),
+        }
+    view = []
+    for b in blocks:
+        rec = {k: v for k, v in b.items() if k in ("bid", "kind", "raw", "level",
+                                                    "rows", "lang", "ordered")}
+        rec["policy"] = {m: speech[b["bid"]][m][0] for m in MD_MODES}
+        view.append(rec)
+    mode = mode if mode in MD_MODES else "balanced"
+    return {"is_md": True, "mode": mode, "modes": modes, "view": view,
+            "block_count": len(blocks), "names": {k: v["name"] for k, v in MD_MODES.items()},
+            "descs": {k: v["desc"] for k, v in MD_MODES.items()}}
+
+
 # ---------------------------------------------------------------- 一站式
 
-def prepare(raw: str, max_len: int = 62, min_len: int = 9, do_normalize: bool = True) -> dict:
-    """原文 -> {text, items, segments, blocks}。"""
+def prepare(raw: str, max_len: int = 62, min_len: int = 9, do_normalize: bool = True,
+            markdown: bool | None = None, md_mode: str = "balanced") -> dict:
+    """原文 -> {text, items, segments, blocks[, md]}。
+
+    markdown=None 时自动检测；False 强制走原来的小说路径（行为一字不变）。
+    Markdown 分支会额外返回 md：三档 items + 渲染视图 + 每块的处置策略。
+    """
+    is_md = looks_like_markdown(raw) if markdown is None else bool(markdown)
+    if is_md:
+        blocks = parse_markdown_blocks(raw)
+        if not blocks:
+            is_md = False
+        else:
+            md = md_payload(blocks, max_len, min_len, do_normalize, md_mode)
+            cur = md["modes"][md["mode"]]
+            text = "\n\n".join(cur["segments"]).strip()
+            return {"text": text, "items": cur["items"], "segments": cur["segments"],
+                    "blocks": [{"kind": b["kind"], "text": b.get("raw", "")} for b in blocks],
+                    "md": md}
+
     blocks = parse_blocks(raw)
     cooked = []
     for b in blocks:

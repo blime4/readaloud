@@ -88,6 +88,7 @@ def _public(meta: dict) -> dict:
         "finished": bool(total and nxt >= total),
         "cover": meta.get("cover") or "",
         "pin": bool(meta.get("pin")),
+        "md_mode": meta.get("md_mode") or "balanced",
     }
 
 
@@ -198,6 +199,16 @@ def rename_book(book_id: str, title: str) -> dict:
 
 def set_pin(book_id: str, on: bool) -> dict:
     return _patch_meta(book_id, {"pin": bool(on)})
+
+
+def set_md_mode(book_id: str, mode: str) -> dict:
+    """记住这本书的 Markdown 听法档位：手机和电脑打开同一本书时是同一档。
+
+    档位改变会让逐句数量变化，所以进度由前端按块换算后另存，这里只存档位。
+    """
+    if mode not in ("commute", "balanced", "study"):
+        raise BookError("听法档位不合法。")
+    return _patch_meta(book_id, {"md_mode": mode})
 
 
 def delete_book(book_id: str) -> None:

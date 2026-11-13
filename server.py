@@ -133,7 +133,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.12.2"
+ENGINE_VERSION = "1.13.0"
 
 # --------------------------------------------------------------------------
 # 本机引擎注册表：两套 TTS 都能用同一个 /v1/audio/speech 约定，切换只改配置
@@ -272,6 +272,7 @@ FEATURES = [
     "tts-engine-switch",    # /api/tts/engines：CosyVoice2 / MOSS-Nano / Qwen3-TTS 三套一键切换
     "moss-voices",          # MOSS-Nano 官方内置 18 把音色 + 自定义 wav 克隆，可逐把切换
     "qwen3-tts",            # 第三套本机引擎 Qwen3-TTS 1.7B：9 把官方音色，逐把可切
+    "markdown-readaloud",   # .md 导入 + 结构渲染 + 通勤/平衡/精读三档朗读稿
     "engine-upgrade",       # /api/restart + /api/update：原地热重启、git pull 自升级
 ]
 
@@ -402,9 +403,14 @@ def split_segments(text: str, max_len: int = 62) -> list:
     return [it["text"] for it in items] or ([text] if text.strip() else [])
 
 
-def plan_text(raw: str, max_len: int = 62, do_normalize: bool = True) -> dict:
-    """一站式：解析结构 -> 清洗 -> 读音规整 -> 逐句。返回 text/items/segments。"""
-    return NLP.prepare(raw, max_len=max_len, do_normalize=do_normalize)
+def plan_text(raw: str, max_len: int = 62, do_normalize: bool = True,
+              markdown: bool | None = None, md_mode: str = "balanced") -> dict:
+    """一站式：解析结构 -> 清洗 -> 读音规整 -> 逐句。返回 text/items/segments。
+
+    markdown=None 自动检测 Markdown 源码；命中时额外返回 md（三档朗读稿 + 渲染视图）。
+    """
+    return NLP.prepare(raw, max_len=max_len, do_normalize=do_normalize,
+                       markdown=markdown, md_mode=md_mode)
 
 
 # ---------------------------------------------------------------- 语音合成
@@ -1746,6 +1752,11 @@ def api_prepare():
     raw = body.get("text", "")
     do_norm = bool(body.get("normalize", CFG["normalize"]))
     max_len = int(body.get("max_len") or CFG["max_len"])
+    # Markdown：前端导入 .md 时显式带 true，直接粘 MD 文本则由 text_nlp 自动识别。
+    md_flag = body.get("md", None)
+    md_mode = str(body.get("md_mode") or "balanced")
+    if md_mode not in ("commute", "balanced", "study"):
+        md_mode = "balanced"
     if not (raw or "").strip():
         return jsonify({"ok": False, "error": "没有可朗读的文本"}), 400
 
@@ -1754,15 +1765,23 @@ def api_prepare():
     prep_key = ""
     if ai == "none" and re.fullmatch(r"[0-9a-f]{12}", book_id):
         digest = hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
-        prep_key = f"{digest}|{max_len}|{int(do_norm)}|{_nlp_fingerprint()}|v1"
+        prep_key = f"{digest}|{max_len}|{int(do_norm)}|{_nlp_fingerprint()}|md2"
         cached_plan = SHELF.get_prep(book_id, prep_key)
         if cached_plan:
             items = cached_plan.get("items") or []
+            segments = cached_plan.get("segments") or [it.get("text") for it in items]
+            md = cached_plan.get("md")
+            # 一次缓存三档：换听法不用重新解析，也不用再发一次请求。
+            if md and md.get("modes", {}).get(md_mode):
+                md = dict(md, mode=md_mode)
+                cur = md["modes"][md_mode]
+                items, segments = cur["items"], cur["segments"]
             return jsonify({
                 "ok": True,
                 "text": raw,
-                "segments": cached_plan.get("segments") or [it.get("text") for it in items],
+                "segments": segments,
                 "items": items,
+                "md": md,
                 "count": len(items),
                 "style": {
                     "voice": body.get("voice") or CFG["default_voice"],
@@ -1808,18 +1827,22 @@ def api_prepare():
             plan_src = raw
         long_doc = ai == "summarize" and len(source) >= int(CFG.get("long_doc_chars", 6000))
 
-    r = plan_text(plan_src, max_len=max_len, do_normalize=do_norm)
+    # AI 润色/摘要产出的是纯文本，结构标记已经没了，强制走普通路径。
+    r = plan_text(plan_src, max_len=max_len, do_normalize=do_norm,
+                  markdown=(md_flag if ai == "none" else False), md_mode=md_mode)
     segs = r["segments"]
     if not segs and r["text"]:
         segs = [r["text"]]
-        r["items"] = [{"text": r["text"], "kind": "para", "pause": 660, "rate": 0}]
+        r["items"] = [{"text": r["text"], "kind": "para", "pause": 660, "rate": 0,
+                       "bid": -1, "si": 0}]
 
     if prep_key:                        # 首次解析完顺手存缓存，下次秒回
         try:
-            SHELF.put_prep(book_id, prep_key,
-                           {"items": r["items"], "segments": segs,
-                            "count": len(segs), "ts": time.time()},
-                           len(raw))
+            entry = {"items": r["items"], "segments": segs,
+                     "count": len(segs), "ts": time.time()}
+            if r.get("md"):
+                entry["md"] = r["md"]   # 三档朗读稿 + 渲染视图一起缓存
+            SHELF.put_prep(book_id, prep_key, entry, len(raw))
         except Exception:
             pass
 
@@ -1843,6 +1866,7 @@ def api_prepare():
         "voice_reason": rec.get("reason"),
         "normalized": do_norm,
         "prep_cached": False,
+        "md": r.get("md"),
     })
 
 
@@ -1925,6 +1949,17 @@ def api_book(book_id):
         return jsonify({"ok": True, "book": SHELF.get_book(book_id)})
     except SHELF.BookError as error:
         return jsonify({"ok": False, "error": str(error)}), 404
+
+
+@app.post("/api/books/<book_id>/mdmode")
+def api_book_mdmode(book_id):
+    """记住 Markdown 听法档位，手机/电脑共用同一档。"""
+    body = request.get_json(silent=True) or {}
+    try:
+        book = SHELF.set_md_mode(book_id, str(body.get("mode") or ""))
+    except SHELF.BookError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
+    return jsonify({"ok": True, "book": book})
 
 
 @app.post("/api/books")

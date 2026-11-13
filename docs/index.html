@@ -308,6 +308,66 @@
     color:var(--txt-3); text-align:center; padding:40px 22px; font-size:12.5px;
     font-family:var(--ui); line-height:1.9;
   }
+  /* Markdown 听书：上栏三档听法，下栏「原文渲染 + 该块的朗读稿」逐块对照 */
+  .mdbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 14px;
+    border-bottom:1px solid var(--line);background:var(--panel-2);font-family:var(--ui)}
+  .mdbar[hidden]{display:none}
+  .mdbar .t{font-family:var(--mono);font-size:10px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--txt-3);white-space:nowrap}
+  .mdseg{display:inline-flex;border:1px solid var(--btn-bd)}
+  .mdseg button{background:var(--btn);color:var(--txt-2);border:0;
+    border-right:1px solid var(--btn-bd);padding:4px 12px;font-size:11.5px;
+    cursor:pointer;font-family:var(--ui)}
+  .mdseg button:last-child{border-right:0}
+  .mdseg button:hover{background:var(--btn-hover)}
+  .mdseg button.on{background:var(--accent-soft);color:var(--accent-2);font-weight:600}
+  .mdbar .hint{font-size:11px;color:var(--txt-3);flex:1;min-width:140px}
+  .mdblk{margin:0 0 16px;border:1px solid var(--line);background:var(--bg-canvas);transition:.2s}
+  .mdblk.active{border-color:var(--accent);box-shadow:inset 2px 0 0 var(--accent)}
+  .mdblk.done{opacity:.6}
+  .mdmeta{display:flex;gap:8px;align-items:center;padding:5px 14px;
+    font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;
+    color:var(--txt-3);border-bottom:1px solid var(--line)}
+  .mdmeta .pol{margin-left:auto;color:var(--accent);letter-spacing:0}
+  .mdview{padding:12px 14px;border-bottom:1px solid var(--line);
+    font-family:var(--serif);font-size:14px;line-height:1.85;color:var(--txt)}
+  .mdview h1,.mdview h2,.mdview h3,.mdview h4{margin:0 0 7px;font-family:var(--serif);font-weight:600}
+  .mdview h1{font-size:20px} .mdview h2{font-size:17px}
+  .mdview h3{font-size:15px} .mdview h4{font-size:14px}
+  .mdview p{margin:0 0 7px} .mdview p:last-child{margin-bottom:0}
+  .mdview code{font-family:var(--mono);font-size:.87em;background:var(--code);padding:1px 4px}
+  .mdview pre{margin:0;background:var(--code);padding:10px 12px;overflow-x:auto;
+    font-family:var(--mono);font-size:12px;line-height:1.7;white-space:pre}
+  .mdview pre code{background:none;padding:0;font-size:inherit}
+  .mdview .mdlang{display:block;font-family:var(--mono);font-size:9px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--txt-3);margin-bottom:6px}
+  .mdview table{border-collapse:collapse;width:100%;font-size:12.5px;font-family:var(--ui)}
+  .mdview th,.mdview td{border:1px solid var(--line);padding:5px 8px;text-align:left}
+  .mdview th{background:var(--panel-2);color:var(--txt-2);font-weight:600}
+  .mdview .mdli{display:flex;gap:9px;margin:3px 0}
+  .mdview .mdli .dot{color:var(--accent);flex:none}
+  .mdview blockquote{margin:0;padding-left:10px;border-left:2px solid var(--line-strong);color:var(--txt-2)}
+  .mdview hr{border:0;border-top:1px solid var(--line);margin:10px 0}
+  .mdview strong{font-weight:700} .mdview em{color:var(--txt-2)}
+  .mdview .mdlink{color:var(--accent-2);text-decoration:underline;text-underline-offset:2px}
+  .mdblk .mdsegs{padding:5px 8px 7px}
+  .mdblk .mdsegs .seg{font-size:12.5px;padding:5px 8px;line-height:1.7;
+    font-family:var(--ui);margin-bottom:0}
+  .mdblk .mdsegs .seg .no{width:20px;font-size:9px;padding-top:2px}
+  .mdblk .segskip{padding:8px 10px;font-size:11.5px;color:var(--txt-3);font-family:var(--ui)}
+  .mdblk.skipped .mdview{opacity:.78}
+  .mdbar .mdwide{background:var(--btn);color:var(--txt-2);border:1px solid var(--btn-bd);
+    padding:4px 10px;font-size:11px;cursor:pointer;font-family:var(--ui);white-space:nowrap}
+  .mdbar .mdwide:hover{background:var(--btn-hover)}
+  .mdbar .mdwide.on{background:var(--accent-soft);color:var(--accent-2);border-color:var(--accent)}
+  /* 桌面端宽栏阅读：Markdown 的表格/代码块要有整屏宽度才看得清，
+     临时收起左栏文稿卡（渲染视图本身就是原文），点「宽栏」可随时切回。 */
+  @media (min-width:761px){
+    body.md-wide main{grid-template-columns:minmax(0,1fr)}
+    body.md-wide main > .card.txt{display:none}
+    body.md-wide main > .setcard{width:100%;max-width:1120px;margin:0 auto}
+    body.md-wide .setcard > .row{max-width:760px}
+  }
   .bar{
     flex:1; height:4px; border-radius:0; background:var(--track); overflow:hidden;
     cursor:pointer; position:relative;
@@ -857,7 +917,7 @@
              placeholder="粘贴网页链接，自动抓正文来读（微信 / 知乎 / 博客都行）">
       <button class="primary tiny" id="btnUrlGo" title="抓取正文并开始朗读">抓取朗读</button>
       <input id="fileIn" type="file" class="fileoff"
-             accept=".txt,.text,.epub,.mobi,.azw3,.pdf,text/plain,application/pdf,application/epub+zip">
+             accept=".txt,.text,.epub,.mobi,.azw3,.pdf,.md,.markdown,text/plain,text/markdown,application/pdf,application/epub+zip">
       <button class="ghost tiny" id="btnImport" title="导入 TXT、EPUB、MOBI 或 PDF 后开始朗读">导入本地文件</button>
     </div>
     <div class="urlopts">
@@ -1016,6 +1076,16 @@
         <option value="end">读完当前这段就停</option>
       </select>
       <span class="val" id="timerV" style="width:62px">—</span>
+    </div>
+    <div class="mdbar" id="mdBar" hidden>
+      <span class="t">Markdown 听法</span>
+      <div class="mdseg" id="mdModes">
+        <button type="button" data-m="commute">通勤</button>
+        <button type="button" data-m="balanced">平衡</button>
+        <button type="button" data-m="study">精读</button>
+      </div>
+      <span class="hint" id="mdHint"></span>
+      <button type="button" class="mdwide" id="mdWide" title="宽栏阅读：整屏看表格与代码，点一下切回双栏">宽栏阅读</button>
     </div>
     <div class="seglist" id="seglist">
       <div class="empty">点「朗读」后，这里会显示逐句稿，跟着声音逐句高亮。<br>点任意一句可跳读，也可用 ←/→ 切换。</div>
@@ -1235,6 +1305,7 @@ const S = {
   pauseTimer: 0, retryTimer: 0, playRequest: 0, tickTimer: 0, stopAt: 0, stopMode: '0', cancelFn: null,
   voiceBookmark: null, book: null, pendingResume: null,
   fail: new Set(), tried: 0, lastPlayChars: 0,
+  md: null, mdMode: 'balanced',       // Markdown 三档朗读稿 + 渲染视图
 };
 
 const GH = 'https://github.com/blime4/readaloud';
@@ -1616,8 +1687,9 @@ async function loadHealth() {
    不提示的话会出现「页面是新的、引擎还是两天前的旧版」却没人察觉。 */
 const REQUIRED_FEATURES = ['structured-items', 'prosody-normalize', 'local-document-import',
   'bookshelf', 'tts-provider', 'presynth-hold', 'presynth-resume', 'remote-audio',
-  'task-monitor', 'task-stop', 'tts-engine-switch', 'moss-voices', 'qwen3-tts'];
-const MIN_ENGINE = '1.12.2';    // 页面用到的引擎能力下限，升一次改一次
+  'task-monitor', 'task-stop', 'tts-engine-switch', 'moss-voices', 'qwen3-tts',
+  'markdown-readaloud'];
+const MIN_ENGINE = '1.13.0';    // 页面用到的引擎能力下限，升一次改一次
 
 function cmpVer(a, b) {
   const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
@@ -1987,7 +2059,99 @@ function effectiveMode() {
 
 /* ---------- 渲染逐句 ---------- */
 const KIND_LABEL = { heading: '标题', list: '条目', quote: '引文', para: '' };
+const MD_KIND = { heading: '标题', para: '正文', list: '列表', quote: '引文',
+                  table: '表格', code: '代码', hr: '分隔' };
+
+/* Markdown 行内渲染：粗体 / 行内代码 / 斜体 / 链接。
+   先 esc 再替换，绝不把原始 Markdown 当 HTML 插入。 */
+function mdInline(s) {
+  let t = esc(String(s == null ? '' : s));
+  t = t.replace(/!\[[^\]]*\]\([^)]*\)/g, '');
+  t = t.replace(/`([^`]*)`/g, '<code>$1</code>');
+  t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  t = t.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>');
+  t = t.replace(/\[([^\]]+)\]\([^)]*\)/g, '<span class="mdlink">$1</span>');
+  return t;
+}
+function mdViewHtml(b) {
+  const raw = String(b.raw || '');
+  if (b.kind === 'heading') {
+    const lv = Math.min(Math.max(+b.level || 2, 1), 4);
+    return `<h${lv}>${mdInline(raw)}</h${lv}>`;
+  }
+  if (b.kind === 'table') {
+    const rows = b.rows || [];
+    if (!rows.length) return '';
+    const head = `<tr>${rows[0].map(c => `<th>${mdInline(c)}</th>`).join('')}</tr>`;
+    const body = rows.slice(1)
+      .map(r => `<tr>${r.map(c => `<td>${mdInline(c)}</td>`).join('')}</tr>`).join('');
+    return `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  }
+  if (b.kind === 'code') {
+    const tag = b.lang ? `${esc(b.lang)} · 代码` : '代码';
+    return `<span class="mdlang">${tag}</span><pre><code>${esc(raw)}</code></pre>`;
+  }
+  if (b.kind === 'list') {
+    return `<div class="mdli"><span class="dot">${b.ordered ? '▸' : '•'}</span>` +
+           `<span>${mdInline(raw)}</span></div>`;
+  }
+  if (b.kind === 'quote') return `<blockquote>${mdInline(raw)}</blockquote>`;
+  if (b.kind === 'hr') return '<hr>';
+  return `<p>${mdInline(raw)}</p>`;
+}
+
+/* 渲染视图与朗读稿按 bid 严格对齐：每个块上面是原文样式，下面是这一档
+   实际会念出的逐句稿；本档跳过的块明说「跳过」，不会凭空消失。 */
+function renderMdItems() {
+  const box = $('#seglist');
+  if (!S.md || !S.items.length) {
+    box.innerHTML = '<div class="empty">这份 Markdown 没有可朗读的内容。</div>';
+    updateBar();
+    return;
+  }
+  const byBid = new Map();
+  S.items.forEach((it, i) => {
+    const b = (typeof it.bid === 'number' && it.bid >= 0) ? it.bid : 0;
+    if (!byBid.has(b)) byBid.set(b, []);
+    byBid.get(b).push({ it, i });
+  });
+  const view = S.md.view || [];
+  box.innerHTML = view.map((b, bid) => {
+    const rows = byBid.get(bid) || [];
+    const pol = (b.policy && b.policy[S.mdMode]) || (rows.length ? '直读' : '跳过');
+    const segs = rows.length
+      ? rows.map(({ it, i }) => {
+          const k = KIND_LABEL[it.kind] || '';
+          return `<div class="seg" data-i="${i}" data-b="${bid}" title="${it.pause}ms 停顿">` +
+            `<span class="no">${i + 1}</span>${k ? `<span class="k">${k}</span>` : ''}` +
+            `<span>${esc(it.text)}</span></div>`;
+        }).join('')
+      : `<div class="segskip">本档跳过 · ${pol === '跳过' ? '代码块留着看，不念' : esc(pol)}</div>`;
+    return `<section class="mdblk${rows.length ? '' : ' skipped'}" data-b="${bid}">` +
+      `<div class="mdmeta"><span>块 ${bid + 1}</span>` +
+      `<span>${esc(MD_KIND[b.kind] || b.kind)}</span>` +
+      `<span class="pol">${esc(pol)}</span></div>` +
+      `<div class="mdview">${mdViewHtml(b)}</div>` +
+      `<div class="mdsegs">${segs}</div></section>`;
+  }).join('');
+  box.querySelectorAll('.seg[data-i]').forEach(el => el.onclick = () => {
+    const i = +el.dataset.i;
+    S.fail.delete(i);
+    seekReader(i);
+  });
+  // 点原文块就跳到这个块的第一句；本档跳过时跳到后面第一个有声音的块。
+  box.querySelectorAll('.mdblk').forEach(el => el.onclick = ev => {
+    if (ev.target.closest('.seg')) return;
+    const bid = +el.dataset.b;
+    let i = S.items.findIndex(it => it.bid === bid);
+    if (i < 0) i = S.items.findIndex(it => it.bid > bid);
+    if (i >= 0) { S.fail.delete(i); seekReader(i); }
+  });
+  highlight();
+}
+
 function renderItems() {
+  if (S.md && S.md.is_md) { renderMdItems(); return; }
   const box = $('#seglist');
   if (!S.items.length) {
     box.innerHTML = '<div class="empty">没有可分句的内容。</div>';
@@ -2015,10 +2179,86 @@ function highlight() {
     el.classList.toggle('done', i < S.idx);
     el.classList.toggle('fail', S.fail.has(i));
   });
+  // 双层高亮：句级（上面）+ 块级（Markdown 渲染视图整个块亮起来）
+  if (S.md && S.md.is_md) {
+    const cur = S.items[S.idx];
+    const bid = cur && typeof cur.bid === 'number' ? cur.bid : -1;
+    box.querySelectorAll('.mdblk').forEach(el => {
+      const b = +el.dataset.b;
+      el.classList.toggle('active', b === bid);
+      el.classList.toggle('done', bid >= 0 && b < bid);
+    });
+  }
   const act = box.querySelector('.seg.active');
   if (act) act.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   updateBar();
 }
+
+/* ---------- Markdown 三档听法 ---------- */
+/* 桌面端宽栏：md 独有的布局态，切回普通书时自动撤销。 */
+function setMdWide(on) {
+  const wide = !!on && !isMobile();
+  document.body.classList.toggle('md-wide', wide);
+  const b = $('#mdWide');
+  if (b) b.classList.toggle('on', wide);
+  store.set('mdWide', !!on);
+}
+$('#mdWide').onclick = () => setMdWide(!document.body.classList.contains('md-wide'));
+
+function paintMdBar() {
+  const bar = $('#mdBar');
+  if (!bar) return;
+  const on = !!(S.md && S.md.is_md && S.md.modes);
+  bar.hidden = !on;
+  if (!on) { document.body.classList.remove('md-wide'); return; }
+  setMdWide(store.get('mdWide', true));
+  $$('#mdModes button').forEach(b => b.classList.toggle('on', b.dataset.m === S.mdMode));
+  const cur = S.md.modes[S.mdMode] || { count: 0, chars: 0 };
+  const desc = (S.md.descs || {})[S.mdMode] || '';
+  $('#mdHint').textContent = `${desc} · ${cur.count} 句 / 约 ${Math.max(1, Math.round(cur.chars / 250))} 分钟`;
+}
+
+/* 换听法：三档稿子都在本地，不重新解析、不重新请求；
+   但句数会变，必须按 bid 换算位置并把进度写回书架，手机/电脑才不会错位。 */
+async function switchMdMode(m) {
+  if (!S.md || !S.md.modes || !S.md.modes[m] || m === S.mdMode) return;
+  const wasPlaying = S.playing;
+  const cur0 = S.items[S.idx];
+  const oldBid = cur0 && typeof cur0.bid === 'number' ? cur0.bid : 0;
+  stopPlayback();
+  S.mdMode = m;
+  S.md.mode = m;
+  S.items = S.md.modes[m].items;
+  let at = S.items.findIndex(it => it.bid >= oldBid);
+  if (at < 0) at = Math.max(0, S.items.length - 1);
+  S.idx = Math.max(-1, at - 1);
+  S.fail.clear();
+  pfClear();
+  if (PRE.on) fetch(API + '/api/presynth/cancel', { method: 'POST' }).catch(() => {});
+  PRE.on = false; PRE.key = ''; PRE.doneKey = ''; PRE.auto = true;
+  paintMdBar();
+  renderItems();
+  const tocN = tocEntries().length;
+  $('#btnToc').hidden = !tocN;
+  $('#chipToc').hidden = !tocN;
+  if (S.book && S.book.id) {
+    fetch(API + '/api/books/' + S.book.id + '/progress', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ next: Math.max(0, S.idx + 1), total: S.items.length })
+    }).catch(() => {});
+    fetch(API + '/api/books/' + S.book.id + '/mdmode', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: m })
+    }).then(r => r.json()).then(d => {
+      if (d.ok && S.book) S.book.md_mode = d.book.md_mode;
+    }).catch(() => {});
+  }
+  const name = (S.md.names || {})[m] || m;
+  toast(wasPlaying
+    ? `已切到「${name}」档，点播放从换算后的位置继续`
+    : `已切到「${name}」档，${S.items.length} 句`, 3600);
+}
+$$('#mdModes button').forEach(b => b.onclick = () => switchMdMode(b.dataset.m));
 function updateBar() {
   const n = S.items.length;
   const pos = S.idx < 0 ? 0 : S.idx + (S.playing ? 1 : 1);
@@ -2881,7 +3121,7 @@ async function play(requestedMode) {
       —— 用 XHR 拿真实上传百分比，能取消。
    顺带用 X-ReadAloud-Key 补访问码：fetch 有全局包装，XHR 没有。 */
 const IMPORT_MAX = 80 * 1024 * 1024;
-const EXT_OK = /\.(txt|text|epub|mobi|azw3?|pdf)$/i;
+const EXT_OK = /\.(txt|text|epub|mobi|azw3?|pdf|md|markdown)$/i;
 
 function humanSize(n) {
   if (n >= 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB';
@@ -2892,7 +3132,7 @@ function humanSize(n) {
 function importLocalFile(file) {
   if (!file) return;
   if (!EXT_OK.test(file.name)) {
-    toast(`「${file.name}」不是支持的格式，只收 TXT / EPUB / MOBI / AZW3 / PDF`, 5000);
+    toast(`「${file.name}」不是支持的格式，只收 TXT / MD / EPUB / MOBI / AZW3 / PDF`, 5000);
     $('#fileIn').value = '';
     return;
   }
@@ -2951,6 +3191,7 @@ function importLocalFile(file) {
     if (data.book) {
       S.book = data.book;
       S.bookHash = textHash(data.text);
+      S.mdMode = data.book.md_mode || 'balanced';
       S.pendingResume = null;
       loadShelf();
     }
@@ -3002,6 +3243,10 @@ async function prepare(text, mode) {
         volume: sgn(baseStyle().volume, '%'),
         // 书架的书直读时带上编号：引擎把分段结果缓存起来，第二次打开秒出
         book_id: (mode === 'none' && S.book && S.book.id) || undefined,
+        // 书架里的 .md 明确按 Markdown 解析；粘进来的 MD 源码由引擎自动识别。
+        // 三个档位的朗读稿一次算好返回，切档不再请求服务端。
+        md: (mode === 'none' && S.book && S.book.type === 'md') ? true : undefined,
+        md_mode: mode === 'none' ? S.mdMode : undefined,
       }),
     });
     const d = await r.json();
@@ -3021,6 +3266,19 @@ async function prepare(text, mode) {
 /* 把 prepare 的结果接到播放态：稿子、音色建议、时长提示都在这里落地 */
 function adoptPrepared(d, mode) {
   S.items = d.items || (d.segments || []).map(t => ({ text: t, kind: 'para', pause: 330, rate: 0 }));
+  // Markdown：服务端一次返回三档朗读稿 + 渲染视图。档位以书架 meta 为准
+  //（手机和电脑是同一份），没存过时用引擎默认档。
+  S.md = (d.md && d.md.is_md) ? d.md : null;
+  if (S.md && S.md.modes) {
+    const want = (S.book && S.book.md_mode) || S.md.mode || 'balanced';
+    S.mdMode = S.md.modes[want] ? want : 'balanced';
+    S.md.mode = S.mdMode;
+    const cur = S.md.modes[S.mdMode];
+    if (cur) S.items = cur.items;
+  } else {
+    S.mdMode = 'balanced';
+  }
+  paintMdBar();
   S.idx = -1;
   S.fail.clear();
   pfClear();                 // 换稿了：上一份的音频全部作废
@@ -3327,7 +3585,7 @@ $('#btnPlay').onclick = () => { addHistory($('#txt').value); play(); };
 $('#btnPolPlay').onclick = () => { addHistory($('#txt').value); play('polish'); };
 $('#btnSum').onclick = () => aiInto('summarize');
 $('#btnPol').onclick = () => aiInto('polish');
-$('#btnClear').onclick = () => { pushHistory($('#txt').value); $('#txt').value = ''; S.items = []; S.idx = -1; S.book = null; $('#btnToc').hidden = true; $('#chipToc').hidden = true; renderItems(); count(); };
+$('#btnClear').onclick = () => { pushHistory($('#txt').value); $('#txt').value = ''; S.items = []; S.idx = -1; S.book = null; S.md = null; $('#mdBar').hidden = true; $('#btnToc').hidden = true; $('#chipToc').hidden = true; renderItems(); count(); };
 $('#btnUndo').onclick = () => {
   if (!S.history.length) return toast('没有可撤销的变更');
   $('#txt').value = S.history.pop(); S.items = []; S.idx = -1; count(); toast('已撤销');
@@ -3821,6 +4079,7 @@ async function openBook(id) {
     stopPlayback();
     S.book = book;
     S.bookHash = textHash(book.text);
+    S.mdMode = book.md_mode || 'balanced';   // 手机/电脑共用同一档听法
     S.pendingResume = book.progress;
     if ($('#txt').value.trim()) pushHistory($('#txt').value);
     $('#txt').value = book.text;

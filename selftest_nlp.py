@@ -195,7 +195,9 @@ check("丢掉标点后不丢停顿",
       N.split_items("", blocks=[{"kind": "para", "text": punct_mix}])[0]["pause"] >= 330, True)
 
 print("=== 5) 端到端 prepare ===")
-p = N.prepare(raw)
+# 显式关掉 Markdown：这一节测的是普通文本路径（表格/代码块应当被剔除），
+# 不能让自动检测悄悄把样本切到 MD 分支去，否则断言的语义就变了。
+p = N.prepare(raw, markdown=False)
 check("产出 items 与 segments 一致", p["segments"] == [i["text"] for i in p["items"]], True)
 check("text 非空", bool(p["text"]), True)
 print("   逐句稿：")
@@ -219,7 +221,7 @@ print("=== 7) 结构层次（回归：kind 不能被洗成 para）===")
 # #、-、> 一起洗掉，于是标题/列表/引文永远识别不出来、全变成 para，
 # 「标题慢读、条目紧凑、引用留白」这套语气层次静默失效 —— 页面看着正常，就是读着平。
 struct_raw = "# 季度复盘\n\n正文一段。\n\n- 条目一\n- 条目二\n\n> 引用一句。\n"
-sp = N.prepare(struct_raw)
+sp = N.prepare(struct_raw, markdown=False)
 kinds = [it["kind"] for it in sp["items"]]
 print(f"    kinds = {kinds}")
 check("标题仍是 heading", "heading" in kinds, True)
@@ -232,6 +234,37 @@ check("标题停顿 > 正文停顿",
 tail = N.prepare("- 客户占比（Top10）68%\n")["items"][-1]["text"]
 print(f"    列表项收尾: {tail!r}")
 check("列表项不以逗号收尾", not tail.endswith(("，", ",", "、", "：")), True)
+
+print("=== 8) Markdown 三档听法（1.13.0）===")
+novel_sample = ("第一章 雪夜\n\n他说：“我不去。”《大雪纷飞的日子》里下着雪。\n"
+                "第2章 归途\n\n她笑了，风把雪吹进屋里。\n")
+check("MD 源码能自动识别", N.looks_like_markdown(raw), True)
+check("小说不会被误判成 MD", N.looks_like_markdown(novel_sample), False)
+mdp = N.prepare(raw, markdown=True)
+md = mdp.get("md") or {}
+modes = md.get("modes") or {}
+check("返回 md 三档结构", sorted(modes), ["balanced", "commute", "study"])
+check("通勤稿比精读稿短", modes["commute"]["chars"] < modes["study"]["chars"], True)
+check("逐句都带 bid/si 双层定位",
+      all("bid" in it and "si" in it for it in mdp["items"]), True)
+view_kinds = {b["kind"] for b in md.get("view") or []}
+check("渲染视图保留 code / table", {"code", "table"} <= view_kinds, True)
+code_bids = [b["bid"] for b in md.get("view") or [] if b["kind"] == "code"]
+check("通勤档跳过所有代码块",
+      all(not any(it["bid"] == bid for it in modes["commute"]["items"])
+          for bid in code_bids), True)
+check("精读档会读代码块",
+      all(any(it["bid"] == bid for it in modes["study"]["items"])
+          for bid in code_bids), True)
+check("T& 不再被念成「和」", "的引用" in N.tech_inline("T& x;"), True)
+check("-> 不再被念成「到」", "到" not in N.tech_inline("auto&& 与 ->"), True)
+check("圈号 / 小节号转写",
+      "一" in N.tech_inline("①") and "7.3" in N.tech_inline("§7.3")
+      and "节" in N.tech_inline("§7.3"), True)
+# 回归：<int> 曾被引擎当成 HTML 标签整段删掉，max<int> 只剩 max
+check("模板尖括号不被当 HTML 标签吃掉",
+      "int" in N.tech_inline("max<int>(a, b)") and "vector" in N.tech_inline("#include <vector>"), True)
+check("小说路径不受影响", bool(N.prepare(novel_sample, markdown=False)["items"]), True)
 
 print()
 print(f"通过 {len(OK)} 项，失败 {len(BAD)} 项")

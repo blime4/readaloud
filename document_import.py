@@ -10,7 +10,7 @@ from xml.etree import ElementTree
 from bs4 import BeautifulSoup
 
 
-SUPPORTED_EXTENSIONS = {".txt", ".epub", ".mobi", ".pdf"}
+SUPPORTED_EXTENSIONS = {".txt", ".epub", ".mobi", ".pdf", ".md", ".markdown"}
 MAX_IMPORT_BYTES = 80 * 1024 * 1024
 MAX_EPUB_FILES = 2_000
 MAX_EPUB_EXPANDED_BYTES = 200 * 1024 * 1024
@@ -170,7 +170,10 @@ def extract_document(filename: str, data: bytes) -> dict:
         raise DocumentImportError("文件为空。")
     if len(data) > MAX_IMPORT_BYTES:
         raise DocumentImportError("文件不能超过 80 MB。")
-    if suffix == ".txt":
+    if suffix in (".txt", ".md", ".markdown"):
+        # Markdown 必须**保留源码**：# 标题、``` 围栏、| 表格 | 是渲染与朗读
+        # 共用的结构信息。走 _plain_text 会把它们当 HTML 标签/文本洗掉，
+        # 技术笔记就只剩一坨分不清结构的纯文本。
         text = _decode_text(data)
     elif suffix == ".pdf":
         text = _extract_pdf(data)
@@ -180,4 +183,6 @@ def extract_document(filename: str, data: bytes) -> dict:
         text = _extract_mobi(data)
     if not text:
         raise DocumentImportError("没有从文件中提取到可朗读的文本。")
-    return {"title": Path(filename).stem, "type": suffix[1:], "text": text}
+    return {"title": Path(filename).stem,
+            "type": "md" if suffix in (".md", ".markdown") else suffix[1:],
+            "text": text}
