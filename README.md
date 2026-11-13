@@ -96,6 +96,26 @@
   走不通 —— 但同一台机器上跑一个本地 TTS 服务是同样的思路，这里就是为它留的口子。
   本机地址永远直连，系统代理（Clash 之类）不会掺和进来。
 
+### 两套本机引擎一键切换（1.12.0）
+
+设置 →「语音引擎」→「本机 TTS 连接设置」，最上面一行有两个按钮：
+**CosyVoice2 · GPU**（默认）和 **MOSS-Nano · ONNX**。点一下就切，不用手填地址、
+模型名或端口，也不会动到另一套的音频缓存（缓存键本来就带 url + model，切回来
+之前备好的书照样秒播）。按钮会标出各自有没有启动、缺哪些组件；⚡「正在合成」
+清单会显示当前后端（GPU / ONNX）和并发数。
+
+两套都说 OpenAI 兼容的 `/v1/audio/speech`，所以差异全在各自的服务进程里：
+
+| 引擎 | 实测 RTF | 显存 | 输出 | 音色 |
+|---|---|---|---|---|
+| CosyVoice2-0.5B | 0.52 | ~6GB | 24kHz 单声道 | 内置参考音频「默认女声」 |
+| MOSS-TTS-Nano（CUDA） | 0.47 | ~1GB | 48kHz 立体声 | 由现有女声生成的 7.5 秒参考音频克隆 |
+| MOSS-TTS-Nano（纯 CPU 回退） | 2.3 | 0 | 48kHz 立体声 | 同上 |
+
+RTF 用 `/api/tts/bench` 在同一台 4060 Ti 上量；数值随句子长度、显卡频率浮动，
+**< 1 才跟得上播放**。Nano 的 CPU 回退只在不具备 CUDA 环境时才走，那时建议
+只用「试听」或整本预合成，不要边听边备。
+
 ### 后台预合成全文（1.7.0 引入，1.10.0 重做，1.11.4 改为可边播边备）
 
 CUDA Graph 解码后吞吐 2 倍实时，「边听边备」重新成立 —— 但不能无脑并发：
@@ -379,6 +399,33 @@ Linux（NVIDIA 走 Docker，Apple Silicon 走 `install.sh`）：Windows 上
 没有 Windows wheel）。所以这里用官方 `qwen-tts` 原生推理，接口保持一致 ——
 哪天把模型挪到有卡的 Linux 机器上跑 `sgl-omni serve`，这边只改地址。
 
+## 可选：装第二套引擎 MOSS-TTS-Nano（1.12.0）
+
+MOSS-TTS 家族里 8B 旗舰在这张卡上跑不动实时听书（bf16 要 22GB+，Q4 量化
+RTF 也远大于 1），所以第二引擎选的是 **MOSS-TTS-Nano 0.1B 的 ONNX 版**：
+48kHz 立体声、中文零样本音色克隆、权重约 690MB。仓库与权重放在**项目目录外**
+（同级 `moss-tts-nano/`），不进 git。
+
+1. `conda create --solver classic -n moss-nano python=3.12 -y`
+2. `git clone --depth 1 https://github.com/OpenMOSS/MOSS-TTS-Nano.git ../moss-tts-nano`
+3. `pip install numpy sentencepiece soundfile flask huggingface_hub onnxruntime-gpu==1.20.0`
+   —— **不用装 torch**：官方 ONNX 脚本顶层 import torch/torchaudio 只是为了读参考
+   音频，适配层注入空壳模块并用 numpy + soundfile 替换了那一个方法。
+4. 把 `OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX` 与
+   `MOSS-Audio-Tokenizer-Nano-ONNX` 两个仓库的文件下到
+   `../moss-tts-nano/models/<同名目录>/`（国内可走 hf-mirror；大文件用代理更快）。
+5. 参考音频 `assets/reference_zh.wav`：让 CosyVoice 的「默认女声」读 7.5 秒中文，
+   ffmpeg 转成 48kHz 立体声。换音色只要换这个文件（或改 `MOSS_REF`）。
+6. 面板点「MOSS-Nano · ONNX」即自动拉起 `tts_moss_server.py`（端口 8892）；
+   也可以手动跑 `moss-nano/python.exe tts_moss_server.py --port 8892 --preload`。
+
+CUDA 后端：`onnxruntime-gpu 1.20.0` 要 CUDA 12 + cuDNN 9 的 DLL，本机没有独立
+CUDA Toolkit，用的是 cosyvoice 环境里 torch 自带的那些。启动时会把
+`torch/lib` 同时加进 `PATH` 和 `os.add_dll_directory`（只给一个会报 126），
+CUDA 起不来则自动回退 CPU。适配层实测最优参数：`thread_count=4`、
+`sample_mode=fixed`、`streaming=False`、参考音频 codes 缓存；
+`threads=8` 和 `greedy` 都更慢（后者还会莫名生成满 30 秒音频）。
+
 ## 边听边问（MiniCPM-o 4.5）
 
 使用 [Comni](https://github.com/tc-mb/llama.cpp-omni#-recommended-companion-demo--minicpm-o-demo-comni) 的 MiniCPM-o 4.5 量化模型启动本机推理 Worker 和网关。ReadAloud 连接网关的音频双工接口。网关需使用 HTTP 并仅监听 `127.0.0.1`，默认端口为 `8040`。从源码启动网关时，可使用 `python gateway.py --http --host 127.0.0.1 --port 8040`，Worker 的启动方式见 Comni 的部署说明。
@@ -495,6 +542,7 @@ AI 功能额外需要 [Ollama](https://ollama.com)；没有也能正常朗读，
 | `POST /api/books/<id>/progress` | 写进度 `{next,total}`（允许倒退），页面关闭时用 sendBeacon 兜底 |
 | `DELETE /api/books/<id>` | 从书架删掉一本书（正文一起删） |
 | `GET\|POST /api/tts/providers` | 语音引擎：查询/切换 `edge` 与 `local`，POST 带 `probe:true` 会探测本地 TTS 并返回模型与音色表 |
+| `GET\|POST /api/tts/engines` | 两套本机引擎：列出当前/是否启动/缺什么；POST `{engine:"cosy"\|"moss"}` 一键切换地址、模型、音色与启动脚本，并按需拉起服务（1.12.0） |
 | `POST /api/tts/local/start` | 一键拉起本机大模型 TTS：按脚本挑解释器（cosy→conda env，qwen→`.tts-venv`），状态机立即返回，就绪看下面的 status |
 | `GET /api/tts/local/status` | 本地 TTS 状态：`up`/`probe`（引擎名、模型、音色）/`starting`/`python`/`script`，以及 `config`（已自动写回的地址与音色）和 `log`（没起来时的 `tts.log` 尾巴） |
 | `GET /api/version` · `POST /api/restart` | 引擎版本与能力清单 / 原地热重启（进程号不变，先确认新代码能编译再关旧监听） |

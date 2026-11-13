@@ -1,0 +1,327 @@
+"""MOSS-TTS-Nano 适配层：把官方 ONNX 推理包成 OpenAI 兼容的 /v1/audio/speech。
+
+朗读引擎（server.py）只认一个约定：POST /v1/audio/speech，收
+{model, input, voice, response_format, speed}，回一段音频二进制。
+Nano 官方的 `moss-tts-nano serve` 是给浏览器 demo 用的 FastAPI，端口
+18083、请求格式没公开；这里直接调它自己的 OnnxTtsRuntime Python API，
+顺便把参考音频（voice cloning）、并发锁、wav/mp3 输出都收在一处。
+
+用 moss-nano 环境跑（Python 3.12 + numpy / onnxruntime / soundfile / flask，
+不需要 torch —— 见下面 _load_reference_numpy 的说明）：
+    .\\miniconda3\\envs\\moss-nano\\python.exe tts_moss_server.py --port 8892 --preload
+
+环境变量：
+    MOSS_NANO_DIR  Nano 仓库目录（默认项目同级的 moss-tts-nano）
+    MOSS_REF        参考音频 wav（默认 assets/reference_zh.wav）
+    MOSS_THREADS    onnxruntime 线程数（默认 4）
+"""
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import logging
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import types
+import wave
+from pathlib import Path
+
+from flask import Flask, Response, jsonify, request
+
+BASE = Path(__file__).resolve().parent
+NANO_DIR = Path(os.environ.get("MOSS_NANO_DIR") or (BASE.parent / "moss-tts-nano")).resolve()
+REF = Path(os.environ.get("MOSS_REF") or (BASE / "assets" / "reference_zh.wav")).resolve()
+THREADS = int(os.environ.get("MOSS_THREADS") or 4)
+# 本机的 CUDA 12 DLL 由 cosyvoice 环境的 torch 自带（没装独立 CUDA Toolkit）。
+# ONNX Runtime 的 CUDA provider 要能 LoadLibrary 到它们，PATH 与 add_dll_directory
+# 都得给，且必须在 import onnxruntime 之前 —— 实测只给其中一个会报 126。
+CUDA_DLL = (Path.home() / "miniconda3" / "envs" / "cosyvoice" / "Lib"
+            / "site-packages" / "torch" / "lib")
+if CUDA_DLL.is_dir():
+    os.environ["PATH"] = str(CUDA_DLL) + os.pathsep + os.environ.get("PATH", "")
+    try:
+        os.add_dll_directory(str(CUDA_DLL))
+    except (AttributeError, OSError):
+        pass
+MODEL = "MOSS-TTS-Nano-100M-ONNX"
+VOICE = "readaloud-zh"          # 用现有女声生成的 7.5 秒参考音频克隆出来的音色
+NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+sys.path.insert(0, str(NANO_DIR))
+
+# onnx_tts_runtime.py 顶层 import torch/torchaudio，但 ONNX 推理路径里它们只用于
+# 读参考音频（_load_reference_audio）。本机参考音频已按 codec 要求备成 48kHz
+# 立体声，下面注入两个空壳模块并用 numpy 版替换那个方法 —— 于是整个服务
+# 不需要装 200MB+ 的 torch，纯 numpy + onnxruntime + soundfile 就够。
+if "torch" not in sys.modules:
+    _t = types.ModuleType("torch")
+    _t.float32 = "float32"
+    sys.modules["torch"] = _t
+    _ta = types.ModuleType("torchaudio")
+    _ta.functional = types.SimpleNamespace(resample=lambda w, a, b: w)
+    sys.modules["torchaudio"] = _ta
+
+
+def _load_reference_numpy(self, path):
+    import numpy as np
+    import soundfile as sf
+    data, sr = sf.read(str(Path(path).expanduser().resolve()),
+                       dtype="float32", always_2d=True)     # (frames, channels)
+    wav = np.ascontiguousarray(data.T)                     # (channels, frames)
+    cfg = self.codec_meta["codec_config"]
+    target_sr, target_ch = int(cfg["sample_rate"]), int(cfg["channels"])
+    if sr != target_sr:
+        n = max(1, int(round(wav.shape[1] * target_sr / sr)))
+        idx = np.linspace(0, wav.shape[1] - 1, n)
+        wav = np.stack([np.interp(idx, np.arange(wav.shape[1]), ch) for ch in wav])
+    if wav.shape[0] == 1 and target_ch > 1:
+        wav = np.repeat(wav, target_ch, axis=0)
+    elif wav.shape[0] > 1 and target_ch == 1:
+        wav = wav.mean(axis=0, keepdims=True)
+    return wav[None, ...].astype(np.float32, copy=False)   # (1, channels, frames)
+
+
+app = Flask(__name__)
+log = logging.getLogger("moss")
+
+_runtime = None
+_init_lock = threading.Lock()
+_synth_lock = threading.Lock()      # ONNX session 不是线程安全的，串行最稳
+_state = {"loading": False, "error": "", "load_seconds": 0.0, "done": 0,
+          "backend": "", "provider": ""}
+
+
+def _pick_provider() -> str:
+    """auto = 能用 CUDA 就用（实测 RTF 0.9 vs CPU 2.3），否则退回 CPU。"""
+    want = (os.environ.get("MOSS_EXEC_PROVIDER") or "auto").strip().lower()
+    if want in ("cpu", "cuda"):
+        return want
+    if not CUDA_DLL.is_dir():
+        return "cpu"
+    try:
+        import onnxruntime as ort
+        ort.set_default_logger_severity(3)     # 压掉 Memcpy 节点的警告刷屏
+        return "cuda" if "CUDAExecutionProvider" in ort.get_available_providers() else "cpu"
+    except Exception:                                            # noqa: BLE001
+        return "cpu"
+
+
+def _make_runtime(provider: str):
+    from onnx_tts_runtime import OnnxTtsRuntime
+    # 用 numpy 版替换 torchaudio.load（见文件头说明）
+    OnnxTtsRuntime._load_reference_audio = _load_reference_numpy
+    rt = OnnxTtsRuntime(
+        model_dir=None,                 # 用仓库默认的 models/（已放好 ONNX 权重）
+        thread_count=THREADS,
+        max_new_frames=int(os.environ.get("MOSS_MAX_FRAMES") or 375),
+        do_sample=True,
+        sample_mode="fixed",
+        execution_provider=provider,
+    )
+    # 参考音频编码每句都要做一次（1.2s），音色不变时直接复用 codes。
+    _orig_encode = rt.encode_reference_audio
+    _ref_cache = {}
+
+    def _encode_cached(path, _orig=_orig_encode, _cache=_ref_cache):
+        key = str(path)
+        if key not in _cache:
+            _cache[key] = _orig(path)
+        return _cache[key]
+
+    rt.encode_reference_audio = _encode_cached
+    return rt
+
+
+def _runtime_get():
+    global _runtime
+    if _runtime is not None:
+        return _runtime
+    with _init_lock:
+        if _runtime is not None:
+            return _runtime
+        t0 = time.time()
+        _state.update(loading=True, error="")
+        try:
+            if not REF.is_file():
+                raise FileNotFoundError(f"找不到参考音频：{REF}")
+            provider = _pick_provider()
+            try:
+                _runtime = _make_runtime(provider)
+            except Exception as e:                              # noqa: BLE001
+                if provider != "cuda":
+                    raise
+                log.warning("CUDA 后端起不来，退回 CPU：%s", e)
+                provider = "cpu"
+                _runtime = _make_runtime("cpu")
+            _state.update(provider=provider,
+                          backend="onnx-cuda" if provider == "cuda" else "onnx-cpu",
+                          load_seconds=round(time.time() - t0, 1))
+            log.info("Nano ONNX 就绪：%s，用时 %.1fs，参考音频 %s",
+                     _state["backend"], _state["load_seconds"], REF)
+        except BaseException as e:                              # noqa: BLE001
+            _state["error"] = f"{type(e).__name__}: {e}"
+            log.exception("Nano 模型加载失败")
+        finally:
+            _state["loading"] = False
+    return _runtime
+
+
+def _ffmpeg() -> str:
+    exe = shutil.which("ffmpeg") or ""
+    if not exe:
+        for cand in (r"C:\Users\bo\miniconda3\Library\bin\ffmpeg.exe",):
+            if os.path.exists(cand):
+                return cand
+    return exe
+
+
+def _wav_bytes(waveform, sample_rate: int) -> bytes:
+    import numpy as np
+    audio = np.asarray(waveform, dtype=np.float32)
+    if audio.ndim == 1:
+        audio = audio.reshape(-1, 1)
+    pcm = np.round(np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16)
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(int(pcm.shape[1]))
+        w.setsampwidth(2)
+        w.setframerate(int(sample_rate))
+        w.writeframes(pcm.tobytes())
+    return buf.getvalue()
+
+
+def _convert(wav: bytes, fmt: str, speed: float) -> tuple[bytes, str]:
+    """默认直接给 WAV；要 MP3 或调了语速才过一次 ffmpeg（很短，不额外训练）。"""
+    if fmt != "mp3" and abs(speed - 1.0) < 0.01:
+        return wav, "audio/wav"
+    exe = _ffmpeg()
+    if not exe:
+        return wav, "audio/wav"
+    args = [exe, "-y", "-loglevel", "error", "-f", "wav", "-i", "pipe:0"]
+    if abs(speed - 1.0) >= 0.01:
+        # atempo 单级只接受 0.5~2.0，我们界面里最多 ±30%，够用
+        args += ["-filter:a", f"atempo={max(0.5, min(2.0, speed)):.3f}"]
+    if fmt == "mp3":
+        args += ["-codec:a", "libmp3lame", "-b:a", "96k", "-f", "mp3", "pipe:1"]
+        mime = "audio/mpeg"
+    else:
+        # 让 ffmpeg 只吐裸 PCM：它直接写 WAV 到管道时会把 data 长度写成
+        # 0xFFFFFFFF（未知长度），浏览器和时长统计都容易算错。
+        args += ["-f", "s16le", "-acodec", "pcm_s16le", "pipe:1"]
+        mime = "audio/wav"
+    try:
+        r = subprocess.run(args, input=wav, capture_output=True, timeout=60,
+                           creationflags=NO_WINDOW)
+        if r.returncode == 0 and r.stdout:
+            if fmt == "mp3":
+                return r.stdout, mime
+            with wave.open(io.BytesIO(wav)) as src:
+                ch, sr, sw = src.getnchannels(), src.getframerate(), src.getsampwidth()
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as out:
+                out.setnchannels(ch)
+                out.setsampwidth(sw)
+                out.setframerate(sr)
+                out.writeframes(r.stdout)
+            return buf.getvalue(), mime
+        log.warning("ffmpeg 转码失败：%s", (r.stderr or b"")[:300])
+    except Exception as e:                                      # noqa: BLE001
+        log.warning("ffmpeg 不可用：%s", e)
+    return wav, "audio/wav"
+
+
+@app.get("/health")
+def health():
+    return jsonify({"ok": True, "engine": "moss-tts-nano", "model": MODEL,
+                    "loading": bool(_state["loading"]), "error": _state["error"],
+                    "ready": _runtime is not None, "load_seconds": _state["load_seconds"],
+                    "done": _state["done"], "backend": _state["backend"] or "onnx-auto",
+                    "provider": _state["provider"], "voices": [VOICE]})
+
+
+@app.get("/v1/models")
+def models():
+    return jsonify({"object": "list", "data": [{"id": MODEL, "object": "model",
+                                                "owned_by": "openmoss"}]})
+
+
+@app.get("/v1/voices")
+@app.get("/v1/audio/voices")
+def voices():
+    return jsonify({"voices": [{"id": VOICE, "name": "ReadAloud 中文女声（克隆）"}]})
+
+
+@app.post("/warmup")
+def warmup():
+    if _runtime_get() is None:
+        return jsonify({"ok": False, "error": _state["error"]}), 500
+    return jsonify({"ok": True, "load_seconds": _state["load_seconds"]})
+
+
+@app.post("/v1/audio/speech")
+def speech():
+    body = request.get_json(silent=True) or {}
+    text = str(body.get("input") or body.get("text") or "").strip()
+    if not text:
+        return jsonify({"ok": False, "error": "input 为空"}), 400
+    if len(text) > 2000:
+        text = text[:2000]
+    try:
+        speed = float(body.get("speed") or 1.0)
+    except (TypeError, ValueError):
+        speed = 1.0
+    speed = max(0.5, min(2.0, speed))
+    fmt = str(body.get("response_format") or "wav").lower()
+    if fmt not in ("wav", "mp3"):
+        fmt = "wav"
+
+    rt = _runtime_get()
+    if rt is None:
+        return jsonify({"ok": False, "error": f"模型没加载好：{_state['error']}"}), 500
+
+    t0 = time.time()
+    try:
+        with _synth_lock:
+            result = rt.synthesize(
+                text=text,
+                voice=None,
+                prompt_audio_path=str(REF),
+                sample_mode="fixed",
+                do_sample=True,
+                streaming=False,              # 实测比流式解码快 ~1.8 倍
+                max_new_frames=375,
+                voice_clone_max_text_tokens=75,
+                enable_wetext=False,          # 不装 pynini：数字读法由主引擎的读音规整负责
+                enable_normalize_tts_text=True,
+            )
+        wav = _wav_bytes(result["waveform"], int(result["sample_rate"]))
+        data, mime = _convert(wav, fmt, speed)
+        _state["done"] += 1
+        log.info("合成 %d 字 %.1fs → %d KB（%s）", len(text), time.time() - t0,
+                 len(data) // 1024, mime)
+        return Response(data, mimetype=mime)
+    except Exception as e:                                      # noqa: BLE001
+        log.exception("合成失败")
+        return jsonify({"ok": False, "error": f"{type(e).__name__}: {e}"}), 502
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=8892)
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--preload", action="store_true")
+    args = ap.parse_args()
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    if args.preload:
+        _runtime_get()
+    app.run(host=args.host, port=args.port, threaded=True, use_reloader=False)
+
+
+if __name__ == "__main__":
+    main()

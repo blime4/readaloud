@@ -942,6 +942,12 @@
     </div>
     <details class="help" id="ttsLocalBox" style="display:none;border-top:1px solid var(--line)">
       <summary>本机 TTS 连接设置</summary>
+      <div class="row" style="border:0;padding:6px 0;gap:8px">
+        <label style="width:44px">引擎</label>
+        <button class="tiny" id="btnEngCosy" title="CosyVoice2 0.5B：GPU 合成，音质稳定">CosyVoice2 · GPU</button>
+        <button class="tiny" id="btnEngMoss" title="MOSS-TTS-Nano 0.1B：ONNX，CUDA 优先、自动回退 CPU">MOSS-Nano · ONNX</button>
+        <span class="hint" id="engMsg" style="flex:1;min-width:0"></span>
+      </div>
       <div class="cactions" style="padding:6px 0 8px;gap:8px">
         <button class="primary tiny" id="btnTtsStart" title="引擎会自己挑选环境并拉起本机 TTS 服务">▶ 一键启动本机 TTS</button>
         <button class="ghost tiny" id="btnPresetCosy" title="填入 CosyVoice2 的默认地址与音色">CosyVoice2 预设</button>
@@ -1608,8 +1614,8 @@ async function loadHealth() {
    不提示的话会出现「页面是新的、引擎还是两天前的旧版」却没人察觉。 */
 const REQUIRED_FEATURES = ['structured-items', 'prosody-normalize', 'local-document-import',
   'bookshelf', 'tts-provider', 'presynth-hold', 'presynth-resume', 'remote-audio',
-  'task-monitor', 'task-stop'];
-const MIN_ENGINE = '1.11.14';   // 页面用到的引擎能力下限，升一次改一次
+  'task-monitor', 'task-stop', 'tts-engine-switch'];
+const MIN_ENGINE = '1.12.0';    // 页面用到的引擎能力下限，升一次改一次
 
 function cmpVer(a, b) {
   const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
@@ -1729,8 +1735,54 @@ async function loadTts() {
     // 选了本机大模型但服务没起来：自动帮用户拉起，别等他自己发现
     // "连不上 / 没有音色 / 试听失败"再去找按钮（以前就是这三条报错一起出现）。
     if (TTS_PROVIDER === 'local' && d.local && !d.local.ok && ONLINE) maybeAutoStartTts();
+    loadEngines();                 // 两套本机引擎的按钮状态（旧引擎无此接口时静默跳过）
   } catch (e) { /* 引擎老版本没有这个接口，按 edge 走 */ }
 }
+
+/* ---------- 本机引擎切换：CosyVoice2(GPU) / MOSS-TTS-Nano(CPU) ----------
+   两套服务都说 OpenAI 兼容的 /v1/audio/speech，所以切换只是改引擎的地址、
+   模型名和启动脚本；音频缓存键本来就带 url/model，切回来旧缓存照样命中。 */
+let ENGINES = { current: 'cosy', engines: [] };
+async function loadEngines() {
+  try {
+    const d = await (await fetch(API + '/api/tts/engines')).json();
+    if (!d.ok) return;
+    ENGINES = d;
+    paintEngines();
+  } catch (e) { /* 旧引擎没这个接口 */ }
+}
+function paintEngines() {
+  const cur = ENGINES.current || 'cosy';
+  const list = ENGINES.engines || [];
+  for (const [id, sel] of [['cosy', '#btnEngCosy'], ['moss', '#btnEngMoss']]) {
+    const btn = $(sel); if (!btn) continue;
+    const e = list.find(x => x.id === id) || {};
+    btn.className = 'tiny ' + (id === cur ? 'primary' : 'ghost');
+    btn.title = [e.note, e.up ? '已启动' : '未启动',
+                 (e.missing && e.missing.length) ? '还缺：' + e.missing.join('、') : '']
+                .filter(Boolean).join(' · ');
+  }
+  const msg = $('#engMsg');
+  if (msg) msg.textContent = (list.find(x => x.id === cur) || {}).note || '';
+}
+async function switchEngine(id) {
+  const btn = $(id === 'moss' ? '#btnEngMoss' : '#btnEngCosy');
+  if (btn) btn.disabled = true;
+  const msg = $('#engMsg'); if (msg) msg.textContent = '正在切换引擎…';
+  try {
+    const d = await (await fetch(API + '/api/tts/engines', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ engine: id }),
+    })).json();
+    if (!d.ok) { toast('切换失败：' + (d.error || '未知错误'), 7000); return; }
+    toast(d.msg || '引擎已切换', 5000);
+    await loadTts();
+    await loadEngines();
+  } catch (e) { toast('切换失败：' + e.message, 6000); }
+  finally { if (btn) btn.disabled = false; paintEngines(); }
+}
+$('#btnEngCosy').onclick = () => switchEngine('cosy');
+$('#btnEngMoss').onclick = () => switchEngine('moss');
 
 /* 本机 TTS 自动拉起：只对引擎自家默认地址（127.0.0.1:8891）生效 —— 用户配了
    别的 OpenAI 兼容服务时，擅自起我们这份 CosyVoice 反而是打扰。每次页面
@@ -2204,6 +2256,7 @@ function paintTaskList(d) {
 
   // 顶栏：并发占用 / 显卡频率 / 后台是否被按住
   const bits = [`本机并发 <b>${d.fg | 0}</b>/${conc}`];
+  if (d.backend === 'onnx') bits.push('ONNX · CUDA 优先');
   if (gpu.clk) bits.push(`显卡 ${gpu.clk}MHz${gpu.clk_max ? '/' + gpu.clk_max : ''}`);
   if (gpu.power) bits.push(`${gpu.power}W`);
   if (TK.quiet > 0) bits.push(`后台已按住，还有 ${tkLeft(TK.quiet)}`);

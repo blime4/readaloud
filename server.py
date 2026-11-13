@@ -122,6 +122,8 @@ DEFAULT_CONFIG = {
     "tts_local_args": "",           # 额外启动参数，例如 "--fp16"（半精度，显存吃紧时可试）
     "tts_local_env": "",            # 额外环境变量，写法 "K=V;K2=V2"（见 start_local_tts）
     "tts_local_split": 30,          # 本地合成超过这个字数就把长句切两段并发（0 关闭）
+    # 当前本机引擎：cosy=CosyVoice2（GPU），moss=MOSS-TTS-Nano（纯 CPU / ONNX）
+    "tts_engine": "cosy",
     # 播放时按住电源请求，别让系统进待机：待机状态下显卡只有 500MHz，
     # 合成时间直接翻倍（实测 RTF 1.07 → 2.2）。见 _awake_hold。
     "keep_display_awake": True,
@@ -131,7 +133,44 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.11.14"
+ENGINE_VERSION = "1.12.0"
+
+# --------------------------------------------------------------------------
+# 本机引擎注册表：两套 TTS 都能用同一个 /v1/audio/speech 约定，切换只改配置
+#
+# cosy 走 GPU（0.5B，实测 RTF 0.91，音质稳）；moss 是 Nano 0.1B 的 ONNX 版，
+# 纯 CPU 跑、完全不占显卡，适合 A/B 试听或把显卡腾给别的事。两套的音频缓存
+# 键里本来就带 url/model，切换不会串音，也不用清缓存。
+# --------------------------------------------------------------------------
+def _engine_profile(eid: str) -> dict:
+    moss_py = Path.home() / "miniconda3" / "envs" / "moss-nano" / "python.exe"
+    cosy_py = Path.home() / "miniconda3" / "envs" / "cosyvoice" / "python.exe"
+    if eid == "moss":
+        nano = (Path(os.environ.get("MOSS_NANO_DIR") or (BASE.parent / "moss-tts-nano"))).resolve()
+        ref = (BASE / "assets" / "reference_zh.wav").resolve()
+        return {
+            "id": "moss", "label": "MOSS-TTS-Nano · ONNX",
+            "note": "0.1B / 48kHz 立体声，音色由参考音频克隆；CUDA 可用时 RTF≈0.9，"
+                    "自动回退 CPU（RTF≈2.3）。",
+            "url": "http://127.0.0.1:8892", "model": "MOSS-TTS-Nano-100M-ONNX",
+            "voice": "readaloud-zh", "script": "tts_moss_server.py",
+            "python": str(moss_py) if moss_py.exists() else "",
+            "args": "--preload",
+            "env": f"MOSS_NANO_DIR={nano};MOSS_REF={ref}",
+            "nano_dir": str(nano), "ref": str(ref),
+        }
+    return {
+        "id": "cosy", "label": "CosyVoice2 · GPU",
+        "note": "0.5B 本地大模型，显存约 6GB，实测 RTF 0.91；现在的默认引擎。",
+        "url": "http://127.0.0.1:8891", "model": "CosyVoice2-0.5B",
+        "voice": "默认女声", "script": "tts_cosy_server.py",
+        "python": str(cosy_py) if cosy_py.exists() else "",
+        "args": "--fp16 --preload",
+        "env": "COSY_TTS_CONCURRENCY=2",
+    }
+
+
+LOCAL_ENGINES = ("cosy", "moss")
 
 # 引擎"我具备哪些能力"的清单。网页端连上后会核对，缺项就提示用户重启引擎
 # —— 因为改完 server.py 进程不会自己换代码，很容易"新页面配旧引擎"而无人察觉。
@@ -159,6 +198,7 @@ FEATURES = [
     "task-stop",            # /api/tasks/stop：一键停预合成 / 暂停后台 30 分钟
     "tts-bench",            # /api/tts/bench：量本机合成的 RTF，判断能不能跟上播放
     "tts-autostart",        # /api/tts/local：一键拉起本机大模型 TTS 并自动写回配置
+    "tts-engine-switch",    # /api/tts/engines：CosyVoice2(GPU) / MOSS-TTS-Nano(CPU) 一键切换
     "engine-upgrade",       # /api/restart + /api/update：原地热重启、git pull 自升级
 ]
 
@@ -520,7 +560,11 @@ def synth(text: str, voice: str, rate: str, pitch: str, volume: str,
         # 长句切成两段并发合成（tts_cosy_server 允许 2 条并发，单条喂不饱
         # 显卡；长句本身还因流式分块而 RTF 翻倍）。两段各自落缓存——同一句
         # 倒回去重听时，段缓存直接命中，只差一次内存拼接。
-        segs = _local_split(text, int(CFG.get("tts_local_split") or 30))
+        # 0 真的表示「关闭」：以前写 `CFG.get(...) or 30`，设成 0 会被吞掉，
+        # 结果换到不需要切句的引擎时长句仍被拆两段再拼（还会拷出坏 WAV 头）。
+        _split_raw = CFG.get("tts_local_split", 30)
+        _split = 30 if _split_raw in (None, "") else int(_split_raw)
+        segs = _local_split(text, _split) if _split > 0 else None
         if segs and fmt in ("wav", "mp3"):
             parts: list = [None, None]
 
@@ -2307,13 +2351,17 @@ def api_tasks():
         conc = max(1, min(4, int(os.environ.get("COSY_TTS_CONCURRENCY", "2"))))
     except (TypeError, ValueError):
         conc = 2
-    if (CFG.get("tts_provider") or "") == "local":
+    is_moss = (CFG.get("tts_engine") or "cosy") == "moss"
+    if is_moss:
+        conc = 1                     # ONNX session 串行，清单里别显示 GPU 的 2/2
+    if (CFG.get("tts_provider") or "") == "local" and not is_moss:
         gpu = _gpu_clocks()
     else:
         gpu = {}
     return jsonify({
         "ok": True, "now": time.time(), "jobs": rows, "fg": fg,
         "conc": conc, "provider": CFG.get("tts_provider") or "edge",
+        "backend": "onnx" if is_moss else "gpu",
         "presynth": pre, "gpu": gpu, "quiet_left": _quiet_left(),
     })
 
@@ -2830,7 +2878,9 @@ def _gpu_apply_lock(elevate: bool = True) -> dict:
 def start_local_tts() -> dict:
     """后台拉起本机 TTS，立刻返回。真正就绪要看 /health（模型要加载十几秒）。"""
     lock = None
-    if os.name == "nt" and CFG.get("gpu_clock_lock"):
+    # Nano 是纯 CPU 引擎，别为了它去锁显卡频率（还可能弹一次 UAC）
+    if (os.name == "nt" and CFG.get("gpu_clock_lock")
+            and (CFG.get("tts_engine") or "cosy") != "moss"):
         try:
             lock = _gpu_apply_lock()               # 合成慢的头号原因就是掉频
         except Exception as e:                     # noqa: BLE001
@@ -2859,6 +2909,12 @@ def start_local_tts() -> dict:
             k, v = pair.split("=", 1)
             if k.strip():
                 env[k.strip()] = v.strip()
+    if script.name.startswith("tts_moss"):
+        # Nano 走 ONNX CUDA provider 时，要能找到 torch 自带的 CUDA 12 DLL
+        cuda_dll = (Path.home() / "miniconda3" / "envs" / "cosyvoice" / "Lib"
+                    / "site-packages" / "torch" / "lib")
+        if cuda_dll.is_dir():
+            env["PATH"] = str(cuda_dll) + os.pathsep + env.get("PATH", "")
     flags = (0x00000008 | 0x00000200 | 0x08000000) if os.name == "nt" else 0
     try:
         out = open(BASE / "tts.log", "ab")
@@ -2957,6 +3013,78 @@ def api_tts_local_status():
                     "port": _tts_port(), "adopted": adopt.get("adopted", False),
                     "config": adopt.get("config", {}),
                     "log": "" if up else _tts_log_tail()})
+
+
+@app.get("/api/tts/engines")
+def api_tts_engines():
+    """本机两套 TTS 的现状：现在用哪个、各自起没起来、缺什么。"""
+    cur = (CFG.get("tts_engine") or "cosy").lower()
+    rows = []
+    for eid in LOCAL_ENGINES:
+        p = _engine_profile(eid)
+        try:
+            up = bool(TTS.probe(p["url"], "", timeout=0.8).get("ok"))
+        except Exception:                                        # noqa: BLE001
+            up = False
+        missing = []
+        if eid == "moss":
+            if not p["python"]:
+                missing.append("moss-nano Python 环境")
+            if not (BASE / p["script"]).exists():
+                missing.append("tts_moss_server.py")
+            if not Path(p["ref"]).exists():
+                missing.append("参考音频 assets/reference_zh.wav")
+            if not (Path(p["nano_dir"]) / "models" / "browser_poc_manifest.json").exists() \
+               and not (Path(p["nano_dir"]) / "models" / "MOSS-TTS-Nano-100M-ONNX"
+                        / "browser_poc_manifest.json").exists():
+                missing.append("Nano ONNX 权重")
+        rows.append({"id": eid, "label": p["label"], "note": p["note"],
+                     "url": p["url"], "up": up, "missing": missing,
+                     "ready": up or not missing})
+    return jsonify({"ok": True, "current": cur, "engines": rows})
+
+
+@app.post("/api/tts/engines")
+def api_tts_engines_switch():
+    """一键切换本机引擎：改地址/模型/音色/启动脚本，并按需把新服务拉起来。"""
+    body = request.get_json(silent=True) or {}
+    eid = (body.get("engine") or body.get("id") or "").strip().lower()
+    if eid not in LOCAL_ENGINES:
+        return jsonify({"ok": False, "error": f"不认识的本机引擎：{eid}"}), 400
+    p = _engine_profile(eid)
+    if eid == "moss":
+        absent = []
+        if not p["python"]:
+            absent.append("moss-nano Python 环境（conda create -n moss-nano python=3.12）")
+        if not Path(p["ref"]).exists():
+            absent.append("参考音频 assets/reference_zh.wav")
+        nano_models = Path(p["nano_dir"]) / "models"
+        if not list(nano_models.glob("**/browser_poc_manifest.json")):
+            absent.append("Nano ONNX 权重（models/）")
+        if absent:
+            return jsonify({"ok": False, "error": "MOSS-TTS-Nano 还没装好：" + "、".join(absent),
+                            "missing": absent}), 409
+    CFG.update({
+        "tts_engine": eid, "tts_provider": "local",
+        "tts_local_url": p["url"], "tts_local_model": p["model"],
+        "tts_local_voice": p["voice"],
+        # CosyVoice 靠 8891 端口就能自动猜到脚本/解释器；只有 Nano 的
+        # moss-nano 环境必须显式写，否则会被猜成 cosyvoice 环境。
+        "tts_local_script": "" if eid == "cosy" else p["script"],
+        "tts_local_python": "" if eid == "cosy" else p["python"],
+        "tts_local_args": p["args"],
+        "tts_local_env": p["env"], "tts_local_format": "wav",
+        # Nano 自己会按 token 分块，主引擎再切两段反而会多一次克隆编码
+        "tts_local_split": 0 if eid == "moss" else 30,
+    })
+    save_config(CFG)
+    report = _tts_local_report(force=True)
+    started = None
+    if not report.get("ok"):
+        started = start_local_tts()
+    return jsonify({"ok": True, "engine": eid, "label": p["label"],
+                    "probe": report, "started": started,
+                    "msg": "切到 " + p["label"] + ("（正在启动…）" if started else "（已就绪）")})
 
 
 @app.get("/api/tts/providers")
@@ -3258,7 +3386,11 @@ def _media_seconds(path: Path, mime: str) -> float:
             cid = head[pos:pos + 4]
             csz = struct.unpack_from("<I", head, pos + 4)[0]
             if cid == b"data":
-                return (csz or max(0, size - pos - 8)) / byte_rate
+                # ffmpeg 往管道写 WAV 时 data 长度常是 0xFFFFFFFF（未知长度）；
+                # 拿它当真值会把时长算成 6 小时，测速的 RTF 直接失真。
+                if csz in (0, 0xFFFFFFFF):
+                    csz = max(0, size - pos - 8)
+                return csz / byte_rate
             pos += 8 + csz + (csz & 1)      # 块按偶数字节对齐
         return 0.0
     if mime == "audio/mpeg":
