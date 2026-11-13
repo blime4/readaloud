@@ -110,6 +110,16 @@ check("中英之间插空格", N.normalize("AI产品线"), "AI 产品线")
 check("关闭时保持原文", N.normalize("价格 $1,280", enabled=False), "价格 $1,280")
 check("用户词典生效", N.normalize("用 K8s 部署"), "用 Kubernetes 部署")
 
+# 纯英文段落走轻量模式：中文专属的符号/日期/货币/百分号读法一律不套，
+# 否则英文书会把 "R&D" 念成 "R和D"、"and/or" 念成 "and和or"。
+en_raw = "R&D and/or AI/ML cost $1,280 (62%) on 2026-10-14, see v1.2 & C++."
+check("英文符号不被念成中文", N.normalize(en_raw), en_raw)
+check("英文 C++ 不套中文发音", "C 加加" in N.normalize("The C++ class uses std::vector<int>."), False)
+check("英文 K8s 通用转写仍生效", "Kubernetes" in N.normalize("We run K8s in production clusters."), True)
+check("中文读音规整不受影响", "1280美元" in N.normalize("价格 $1,280"), True)
+check("英文块结尾不冒出中文句号",
+      "。" in N.prepare("R&D and/or AI/ML cost $1,280,")["segments"][0], False)
+
 print("=== 4) 逐句切分（这是旧版最大的问题）===")
 t = "他停顿了一下，说：“这样做是对的。”然后转身就走了。"
 items = N.split_items("", blocks=[{"kind": "para", "text": t}])
@@ -184,13 +194,43 @@ check("句间孤立句号被丢掉",
 punct_para = N.prepare("第一段内容。\n\n.\n\n第二段内容。")
 check("整段只有标点也不进朗读稿", punct_para["segments"], ["第一段内容。", "第二段内容。"])
 
-# 英文长句超过 max_len 时必须断在空格上，不能把单词拦腰斩断。
-# 真实案例："...blue blood to m" / "arry his son." —— 用户听到的是"呃姆、阿瑞"。
+# 英文长句：旧版沿用中文的 62 字符上限，78 字符的英文句被切成
+# "…blue blood to" / "marry his son." —— 断在介词后面，念起来就是半截话。
+# 旧断言「第二段以 marry 开头」其实把这个毛病固化成了预期，一并纠正。
 long_en = ("The earl refuses to allow anyone who is not of blue blood "
            "to marry his son.")
 en_items = N.split_items(long_en)
-check("英文长句按空格切分", " ".join(i["text"] for i in en_items), long_en)
-check("第二段以完整词开头", en_items[-1]["text"].split()[0], "marry")
+check("英文长句无损拼接", " ".join(i["text"] for i in en_items), long_en)
+check("中等长度英文整句成条", len(en_items), 1)
+check("不再把 to marry 切开", "to marry his son." in en_items[0]["text"], True)
+
+# 用户真实案例：C++ 教材的破折号插入语。旧版剁成 4 段，分别断在
+# "through" / "a" / "a" 后面，逐句高亮跟着一堆半截话走。
+cpp_en = ("When a class is a resource handle – that is, when the class is "
+          "responsible for an object accessed through a pointer – the default "
+          "memberwise copy is typically a disaster.")
+cpp_items = N.split_items(cpp_en)
+check("破折号插入语整句成条", len(cpp_items), 1)
+check("英文案例无损拼接", " ".join(i["text"] for i in cpp_items), cpp_en)
+check("英文书端到端仍是完整句", N.prepare(cpp_en)["segments"], [cpp_en])
+
+# 真正超长的英文才分段，且必须落在标点 / 从句边界，绝不结束在冠词、
+# 介词、be 动词、助动词这些"悬空词"上。
+very_long = (
+    "When a class is a resource handle – that is, when the class is responsible for an "
+    "object accessed through a pointer – the default memberwise copy is typically a "
+    "disaster, because it would violate the invariant that the pointer points to exactly "
+    "one object, and a copy would silently give two independent handles to the same "
+    "resource, which means that both destructors would try to delete the same object "
+    "when they go out of scope.")
+vl = N.split_items(very_long)
+check("超长英文仍会分段", len(vl) >= 2, True)
+check("超长英文无损拼接", " ".join(i["text"] for i in vl), very_long)
+for j, it in enumerate(vl[:-1]):
+    tail_word = it["text"].rstrip(",.!?;:–—-()\"'").split()[-1].lower()
+    check(f"第 {j + 1} 段不结束在悬空词上（{tail_word}）",
+          tail_word in N.EN_DANGLING, False)
+
 check("丢掉标点后不丢停顿",
       N.split_items("", blocks=[{"kind": "para", "text": punct_mix}])[0]["pause"] >= 330, True)
 

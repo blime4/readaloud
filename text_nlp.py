@@ -228,10 +228,16 @@ def load_pron() -> dict:
     return data
 
 
-def apply_pron(text: str, tech: bool = False) -> str:
+def apply_pron(text: str, tech: bool = False, latin: bool = False) -> str:
     d = dict(load_pron())
     if tech:
         d.update(TECH_PRON)
+    if latin:
+        # 英文书里别套中文发音（C++ -> "C 加加"、.NET -> "道耐特"），
+        # K8s -> Kubernetes 这类通用转写和用户自定义词典照常生效。
+        for k, v in list(d.items()):
+            if k in DEFAULT_PRON and re.search(r"[\u3400-\u9fff]", v):
+                d.pop(k, None)
     if not d:
         return text
     pat = re.compile("|".join(re.escape(k) for k in sorted(d, key=len, reverse=True)))
@@ -545,7 +551,8 @@ def _num_cn_group(raw: str) -> str:
     return raw
 
 
-def normalize(text: str, enabled: bool = True, tech: bool = False) -> str:
+def normalize(text: str, enabled: bool = True, tech: bool = False,
+              latin: bool | None = None) -> str:
     """把符号/数字/日期读法规整成"念出来自然"的样子。
 
     刻意保守：只处理"朗读必定出问题"的写法，且每条规则都可解释。
@@ -555,6 +562,10 @@ def normalize(text: str, enabled: bool = True, tech: bool = False) -> str:
     （& -> 和、-> -> 到、* / ^ 删掉、括号改逗号、AI/ML -> AI和ML），
     这些已由 tech_inline() 按语境转写过；数字/日期/百分号/中英空格等
     通用规则照常复用。小说路径 tech=False，行为完全不变。
+
+    latin=None 自动识别：纯英文段落走轻量英文模式，跳过所有中文专属的
+    日期/货币/百分号/符号读法 —— 否则英文书会把 "R&D" 念成 "R和D"、
+    "and/or" 念成 "and和or"、"62%" 念成 "百分之62"、(see Ch.7) 变成中文逗号。
     """
     if not text:
         return ""
@@ -578,6 +589,21 @@ def normalize(text: str, enabled: bool = True, tech: bool = False) -> str:
     table.update({ord("％"): "%", ord("＋"): "+", ord("－"): "-", ord("＝"): "=",
                   ord("＄"): "$", ord("＃"): "#", ord("＆"): "&", ord("／"): "/"})
     s = s.translate(table)
+
+    # 1.5) 纯英文：只做中英空格 / 空白规整 / 用户词典，不套中文读法。
+    #      英文 TTS 自己会处理 62%、$1,280、2026-10-14、and/or、R&D，
+    #      硬套中文规则反而把文本改成中英混排、念得四不像。
+    if latin is None:
+        latin = _mostly_latin(s) and not tech
+    if latin:
+        s = RE_CJK_LATIN.sub(" ", s)
+        s = RE_LATIN_CJK.sub(" ", s)
+        s = RE_MULTI_SPACE.sub(" ", s)
+        s = re.sub(r"\s+([,.!?;:])", r"\1", s)
+        s = apply_pron(s, latin=True)
+        for i, _u in enumerate(urls):
+            s = s.replace("\x00U%d\x00" % i, "web link")
+        return s.strip()
 
     # 2) 日期 / 时间
     s = RE_DATE.sub(lambda m: f"{m.group(1)}年{int(m.group(2))}月{int(m.group(3))}日", s)
@@ -706,12 +732,105 @@ def _cut_is_safe(pos: int, spans: list) -> bool:
     return not any(st < pos < en for st, en in spans)
 
 
+# ---- 英文长句专用 ----------------------------------------------------------
+# 62 个汉字约念 13 秒，62 个英文字母却只有 11 个词、约 4 秒。沿用同一个字符
+# 上限，英文长句必然被剁成一串半截话（"…accessed through" / "a pointer…"）；
+# 更糟的是旧版把每个空格都当等价断点、取 limit 前最后一个，于是断在冠词、
+# 介词、助动词后面成了常态。下面两件事一起改：按词折算上限 + 给断点打分。
+
+RE_LATIN_WORD = re.compile(r"[A-Za-z]+(?:['’\-][A-Za-z]+)*")
+RE_LATIN_CHAR = re.compile(r"[A-Za-z]")
+
+# 不能结束一个呼吸组的词：断在它们后面，前半句听起来就是"话没说完"。
+EN_DANGLING = frozenset("""
+a an the this that these those his her its their our your my some any every each
+it he she we you they there one all both either neither
+no not very more most less least quite rather too also just even still only
+and or but nor yet so as than if while when because although though unless until
+of to in on at by for with from into through about between under over across
+within without via upon among toward towards against along around behind beyond
+besides during except inside outside near off onto out past per plus regarding
+is are was were be been being have has had do does did
+will would can could should may might must shall
+""".split())
+
+# 适合当新一段开头的词（从句 / 转折 / 介词短语的起点）
+EN_OPENER = frozenset("""
+that which who whom whose when where why how while because although though
+if unless since until before after as but and or so yet however therefore thus
+hence moreover nevertheless otherwise instead namely despite provided
+in on at by for with from to of through into about between under over across
+within without via the a an this these those it they we he she there
+""".split())
+
+
+def _mostly_latin(s: str) -> bool:
+    """是不是英文（而不是中文里夹了几个英文词）。"""
+    letters = [c for c in s if c.isalpha()]
+    return len(letters) >= 12 and len(RE_LATIN_CHAR.findall(s)) / len(letters) >= 0.72
+
+
+def _effective_limit(s: str, limit: int) -> int:
+    """英文按"词"折算字符上限；中文一律原样返回。"""
+    if not _mostly_latin(s):
+        return limit
+    cap = min(int(limit * 3.2), 240)        # 62 汉字 ≈ 200 英文字符
+    words = list(RE_LATIN_WORD.finditer(s))
+    wmax = max(12, int(limit * 0.55))       # 62 → 34 词，约 15 秒封顶
+    if len(words) > wmax:
+        cap = min(cap, words[wmax - 1].end())
+    return max(limit, min(len(s), cap))
+
+
+def _best_cut_en(s: str, limit: int, spans: list) -> int | None:
+    """在英文里挑一个"念得下去"的断点：优先标点后 / 从句前，绝不切在悬空词后。"""
+    n, scored = len(s), []
+    hard_cap = min(n, int(limit * 1.3))      # 为躲开烂断点，允许略微超长
+    for m in re.finditer(r"\s+", s):
+        pos = m.end()
+        if pos >= n or pos > hard_cap or not _cut_is_safe(pos, spans):
+            continue
+        left, right = s[:pos].rstrip(), s[pos:].lstrip()
+        if not left or not right:
+            continue
+        pm = re.search(r"([A-Za-z][A-Za-z'’\-]*)[^A-Za-z]*$", left)
+        pw = pm.group(1).lower() if pm else ""
+        nm = re.match(r"([A-Za-z][A-Za-z'’\-]*)", right)
+        nw = nm.group(1).lower() if nm else ""
+        tail = left[-1]
+        dangling = pw in EN_DANGLING
+        score = 10.0 * pos / max(limit, 1)  # 越靠后越好
+        if tail in ".!?":
+            score += 11
+        elif tail in ",;:":
+            score += 9
+        elif tail in "–—-":
+            score += 8
+        elif tail in ")]}\"'’":
+            score += 5
+        if nw in EN_OPENER:
+            score += 3
+        if dangling:
+            score -= 25                     # 悬空词后：几乎否决
+        if pos < limit * 0.55:
+            score -= 7
+        if pos > limit:
+            score -= 12.0 * (pos - limit) / max(limit, 1)
+        scored.append((score, pos, dangling))
+    if not scored:
+        return None
+    clean = [x for x in scored if not x[2]]
+    return max(clean or scored)[1]
+
+
 def _best_cut(s: str, limit: int, spans: list) -> int:
     """在 (0, limit] 内挑一个最靠后的"干净"断点。
 
     优先顺序天然由位置决定：越靠后越好，但只认像样的断点（软标点 / 书名引号收尾 /
-    英文空格），而且不能落在成对符号内部。
+    英文空格），而且不能落在成对符号内部。英文改走语义打分版，别再砍在冠词后面。
     """
+    if _mostly_latin(s):
+        return _best_cut_en(s, limit, spans) or limit
     cands = []
     for i in range(min(limit, len(s) - 1)):
         if s[i] in SOFT_BREAK or s[i] in CLOSERS or s[i] == " ":
@@ -734,8 +853,8 @@ def _best_cut(s: str, limit: int, spans: list) -> int:
     return limit
 
 
-def _hard_split(s: str, limit: int) -> tuple:
-    """超长句按软停顿处切开，返回 (片段列表, 是否发生过硬切)。"""
+def _hard_split_legacy(s: str, limit: int) -> tuple:
+    """中文 / 混排：按软标点预切，再对超长 token 找干净断点（规则成熟，不动）。"""
     if len(s) <= limit:
         return [s], False
     parts, buf, cut = [], "", False
@@ -758,6 +877,30 @@ def _hard_split(s: str, limit: int) -> tuple:
         buf = token
     if buf:
         parts.append(buf)
+    return parts, cut
+
+
+def _hard_split(s: str, limit: int) -> tuple:
+    """超长句切开，返回 (片段列表, 是否发生过硬切)。
+
+    英文：折算上限 + 断点语义打分；中文完全沿用旧逻辑，保证既有断句零退化。
+    """
+    if not _mostly_latin(s):
+        return _hard_split_legacy(s, limit)
+    eff = _effective_limit(s, limit)
+    if len(s) <= eff:
+        return [s], False
+    parts, rest, cut, guard = [], s, False, 0
+    while len(rest) > eff and guard < 40:
+        guard += 1
+        k = _best_cut_en(rest, eff, _paired_spans(rest))
+        if not k or not 0 < k < len(rest):
+            k = rest.rfind(" ", 0, eff + 1) + 1 or eff
+        parts.append(rest[:k])
+        rest = rest[k:]
+        cut = True
+    if rest:
+        parts.append(rest)
     return parts, cut
 
 
@@ -1291,11 +1434,13 @@ def prepare(raw: str, max_len: int = 62, min_len: int = 9, do_normalize: bool = 
         t = clean_inline(b["text"])
         if not t:
             continue
-        t = normalize(t, do_normalize)
+        is_latin = _mostly_latin(t)
+        t = normalize(t, do_normalize, latin=is_latin)
         # 括号注释会被读法规整改写成逗号分隔（"占比（Top10）68%）" -> "...，Top10..."），
         # 于是整段可能以逗号/顿号收尾。朗读时那是个"话没说完"的半截停顿，
-        # 听起来很怪；补成句号，分句和停顿都干脆。
-        t = re.sub(r"[，,、：:；;]+$", "。", t)
+        # 听起来很怪；补成句号，分句和停顿都干脆。英文用半角句号，别冒出中文「。」。
+        t = (re.sub(r"[,:;]+$", ".", t) if is_latin else
+             re.sub(r"[，,、：:；;]+$", "。", t))
         # 纯标点/分隔线的 block（"."、*** 之后剩下的 "。"）没有可念的内容，
         # 不进朗读稿：合成器会拒绝它，播放器还会卡死在这一句上。
         if t and speakable(t):
