@@ -133,7 +133,7 @@ DEFAULT_CONFIG = {
     "extra_ports": [8756],
 }
 
-ENGINE_VERSION = "1.13.1"
+ENGINE_VERSION = "1.13.2"
 
 # --------------------------------------------------------------------------
 # 本机引擎注册表：两套 TTS 都能用同一个 /v1/audio/speech 约定，切换只改配置
@@ -274,6 +274,7 @@ FEATURES = [
     "qwen3-tts",            # 第三套本机引擎 Qwen3-TTS 1.7B：9 把官方音色，逐把可切
     "markdown-readaloud",   # .md 导入 + 结构渲染 + 通勤/平衡/精读三档朗读稿
     "en-semantic-split",    # 英文按词折算长度 + 语义断点打分；英文段落不套中文读音规整
+    "pdf-text-cleanup",     # 英文 PDF 断词/折行修复 + 英文章节目录 + 页码页眉噪音清除
     "engine-upgrade",       # /api/restart + /api/update：原地热重启、git pull 自升级
 ]
 

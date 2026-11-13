@@ -28,6 +28,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from collections import Counter
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
@@ -97,6 +98,13 @@ RE_CHAPTER = re.compile(
     r"^\s*#{0,6}\s*"
     r"(?:第[0-9〇零一二三四五六七八九十百千万两]+\s*[章回卷节部篇话幕]"
     r"|Chapter\s+[0-9]+|CHAPTER\s+[0-9]+|Chapter\s+[IVXLivxl]+"
+    r"|Part\s+(?:[0-9]+|[IVXivx]+)|PART\s+(?:[0-9]+|[IVXIVX]+)"
+    r"|Appendix\s+[A-Z0-9]+|Section\s+[0-9]+(?:\.[0-9]+)*"
+    r"|Prologue|Epilogue|Preface|Foreword"
+    # 英文技术书的编号节："1. Introduction"、"2.3 Concurrency"。
+    # 限制两位数字 + 大写开头 + 行内无句末标点，正文折行、有序列表外的句子
+    # 都不会凑巧长这样。
+    r"|[0-9]{1,2}(?:\.[0-9]{1,2}){0,2}\s+[A-Z][^。！？.!?\n]{2,60}\s*$"
     r"|序章|楔子|引子|尾声|终章|后记|番外[篇集]?)"
     r"[\s：:·、．.\-—]*[^。！？\n]{0,48}\s*$")
 RE_HR = re.compile(r"^\s{0,3}([-*_])\s*(\1\s*){2,}$")
@@ -228,25 +236,39 @@ def load_pron() -> dict:
     return data
 
 
+_pron_pat_cache: dict = {}          # {(词典对象 id, tech, latin): 已编译的替换 pattern}
+
+
 def apply_pron(text: str, tech: bool = False, latin: bool = False) -> str:
-    d = dict(load_pron())
+    base = load_pron()
     if tech:
+        d = dict(base)
         d.update(TECH_PRON)
-    if latin:
+    elif latin:
         # 英文书里别套中文发音（C++ -> "C 加加"、.NET -> "道耐特"），
         # K8s -> Kubernetes 这类通用转写和用户自定义词典照常生效。
-        for k, v in list(d.items()):
-            if k in DEFAULT_PRON and re.search(r"[\u3400-\u9fff]", v):
-                d.pop(k, None)
+        d = {k: v for k, v in base.items()
+             if not (k in DEFAULT_PRON and re.search(r"[\u3400-\u9fff]", v))}
+    else:
+        d = base
     if not d:
         return text
-    pat = re.compile("|".join(re.escape(k) for k in sorted(d, key=len, reverse=True)))
+    # pattern 按（词典身份, 模式）缓存：load_pron 按 mtime 返回同一对象，
+    # 于是整本书逐块 prepare 时不用每块都重新编译上百个键的大正则
+    # （几千块就是几秒的纯浪费）；词典文件一改，身份变了自然重编。
+    key = (id(base), tech, latin)
+    pat = _pron_pat_cache.get(key)
+    if pat is None:
+        pat = re.compile("|".join(re.escape(k) for k in sorted(d, key=len, reverse=True)))
+        if len(_pron_pat_cache) > 4:
+            _pron_pat_cache.clear()
+        _pron_pat_cache[key] = pat
     return pat.sub(lambda m: d[m.group(0)], text)
 
 
 # ---------------------------------------------------------------- 1) 结构解析
 
-RE_LINE_PARA_END = re.compile(r"[。！？…”’』」）)]\s*$")
+RE_LINE_PARA_END = re.compile(r"[。！？…”’』」）).!?\"']\s*$")
 
 
 def _looks_like_line_paragraphs(s: str) -> bool:
@@ -277,6 +299,7 @@ RE_CJK_CHAR = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 _TITLE_BAD_TAIL = "。！？…”’」，、；：,;:."
 _TITLE_BAD_HEAD = "“”‘’「」『』\"'《》（）()【】[]，。、；：！？·—-"
 RE_TITLE_NOISE = re.compile(r"[0-9@/\\|<>{}\[\]=+~^*_（）()]")
+RE_SENT_TAIL = re.compile(r"[。！？!?.;；…]$")
 
 
 def _title_like(t: str, min_len: int = 2) -> bool:
@@ -290,7 +313,16 @@ def _title_like(t: str, min_len: int = 2) -> bool:
         return False
     if any(ch in t for ch in "。！？…"):
         return False
-    return len(RE_CJK_CHAR.findall(t)) / len(t) >= 0.6
+    cjk = len(RE_CJK_CHAR.findall(t)) / len(t)
+    if cjk >= 0.6:
+        return True
+    # 英文短行也能当篇名（Introduction / Preface）：
+    # 首字母大写、行内没有句末标点、字母占比高。中文规则放宽到英文书，
+    # 否则英文技术书的目录启发式一行都认不出来。
+    letters = [c for c in t if c.isalpha()]
+    return (len(t) >= 6 and letters
+            and len(RE_LATIN_CHAR.findall(t)) / len(letters) >= 0.7
+            and t[0].isupper() and not RE_SENT_TAIL.search(t))
 
 
 def _norm_title(t: str) -> str:
@@ -416,11 +448,70 @@ def _fill_missing_titles(seq: list, title_idx: set, toc_runs: list) -> dict:
     return synth
 
 
+# ---------------------------------------------------------------- PDF 文本修复
+# PDF / EPUB 抽出来的英文正文有三类"非内容"痕迹，直接朗读全是噪音：
+#   ① 单词被硬折行断成两半："typi-\ncally" 念出来是两个假词；
+#   ② 段落被页宽切成一行行（行尾没有标点），句子里塞满换行；
+#   ③ 每页一行的页码 / 页眉："42"、"A Tour of C++"，整本书重复几百遍。
+RE_PAGE_NUM = re.compile(r"\d{1,4}")
+RE_FLOW_END = re.compile(r"[A-Za-z,;:!?\"'\)\]]\s*$")
+RE_FLOW_HEAD = re.compile(r"^\s*[A-Za-z(\"']")
+
+
+def _is_struct_line(ln: str) -> bool:
+    """这一行是不是结构行（标题 / 列表 / 引用 / 表格 / 分隔线 / 代码围栏）。"""
+    return bool(RE_CHAPTER.match(ln) or RE_HEADING.match(ln) or RE_LIST.match(ln)
+                or RE_QUOTE.match(ln) or RE_HR.match(ln) or RE_FENCE.match(ln)
+                or RE_TABLE.match(ln))
+
+
+def _strip_running_headers(s: str) -> str:
+    """把每页都出现的那一两行页眉（书名 / 部名）替换成空行。
+
+    判定条件刻意保守：书够长（≥300 非空行）且同一行（6~48 字符、不带
+    句末标点）完全相同地出现 ≥6 次——正文里没有这样的行，页眉却全书都是。
+    """
+    nonempty = [l.strip() for l in s.split("\n") if l.strip()]
+    if len(nonempty) < 300:
+        return s
+    bad = {t for t, c in Counter(nonempty).items()
+           if c >= 6 and 6 <= len(t) <= 48 and not RE_SENT_TAIL.search(t)}
+    if not bad:
+        return s
+    return "\n".join(l if l.strip() not in bad else "" for l in s.split("\n"))
+
+
+def _latin_join_lines(s: str) -> str:
+    """英文专用：拼回断词、把段内硬折行折叠成空格。
+
+    空行（段落边界）和结构行（标题 / 列表 / 引用 / 表格）一律不动，
+    于是既有段落停顿不丢，章节也还能被认出来。
+    """
+    if "\n" not in s:
+        return s
+    # ① 断词：行尾连字符 + 换行 + 小写续行 → 拼回一个词
+    s = re.sub(r"([A-Za-z])-\n(?=[a-z])", r"\1", s)
+    # ② 折行：上一行以流内字符收尾、下一行以字母/引号开头且不是结构行 → 合并
+    out = []
+    for ln in s.split("\n"):
+        prev = out[-1] if out else ""
+        if (out and ln.strip() and prev.strip()
+                and not _is_struct_line(ln)
+                and RE_FLOW_END.search(prev) and RE_FLOW_HEAD.match(ln)):
+            out[-1] = prev.rstrip() + " " + ln.strip()
+        else:
+            out.append(ln)
+    return "\n".join(out)
+
+
 def parse_blocks(raw: str) -> list:
     """把原始文本切成有类型的块：[{kind, text}]，kind ∈ heading/list/quote/para。"""
     s = (raw or "").replace("\r\n", "\n").replace("\r", "\n")
     s = RE_FRONTMATTER.sub("", s)            # 去掉 YAML front matter
     s = RE_INVISIBLE.sub("", s)
+    s = _strip_running_headers(s)            # PDF 页眉（全书重复的短行）不读
+    if _mostly_latin(s):
+        s = _latin_join_lines(s)             # 英文：拼回断词、折叠段内折行
     if _looks_like_line_paragraphs(s):
         # 一行一段（大量中文小说 TXT 就是这样，全文一个空行都没有）：
         # 不补空行的话整本书会被拼成"一个段落"，段落停顿全丢，
@@ -453,6 +544,9 @@ def parse_blocks(raw: str) -> list:
             continue
         if not line.strip():
             flush()
+            continue
+        if RE_PAGE_NUM.fullmatch(line.strip()):
+            flush()                           # 独立的页码行：念出来只有噪音
             continue
         if ln_no in drop_idx:                 # 目录行本身不读（正文里还有同名的篇章标题）
             flush()

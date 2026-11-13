@@ -244,6 +244,38 @@ print("   逐句稿：")
 for i, it in enumerate(p["items"], 1):
     print(f"     {i:2}. [{it['kind']:7} 停{it['pause']:4}ms 速{it['rate']:+3}%] {it['text']}")
 
+print("=== 5.5) PDF 文本修复（英文书的另一类来源问题）===")
+# ① 断词：PDF 硬折行把单词断成两半（typi-\ncally），念出来是两个假词
+hyph = ("When a class is a resource handle, the default memberwise copy is typi-\n"
+        "cally a disaster, and the destructor would delete the object twice\n"
+        "when it goes out of scope.")
+hyph_seg = " ".join(N.prepare(hyph, markdown=False)["segments"])
+check("断词拼回完整单词", "typically a disaster" in hyph_seg, True)
+check("段内折行折叠成空格", "\n" not in hyph_seg, True)
+# ② 英文章节：Part / Appendix / "1.1 xxx" 以前全被当正文，目录出不来
+enbook = N.prepare("Chapter 1 The Basics\n\nSome text follows here and continues.\n\n"
+                   "1.1 Hello World\n\nMore sample text that goes on for a while here.\n\n"
+                   "Part II Abstraction\n\nA longer paragraph of text follows the part heading.\n\n"
+                   "Appendix A Language Details\n\nThe final section of the book sits here now.\n",
+                   markdown=False)
+check("英文章节全部识别为标题",
+      [b["text"] for b in enbook["blocks"] if b["kind"] == "heading"],
+      ["Chapter 1 The Basics", "1.1 Hello World", "Part II Abstraction",
+       "Appendix A Language Details"])
+check("英文正文数字行不被当标题",
+      all(b["kind"] == "para" for b in
+          N.prepare("He bought 3.5 million copies in 2020 and the line goes like prose text here.",
+                    markdown=False)["blocks"]), True)
+# ③ 页码 / 页眉：念出来只有噪音
+check("独立页码行不读", N.prepare("正文第一句。\n\n42\n\n正文第二句继续。", markdown=False)["segments"],
+      ["正文第一句。", "正文第二句继续。"])
+hdr = "".join(f"Page {i} content follows here with enough real text.\n\nA Tour of C++\n\n"
+              for i in range(120))
+check("全书重复页眉被清掉", "A Tour of C++" not in N.prepare(hdr, markdown=False)["text"], True)
+check("中文段落数字正文不受影响",
+      N.prepare("2020年很冷。3.5 亿元的投资落了地。", markdown=False)["segments"],
+      ["2020年很冷。", "3.5 亿元的投资落了地。"])
+
 print("=== 6) 音色推荐 ===")
 r1 = N.recommend_voice("本季度 API 接口的部署配置与服务器日志需要统一。")
 r2 = N.recommend_voice("那年夏天，他背着包出发了，故事就这样开始了。")

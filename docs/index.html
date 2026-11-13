@@ -1688,8 +1688,8 @@ async function loadHealth() {
 const REQUIRED_FEATURES = ['structured-items', 'prosody-normalize', 'local-document-import',
   'bookshelf', 'tts-provider', 'presynth-hold', 'presynth-resume', 'remote-audio',
   'task-monitor', 'task-stop', 'tts-engine-switch', 'moss-voices', 'qwen3-tts',
-  'markdown-readaloud', 'en-semantic-split'];
-const MIN_ENGINE = '1.13.1';    // 页面用到的引擎能力下限，升一次改一次
+  'markdown-readaloud', 'en-semantic-split', 'pdf-text-cleanup'];
+const MIN_ENGINE = '1.13.2';    // 页面用到的引擎能力下限，升一次改一次
 
 function cmpVer(a, b) {
   const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
